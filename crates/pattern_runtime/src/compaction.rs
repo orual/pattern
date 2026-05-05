@@ -460,8 +460,19 @@ async fn generate_summary(
         .with_capture_content(true)
         .with_capture_reasoning_content(true);
 
+    // Pre-populate `system_blocks` (NOT the legacy `chat.system` field) so
+    // the Anthropic shaper's preserve-branch keeps our content intact and
+    // only prepends slot[0] (routing literal). If we used `with_system`,
+    // the shaper would see `system_blocks = None`, build a full
+    // slot[0]+slot[1]+slot[2] from `ctx.persona` (None) + `DEFAULT_BASE_INSTRUCTIONS`,
+    // and assign that to `system_blocks` — which is then "authoritative,
+    // replaces chat.system" per the genai anthropic adapter, dropping our
+    // `with_system` content silently. The model would see the agent's main
+    // instructions but no summarization prompt — and produce empty output.
     let req = CompletionRequest::new(summarization_model)
-        .with_system(&system)
+        .with_system_blocks(vec![pattern_core::types::provider::SystemBlock::new(
+            system,
+        )])
         .with_messages(messages)
         .with_options(chat_options);
 

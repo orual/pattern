@@ -243,7 +243,24 @@ fall back to (a) or hard error with a clear message.
 Recommended start: (a) + (c) for diagnosability. (b) belongs in a
 follow-up that ties into depth-≥1 summary rollups.
 
-### (3) Self-summarization with main-model cache reuse
+### (3) Self-summarization with main-model cache reuse — **PRIORITY**
+
+**Status (2026-05-04):** promoted from "interesting future work" to
+"this is how it should work, per claude-code reference implementation."
+See `~/Git_Repos/claude-code/services/compact/compact.ts:1136-1200`
+(`streamCompactSummary` → `runForkedAgent`). CC uses
+`mainLoopModel` for compaction (NOT haiku), forks the main agent with
+`maxTurns: 1`, reuses the main thread's cache via `cacheSafeParams`
+(identical system + tools + messages prefix + thinking config), skips
+cache-write to avoid polluting the main thread's cache, and falls back
+to a non-cached streaming path on failure.
+
+The earlier framing of this as a cost/quality tradeoff was wrong — for
+any user on Anthropic Max subscription routing, this isn't optional,
+it's the only sensible architecture. Haiku-as-summarizer has no cache
+benefit (different model = different cache key = full miss), needs
+its own model-specific prompt tuning, and produces lower-quality
+summaries that don't carry the agent's voice.
 
 **Idea.** Use the main agent model (e.g., opus-4-6) to summarize its
 own conversation, leveraging Anthropic's prompt cache so the bulk of
@@ -322,6 +339,32 @@ if summarization_model.is_none()
 in context). `generate_summary_external` builds a separate request to
 the summarizer model; produces a **chunk-only** summary (narrower view).
 These are semantically different — both have value.
+
+**CC-derived implementation discipline (mandatory for the self path):**
+
+- Reuse the gate-counted `CompletionRequest` as the cache anchor —
+  same system, same tools, same messages prefix, same thinking config.
+  Any divergence breaks cache identity.
+- Append the summarization directive as a final user message. Do not
+  swap the system block.
+- **Do NOT set `max_tokens` on the summarization request.** CC notes
+  this clamps `budget_tokens` and creates a thinking-config mismatch
+  that invalidates the cache.
+- `maxTurns: 1` — the summarizer should produce one assistant message
+  and stop. No tool dispatch.
+- `skipCacheWrite: true` equivalent — don't pollute the main thread's
+  cache slot with the summary request's marker. (Anthropic's
+  cache-control breakpoint is per-request; this concretely means: do
+  not set `cache_control` on the new appended user message.)
+- Fall back to a non-cached path on failure (e.g., transient
+  cache-miss errors). The fallback can route through
+  `generate_summary_external` to a configured fallback model, or
+  retry the self path without cache assumptions.
+
+**Cost model on subscription:** the entire mechanism is essentially
+free under Max — opus quota covers it, cache hit means most input
+tokens read at cache rates. This is the canonical solution for
+subscription users, not a cost optimization.
 
 ### (4) Cache-residency keepalive (companion to #3)
 

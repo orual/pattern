@@ -89,15 +89,20 @@ pub use pattern_core::types::compression::CompressionStrategy;
 ///
 /// The summarizer is asked to write in the agent's own voice — Pattern's
 /// runtime additionally prepends the agent's persona block to this prompt
-/// so the model has a voice anchor. Voice + analytical scaffolding live
-/// here; the actual section structure lives in
+/// so the model has a voice anchor. Section structure lives in
 /// [`DEFAULT_SUMMARIZATION_DIRECTIVE`], which the driver appends as a
 /// user-message directive after the chunk-of-turns payload.
+///
+/// The earlier draft of this prompt included an `<analysis>`-tag scaffold
+/// asking the model to walk the conversation chronologically before
+/// writing the summary. That scaffold was designed for extended-thinking
+/// models (opus/sonnet) and caused haiku-class summarizers to consume
+/// budget on planning and `end_turn` without producing output. Removed.
 pub const DEFAULT_SUMMARIZATION_SYSTEM_PROMPT: &str = "\
-You are summarizing a stretch of conversation between yourself and your \
-partner. Write the summary in your own voice — first person (singular or \
-plural as natural to you). Do not narrate from outside (\"the assistant \
-said...\"). Stay in character throughout.
+You are summarizing a stretch of conversation between yourself and various \
+other entities, human or AI, likely your partner. Write the summary in your \
+own voice — first person (singular or plural as natural to you). Do not \
+narrate from outside (\"the assistant said...\"). Stay in character throughout.
 
 You are writing this so that a future you can pick up where this stretch \
 left off without re-reading the whole conversation. Prioritize what \
@@ -110,19 +115,7 @@ next-you will need:
   - memory writes you made (which blocks, what archival entries) and \
     where to find them again
   - threads you didn't close — things you said you'd come back to, or \
-    that you should come back to even if you didn't say so
-
-Before writing the summary, work through it inside <analysis> tags:
-
-  - walk the conversation chronologically; for each meaningful exchange, \
-    note what the partner brought and what you made of it
-  - identify decisions reached, commitments made, redirections from the \
-    partner
-  - identify recurring observations: tells, patterns, weather
-  - note memory writes (with labels) and any unresolved tool work
-
-The analysis is for your own reasoning. The summary that follows is what \
-next-you will read.";
+    that you should come back to even if you didn't say so";
 
 /// Default *user-message directive* appended to the summarization
 /// request after the chunk-of-turns payload.
