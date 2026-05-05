@@ -202,6 +202,27 @@ impl JjAdapter {
     /// where a top-level `.git/` would cause the host git to treat the mount
     /// directory as a nested repository, and harmless for Standalone mode (which has
     /// no host VCS to conflict with).
+    /// Clone a git repository via `jj git clone`.
+    pub fn git_clone(&self, url: &str, dest: &Path) -> JjResult<()> {
+        let output = std::process::Command::new(&self.binary)
+            .args(["git", "clone", url, &dest.to_string_lossy()])
+            .output()
+            .map_err(|e| JjError::SubprocessFailed {
+                command: format!("jj git clone {} {}", url, dest.display()),
+                status: -1,
+                stderr: e.to_string(),
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(JjError::SubprocessFailed {
+                command: format!("jj git clone {} {}", url, dest.display()),
+                status: output.status.code().unwrap_or(-1),
+                stderr: stderr.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn init_repo(&self, path: &Path) -> JjResult<()> {
         let _guard = self.mutation_lock.lock().map_err(|_| poisoned())?;
         let output = self

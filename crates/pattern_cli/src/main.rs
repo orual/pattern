@@ -54,7 +54,7 @@ fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
     let paths = Arc::new(PatternPaths::default_paths()
         .map_err(|e| miette::miette!("failed to resolve pattern paths: {e}"))?);
     let project_dir = std::env::current_dir().ok();
-    let reg = PluginRegistry::load(paths, project_dir)
+    let reg = PluginRegistry::load(paths.clone(), project_dir)
         .map_err(|e| miette::miette!("failed to load plugin registry: {e}"))?;
 
     match cmd.sub {
@@ -62,6 +62,43 @@ fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
             let scope = match scope.as_str() {
                 "project" => pattern_core::plugin::PluginScope::Project { private: false },
                 _ => pattern_core::plugin::PluginScope::Global,
+            };
+            // If the path looks like a git URL, clone it first.
+            let path = if let Some(url) = path.to_str() {
+                if url.starts_with("https://") || url.starts_with("git@") || url.starts_with("ssh://") || url.ends_with(".git") {
+                    let cache_base = paths.plugins_cache_root();
+                    std::fs::create_dir_all(&cache_base)
+                        .map_err(|e| miette::miette!("failed to create cache dir: {e}"))?;
+                    let clone_name = url.rsplit('/').next().unwrap_or("plugin").trim_end_matches(".git");
+                    let clone_path = cache_base.join(format!(".clone-{clone_name}"));
+                    if clone_path.exists() {
+                        std::fs::remove_dir_all(&clone_path).ok();
+                    }
+                    println!("Cloning {url}...");
+                    // Try jj first, fall back to git.
+                    let jj_result = pattern_memory::jj::JjAdapter::detect()
+                        .ok()
+                        .flatten()
+                        .map(|jj| jj.git_clone(url, &clone_path));
+                    match jj_result {
+                        Some(Ok(())) => {},
+                        _ => {
+                            let output = std::process::Command::new("git")
+                                .args(["clone", "--depth=1", url, &clone_path.to_string_lossy()])
+                                .output()
+                                .map_err(|e| miette::miette!("git clone failed: {e}"))?;
+                            if !output.status.success() {
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                return Err(miette::miette!("git clone failed: {stderr}"));
+                            }
+                        }
+                    }
+                    clone_path
+                } else {
+                    path
+                }
+            } else {
+                path
             };
             // Try direct install first. If no manifest found, scan subdirectories.
             match reg.install(InstallSource::LocalPath(&path), scope.clone()) {
