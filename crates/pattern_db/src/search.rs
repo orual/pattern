@@ -390,6 +390,11 @@ impl<'a> HybridSearchBuilder<'a> {
     #[allow(non_snake_case)]
     fn run_fts_search(&self, query: &str) -> DbResult<Vec<(SearchContentType, FtsMatch)>> {
         let agent_id = self.filter.agent_id.as_deref();
+        let msgs_id = self.filter.agent_id.as_deref().map(|a| {
+            a.rsplit_once(':')
+                .and_then(|(_, a)| Some(a))
+                .unwrap_or(agent_id.expect("if we're on this path, filter.agent_id better be Some"))
+        });
         // Fetch more than limit to allow for fusion.
         let fetch_limit = self.limit * 2;
 
@@ -397,7 +402,7 @@ impl<'a> HybridSearchBuilder<'a> {
 
         match self.filter.content_type {
             Some(SearchContentType::Message) => {
-                let msgs = fts::search_messages(self.conn, query, agent_id, fetch_limit)?;
+                let msgs = fts::search_messages(self.conn, query, msgs_id, fetch_limit)?;
                 results.extend(msgs.into_iter().map(|m| (SearchContentType::Message, m)));
             }
             Some(SearchContentType::MemoryBlock) => {
@@ -418,7 +423,7 @@ impl<'a> HybridSearchBuilder<'a> {
             }
             None => {
                 // Search all types.
-                let msgs = fts::search_messages(self.conn, query, agent_id, fetch_limit)?;
+                let msgs = fts::search_messages(self.conn, query, msgs_id, fetch_limit)?;
                 let blocks = fts::search_memory_blocks(self.conn, query, agent_id, fetch_limit)?;
                 let entries = fts::search_archival(self.conn, query, agent_id, fetch_limit)?;
 

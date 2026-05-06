@@ -87,10 +87,15 @@ impl MailboxInput {
 ///
 /// Holds the receiving half of an unbounded tokio mpsc channel under a
 /// tokio mutex (T3's drain task awaits across `recv`, so a `std`
-/// mutex would deadlock the runtime). Senders are produced via
-/// [`Mailbox::sender`] and freely cloned — the [`AgentRegistry`] (T4)
-/// hands them out to other sessions wanting to deliver a message to
-/// this agent.
+/// mutex would deadlock the runtime). Senders deliver via
+/// [`Mailbox::send_input`] which atomically pushes onto the channel
+/// and bumps a `pending` counter; the drain loop calls
+/// [`Mailbox::note_consumed`] on receipt. Holding `Arc<Mailbox>`
+/// (rather than a raw `tokio::sync::mpsc::UnboundedSender` clone) is
+/// the only way to enqueue: the public API does not expose the raw
+/// sender precisely because raw sends bypass the counter and underflow
+/// it on the next `note_consumed` — that bug used to lock the runtime
+/// into "single-turn mode" forever after the first wake fired.
 ///
 /// The mailbox itself does not drive any turn loop — the
 /// [`MailboxTask`] (T3) owns the receiver guard for as long as the
@@ -109,24 +114,20 @@ pub struct Mailbox {
 impl Mailbox {
     /// Construct a fresh mailbox for `persona_id`.
     ///
-    /// Returns the boxed mailbox alongside an extra sender clone for
-    /// the registry to hand out — callers wanting more sender clones
-    /// later use [`Self::sender`].
-    pub fn new(persona_id: PersonaId) -> (Arc<Self>, mpsc::UnboundedSender<MailboxInput>) {
+    /// Returns the mailbox in an `Arc` (cheap to clone — every holder
+    /// that wants to enqueue activations holds an `Arc<Mailbox>` and
+    /// dispatches via [`Self::send_input`]). The second tuple element
+    /// is a `()` placeholder retained for source-stability with prior
+    /// callers that pattern-match `(mbx, _)`.
+    pub fn new(persona_id: PersonaId) -> (Arc<Self>, ()) {
         let (tx, rx) = mpsc::unbounded_channel();
         let mbx = Arc::new(Self {
-            tx: tx.clone(),
+            tx,
             rx: Mutex::new(rx),
             persona_id,
             pending: std::sync::atomic::AtomicUsize::new(0),
         });
-        (mbx, tx)
-    }
-
-    /// Clone of the sender half — hand out to peers that want to send
-    /// activations to this session.
-    pub fn sender(&self) -> mpsc::UnboundedSender<MailboxInput> {
-        self.tx.clone()
+        (mbx, ())
     }
 
     /// The persona this mailbox belongs to. Used for observability
@@ -150,9 +151,12 @@ impl Mailbox {
         self.rx.blocking_lock()
     }
 
-    /// Enqueue an input and bump the pending counter.
-    /// Callers that bypass this (using the raw sender) must call
-    /// [`note_enqueued`] themselves.
+    /// Enqueue an input and bump the pending counter atomically.
+    /// This is the only sanctioned enqueue path — bypassing it (e.g.
+    /// via a raw `mpsc::UnboundedSender` clone) leaves the channel
+    /// queue and the counter out of sync, and the next
+    /// [`Self::note_consumed`] will underflow `pending` to
+    /// `usize::MAX`.
     pub fn send_input(
         &self,
         input: MailboxInput,
@@ -168,13 +172,6 @@ impl Mailbox {
     pub fn note_consumed(&self) {
         self.pending
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Bump the pending counter (for callers that send via a raw sender
-    /// clone rather than [`send_input`]).
-    pub fn note_enqueued(&self) {
-        self.pending
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Check whether there are pending messages waiting to be drained.
@@ -322,7 +319,9 @@ async fn mailbox_task_body(
             drive_step(turn_input, ctx_c, hist_c, cp, disp.as_ref(), &pre, None).await
         });
         match step_handle.await {
-            Ok(Ok(_reply)) => {}
+            Ok(Ok(reply)) => {
+                tracing::info!("drive_step completed successfully, reply: {reply:?}");
+            }
             Ok(Err(err)) => {
                 tracing::warn!(
                     error = ?err,
@@ -379,34 +378,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sender_clones_deliver_into_same_inbox() {
-        let (mbx, tx_a) = Mailbox::new(PersonaId::from("agent-a"));
-        let tx_b = mbx.sender();
+    async fn send_input_delivers_into_inbox_and_tracks_pending() {
+        let (mbx, _) = Mailbox::new(PersonaId::from("agent-a"));
 
-        tx_a.send(MailboxInput {
+        mbx.send_input(MailboxInput {
             from: test_origin(),
             msg: test_message("from-a"),
             delivery: DeliveryMode::Queue,
         })
         .unwrap();
-        tx_b.send(MailboxInput {
+        mbx.send_input(MailboxInput {
             from: test_origin(),
             msg: test_message("from-b"),
             delivery: DeliveryMode::Queue,
         })
         .unwrap();
 
+        // Two messages enqueued — pending counter must reflect that.
+        assert!(mbx.has_pending(), "pending must be set after two sends");
+
         let mut rx = mbx.lock_rx().await;
         let first = rx.recv().await.expect("first input");
+        mbx.note_consumed();
         let second = rx.recv().await.expect("second input");
+        mbx.note_consumed();
         let t1 = first.msg.chat_message.content.first_text().unwrap();
         let t2 = second.msg.chat_message.content.first_text().unwrap();
         assert_eq!((t1, t2), ("from-a", "from-b"));
+        assert!(
+            !mbx.has_pending(),
+            "pending must clear after both note_consumed calls"
+        );
     }
 
     #[tokio::test]
     async fn persona_id_is_preserved() {
-        let (mbx, _tx) = Mailbox::new(PersonaId::from("anchor"));
+        let (mbx, _) = Mailbox::new(PersonaId::from("anchor"));
         assert_eq!(mbx.persona_id().as_str(), "anchor");
     }
 
@@ -482,10 +489,9 @@ mod tests {
         );
 
         // Hand the mailbox a single Message activation.
-        let sender = ctx.mailbox().sender();
         let body = test_message("hello mailbox");
-        sender
-            .send(MailboxInput {
+        ctx.mailbox()
+            .send_input(MailboxInput {
                 from: MessageOrigin::new(
                     Author::Agent(pattern_core::types::origin::AgentAuthor {
                         agent_id: "agent-peer".into(),
@@ -610,11 +616,9 @@ mod tests {
             pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
         );
 
-        let sender = ctx.mailbox().sender();
-
         // Input 1: triggers the panicking turn (tool_use response → dispatcher panics).
-        sender
-            .send(MailboxInput {
+        ctx.mailbox()
+            .send_input(MailboxInput {
                 from: MessageOrigin::new(
                     Author::System {
                         reason: SystemReason::Timer,
@@ -647,8 +651,8 @@ mod tests {
         let history_before = turn_history.lock().unwrap().active_len();
 
         // Input 2: a plain message that should be processed by the surviving drain loop.
-        sender
-            .send(MailboxInput {
+        ctx.mailbox()
+            .send_input(MailboxInput {
                 from: MessageOrigin::new(
                     Author::System {
                         reason: SystemReason::Timer,

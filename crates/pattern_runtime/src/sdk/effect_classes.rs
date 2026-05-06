@@ -15,7 +15,7 @@ pub struct ConstructorClass {
     pub runtime_check: RuntimeClassCheck,
 }
 
-/// Canonical classification table. 73 entries.
+/// Canonical classification table. 76 entries.
 pub const ALL_CLASSES: &[ConstructorClass] = &[
     // ── Pattern.Memory (10) ──────────────────────────────────────────────
     ConstructorClass {
@@ -566,6 +566,25 @@ pub const ALL_CLASSES: &[ConstructorClass] = &[
     ConstructorClass {
         module: "Constellation",
         constructor: "Groups",
+        class: EffectClass::Observe,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
+    // ── Pattern.Web (3) ─────────────────────────────────────────────────
+    ConstructorClass {
+        module: "Web",
+        constructor: "WebSearch",
+        class: EffectClass::Observe,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
+    ConstructorClass {
+        module: "Web",
+        constructor: "WebFetch",
+        class: EffectClass::Observe,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
+    ConstructorClass {
+        module: "Web",
+        constructor: "WebFetchContinue",
         class: EffectClass::Observe,
         runtime_check: RuntimeClassCheck::Enforce,
     },

@@ -304,6 +304,7 @@ fn run_eval(
         FrontingHandler,
         PortHandler,
         crate::sdk::handlers::ConstellationHandler,
+        crate::sdk::handlers::WebHandler::new(),
     ];
 
     // Coerce the owned PathBufs into the &[&Path] slice

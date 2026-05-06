@@ -10,8 +10,10 @@ use std::sync::Arc;
 use tidepool_effect::{EffectContext, EffectHandler};
 
 use pattern_core::CapabilitySet;
+use pattern_core::types::ids::PersonaId;
 use pattern_core::types::snapshot::PersonaSnapshot;
 use pattern_runtime::NopProviderClient;
+use pattern_runtime::mailbox::Mailbox;
 use pattern_runtime::policy::CAPABILITY_DENIED_PREFIX;
 use pattern_runtime::sdk::handlers::WakeHandler;
 use pattern_runtime::sdk::handlers::wake::WAKE_REGISTRY_MISSING_PREFIX;
@@ -40,9 +42,9 @@ async fn build_session_opts(
         tokio::runtime::Handle::current(),
     );
     let ctx = if wire_registry {
-        let (mailbox_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (mailbox, _) = Mailbox::new(PersonaId::from("wake-cap-test"));
         let registry = Arc::new(WakeRegistry::new(
-            mailbox_tx,
+            mailbox,
             tokio::runtime::Handle::current(),
         ));
         ctx.with_wake_registry(registry)

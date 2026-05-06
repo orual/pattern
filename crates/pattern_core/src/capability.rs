@@ -156,6 +156,9 @@ pub enum EffectCategory {
     /// persona records, find by relationship/project, list groups.
     /// v3-multi-agent Phase 6.
     Constellation,
+    /// The web effect (`Pattern.Web`) — search the web and fetch/read
+    /// page content with HTML-to-markdown conversion.
+    Web,
 }
 
 impl EffectCategory {
@@ -182,6 +185,7 @@ impl EffectCategory {
         Self::Wake,
         Self::Fronting,
         Self::Constellation,
+        Self::Web,
     ];
 
     /// Canonical type name string. Matches `EffectDecl::type_name`
@@ -206,6 +210,7 @@ impl EffectCategory {
             Self::Wake => "Wake",
             Self::Fronting => "Fronting",
             Self::Constellation => "Constellation",
+            Self::Web => "Web",
         }
     }
 
@@ -769,7 +774,8 @@ mod tests {
                 | EffectCategory::Diagnostics
                 | EffectCategory::Wake
                 | EffectCategory::Fronting
-                | EffectCategory::Constellation => out.push(cat),
+                | EffectCategory::Constellation
+                | EffectCategory::Web => out.push(cat),
             }
         }
         out

@@ -413,7 +413,11 @@ impl RenderBatch {
                     text: format!("{label} → {recipient}: {body}"),
                 }));
             }
-            WireTurnEvent::Stop(_) => {
+            WireTurnEvent::Stop(reason) => {
+                self.sections.push(Section::new(SectionKind::Display {
+                    kind: pattern_core::traits::turn_sink::DisplayKind::Note,
+                    text: format!("Stop: {reason:?}"),
+                }));
                 self.streaming = false;
             }
             WireTurnEvent::FrontingChanged { .. } => {

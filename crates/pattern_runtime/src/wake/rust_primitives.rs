@@ -11,15 +11,15 @@
 //! land in T8/T9 alongside the `pattern_memory::subscriber` fan-out
 //! hook.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use pattern_core::types::block_ref::BlockRef;
 use pattern_core::types::origin::{SpanCompare, SystemReason};
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::mailbox::MailboxInput;
+use crate::mailbox::Mailbox;
 
 use super::registry::{WakeError, wake_mailbox_input};
 
@@ -65,7 +65,7 @@ pub(super) fn validate_period(period: jiff::Span, min: jiff::Span) -> Result<(),
 pub(super) fn spawn_task_timeout(
     task: BlockRef,
     deadline: jiff::Span,
-    mailbox_tx: mpsc::UnboundedSender<MailboxInput>,
+    mailbox: Arc<Mailbox>,
     tokio_handle: &Handle,
 ) -> Result<JoinHandle<()>, WakeError> {
     let dur = span_to_duration(deadline)?;
@@ -84,8 +84,9 @@ pub(super) fn spawn_task_timeout(
             &body,
         );
         // Send failure means the mailbox has been dropped; exit
-        // silently.
-        let _ = mailbox_tx.send(input);
+        // silently. send_input bumps the pending counter so the
+        // drain loop's note_consumed call balances out.
+        let _ = mailbox.send_input(input);
     }))
 }
 
@@ -99,7 +100,7 @@ pub(super) fn spawn_task_timeout(
 /// the eval-worker OS thread, which has no ambient tokio runtime.
 pub(super) fn spawn_interval(
     period: jiff::Span,
-    mailbox_tx: mpsc::UnboundedSender<MailboxInput>,
+    mailbox: Arc<Mailbox>,
     tokio_handle: &Handle,
 ) -> Result<JoinHandle<()>, WakeError> {
     let dur = span_to_duration(period)?;
@@ -119,8 +120,10 @@ pub(super) fn spawn_interval(
                 },
                 &body,
             );
-            if mailbox_tx.send(input).is_err() {
-                // Mailbox dropped — exit cleanly.
+            // send_input bumps `pending` so the drain loop's
+            // note_consumed call balances. A SendError means the
+            // mailbox channel is closed; exit cleanly.
+            if mailbox.send_input(input).is_err() {
                 return;
             }
         }
@@ -130,18 +133,20 @@ pub(super) fn spawn_interval(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mailbox::Mailbox;
     use crate::wake::{WakeCondition, WakeError, WakeRegistry};
+    use pattern_core::types::ids::PersonaId;
     use pattern_core::types::origin::{Author, SystemReason};
     use std::time::Duration;
 
     /// Helper: build a registry with a tight min-period so tests
     /// can exercise sub-1s timers without bumping into the
     /// production safeguard.
-    fn fast_registry() -> (WakeRegistry, mpsc::UnboundedReceiver<MailboxInput>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let reg = WakeRegistry::new(tx, tokio::runtime::Handle::current())
+    fn fast_registry() -> (WakeRegistry, Arc<Mailbox>) {
+        let (mailbox, _) = Mailbox::new(PersonaId::from("rust-prim-test"));
+        let reg = WakeRegistry::new(mailbox.clone(), tokio::runtime::Handle::current())
             .with_min_period(jiff::Span::new().milliseconds(10));
-        (reg, rx)
+        (reg, mailbox)
     }
 
     fn br(label: &str) -> BlockRef {
@@ -150,7 +155,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn task_timeout_fires_after_deadline() {
-        let (reg, mut rx) = fast_registry();
+        let (reg, mailbox) = fast_registry();
         let _ = reg
             .register(
                 "tt-1".into(),
@@ -161,7 +166,7 @@ mod tests {
             )
             .expect("register");
 
-        // Wait up to 1s for the wake to fire.
+        let mut rx = mailbox.lock_rx().await;
         let input = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("wake should fire within 1s")
@@ -179,7 +184,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn interval_fires_repeatedly() {
-        let (reg, mut rx) = fast_registry();
+        let (reg, mailbox) = fast_registry();
         let _ = reg
             .register(
                 "iv-1".into(),
@@ -189,7 +194,7 @@ mod tests {
             )
             .expect("register");
 
-        // Collect three ticks within 1s.
+        let mut rx = mailbox.lock_rx().await;
         let mut ticks = 0;
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while ticks < 3 && std::time::Instant::now() < deadline {
@@ -215,7 +220,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn multiple_conditions_fire_independently() {
-        let (reg, mut rx) = fast_registry();
+        let (reg, mailbox) = fast_registry();
         let _ = reg
             .register(
                 "tt".into(),
@@ -234,7 +239,7 @@ mod tests {
             )
             .expect("register iv");
 
-        // Within 500ms we should see at least one of each kind.
+        let mut rx = mailbox.lock_rx().await;
         let mut saw_timeout = false;
         let mut saw_interval = false;
         let deadline = std::time::Instant::now() + Duration::from_millis(500);
@@ -262,9 +267,9 @@ mod tests {
 
     #[tokio::test]
     async fn subsecond_interval_rejected_at_register() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mailbox, _) = Mailbox::new(PersonaId::from("subsec-reject"));
         // Production registry — default min_period 1s.
-        let reg = WakeRegistry::new(tx, tokio::runtime::Handle::current());
+        let reg = WakeRegistry::new(mailbox, tokio::runtime::Handle::current());
         let err = reg
             .register(
                 "iv".into(),
@@ -281,7 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn unregister_aborts_evaluator() {
-        let (reg, mut rx) = fast_registry();
+        let (reg, mailbox) = fast_registry();
         let _ = reg
             .register(
                 "iv".into(),
@@ -291,17 +296,14 @@ mod tests {
             )
             .expect("register");
 
-        // Confirm at least one fire.
+        let mut rx = mailbox.lock_rx().await;
         let _ = tokio::time::timeout(Duration::from_millis(200), rx.recv())
             .await
             .expect("at least one tick");
 
-        // Unregister.
         assert!(reg.unregister(&"iv".into()), "id was registered");
         assert_eq!(reg.len(), 0);
 
-        // Drain any in-flight events. Then assert no further fires
-        // for 250ms (well past two periods).
         while rx.try_recv().is_ok() {}
         let result = tokio::time::timeout(Duration::from_millis(250), rx.recv()).await;
         assert!(
@@ -312,7 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_id_rejected() {
-        let (reg, _rx) = fast_registry();
+        let (reg, _mailbox) = fast_registry();
         let _ = reg
             .register(
                 "id".into(),
@@ -334,13 +336,12 @@ mod tests {
 
     #[tokio::test]
     async fn registry_drop_aborts_all_tasks() {
-        // Keep an extra sender clone outside the registry so the
+        // Hold an `Arc<Mailbox>` clone outside the registry so the
         // channel doesn't close on registry drop. We want to
         // distinguish "tasks aborted, no further wake events" from
         // "channel closed, recv returns None".
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let _keepalive = tx.clone();
-        let reg = WakeRegistry::new(tx, tokio::runtime::Handle::current())
+        let (mailbox, _) = Mailbox::new(PersonaId::from("registry-drop"));
+        let reg = WakeRegistry::new(mailbox.clone(), tokio::runtime::Handle::current())
             .with_min_period(jiff::Span::new().milliseconds(10));
         let _ = reg
             .register(
@@ -351,16 +352,13 @@ mod tests {
             )
             .expect("register");
 
-        // Confirm a tick.
+        let mut rx = mailbox.lock_rx().await;
         let _ = tokio::time::timeout(Duration::from_millis(200), rx.recv())
             .await
             .expect("at least one tick");
 
-        // Drop the registry.
         drop(reg);
 
-        // Drain in-flight, then assert silence (timeout, not channel
-        // close) for the next 250ms — well past two periods.
         while rx.try_recv().is_ok() {}
         let result = tokio::time::timeout(Duration::from_millis(250), rx.recv()).await;
         assert!(

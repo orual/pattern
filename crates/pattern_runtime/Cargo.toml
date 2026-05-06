@@ -80,7 +80,9 @@ rusqlite         = { version = "0.39", features = ["bundled-full"] }
 smol_str         = { workspace = true }
 parking_lot      = { workspace = true }
 dashmap          = { version = "6.1.0", features = ["serde"] }
+html2md          = { workspace = true }
 regex            = { workspace = true }
+scraper          = { workspace = true }
 # Stable content hashing for snapshot delta detection.
 blake3           = { workspace = true }
 # jiff::Timestamp → chrono::DateTime<Utc> conversion for pattern_db persistence.

@@ -25,6 +25,7 @@ pub mod spawn;
 pub mod tasks;
 pub mod time;
 pub mod wake;
+pub mod web;
 
 pub use constellation::ConstellationHandler;
 pub use diagnostics::DiagnosticsHandler;
@@ -44,3 +45,4 @@ pub use spawn::SpawnHandler;
 pub use tasks::TasksHandler;
 pub use time::TimeHandler;
 pub use wake::WakeHandler;
+pub use web::WebHandler;

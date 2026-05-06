@@ -53,18 +53,17 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use smol_str::SmolStr;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use pattern_core::CapabilitySet;
 use pattern_core::types::origin::SystemReason;
 
-use crate::mailbox::MailboxInput;
+use crate::mailbox::Mailbox;
 use crate::sdk::bundle::filtered_effect_decls;
 use crate::sdk::handlers::{
     DisplayHandler, FileHandler, FrontingHandler, LogHandler, McpHandler, MemoryHandler,
     MessageHandler, PortHandler, RecallHandler, SearchHandler, ShellHandler, SkillsHandler,
-    SpawnHandler, TasksHandler, TimeHandler, WakeHandler,
+    SpawnHandler, TasksHandler, TimeHandler, WakeHandler, WebHandler,
 };
 use crate::sdk::preamble;
 use crate::session::SessionContext;
@@ -91,8 +90,11 @@ const MIN_INTERVAL: Duration = Duration::from_secs(1);
 pub struct CustomEvaluator {
     /// Registered condition tasks, keyed by user-supplied id.
     tasks: Mutex<HashMap<SmolStr, JoinHandle<()>>>,
-    /// Session mailbox for delivering wake activations.
-    mailbox_tx: mpsc::UnboundedSender<MailboxInput>,
+    /// Session mailbox for delivering wake activations. Holding the
+    /// `Arc<Mailbox>` (rather than a raw sender clone) means evaluator
+    /// fires go through [`Mailbox::send_input`] so the `pending`
+    /// counter stays in sync with the channel.
+    mailbox: Arc<Mailbox>,
     /// Tokio runtime handle for spawning tasks from sync context.
     tokio_handle: Handle,
     /// Session context for building bundles.
@@ -118,7 +120,7 @@ impl CustomEvaluator {
     ///
     /// `include_paths` are the GHC include paths (typically `[sdk_dir]`).
     pub fn new(
-        mailbox_tx: mpsc::UnboundedSender<MailboxInput>,
+        mailbox: Arc<Mailbox>,
         include_paths: Vec<PathBuf>,
         tokio_handle: Handle,
         session_ctx: Arc<SessionContext>,
@@ -139,7 +141,7 @@ impl CustomEvaluator {
 
         Self {
             tasks: Mutex::new(HashMap::new()),
-            mailbox_tx,
+            mailbox,
             tokio_handle,
             session_ctx,
             inflight: Arc::new(DashMap::new()),
@@ -241,7 +243,7 @@ impl CustomEvaluator {
         program: String,
         period: Duration,
     ) -> JoinHandle<()> {
-        let mailbox_tx = self.mailbox_tx.clone();
+        let mailbox = self.mailbox.clone();
         let inflight = self.inflight.clone();
         let preamble = self.read_only_preamble.clone();
         let include_paths = self.include_paths.clone();
@@ -288,7 +290,9 @@ impl CustomEvaluator {
                             SystemReason::CustomWake { id: id.clone() },
                             &format!("[custom wake: {id}]"),
                         );
-                        let _ = mailbox_tx.send(input);
+                        // send_input bumps `pending` so the drain
+                        // loop's note_consumed call balances out.
+                        let _ = mailbox.send_input(input);
                     }
                     Ok(Ok(false)) => {
                         tracing::debug!(
@@ -458,6 +462,7 @@ fn eval_condition(
         FrontingHandler,
         PortHandler,
         crate::sdk::handlers::ConstellationHandler,
+        crate::sdk::handlers::WebHandler::new(),
     ];
 
     let include_refs: Vec<&std::path::Path> = include_paths.iter().map(|p| p.as_path()).collect();

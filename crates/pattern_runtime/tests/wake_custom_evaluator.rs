@@ -14,11 +14,12 @@ use std::time::Duration;
 
 use pattern_core::ProviderClient;
 use pattern_core::traits::MemoryStore;
+use pattern_core::types::ids::PersonaId;
 use pattern_core::types::snapshot::PersonaSnapshot;
+use pattern_runtime::mailbox::Mailbox;
 use pattern_runtime::testing::{InMemoryMemoryStore, NopProviderClient};
 use pattern_runtime::wake::custom::CustomEvaluator;
 use smol_str::SmolStr;
-use tokio::sync::mpsc;
 
 fn skip_without_tidepool() -> bool {
     pattern_runtime::preflight::check().is_err()
@@ -26,7 +27,7 @@ fn skip_without_tidepool() -> bool {
 
 async fn test_evaluator() -> (
     CustomEvaluator,
-    mpsc::UnboundedReceiver<pattern_runtime::mailbox::MailboxInput>,
+    Arc<Mailbox>,
     Arc<pattern_runtime::session::SessionContext>,
 ) {
     let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
@@ -47,15 +48,15 @@ async fn test_evaluator() -> (
         .expect("SDK dir should exist");
     let include_paths = vec![sdk_dir];
 
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (mailbox, _) = Mailbox::new(PersonaId::from("wake-test-agent"));
     let evaluator = CustomEvaluator::new(
-        tx,
+        mailbox.clone(),
         include_paths,
         tokio::runtime::Handle::current(),
         ctx.clone(),
     );
 
-    (evaluator, rx, ctx)
+    (evaluator, mailbox, ctx)
 }
 
 /// Test 1: Register a condition with 1s period that always returns True.
@@ -66,7 +67,7 @@ async fn interval_fires_correctly() {
         return;
     }
 
-    let (evaluator, mut rx, _ctx) = test_evaluator().await;
+    let (evaluator, mailbox, _ctx) = test_evaluator().await; let mut rx = mailbox.lock_rx().await;
 
     evaluator
         .register_interval(
@@ -99,7 +100,7 @@ async fn timeout_enforces_limit() {
         return;
     }
 
-    let (evaluator, mut rx, _ctx) = test_evaluator().await;
+    let (evaluator, mailbox, _ctx) = test_evaluator().await; let mut rx = mailbox.lock_rx().await;
 
     // This program calls Time.sleep which is a MutateInternal effect
     // and will be absent from the Observe-only prelude. It should fail
@@ -142,7 +143,7 @@ async fn capability_rejection_at_compile() {
         return;
     }
 
-    let (evaluator, mut rx, _ctx) = test_evaluator().await;
+    let (evaluator, mailbox, _ctx) = test_evaluator().await; let mut rx = mailbox.lock_rx().await;
 
     // The program references Memory.put which is MutateInternal — it
     // should fail at compile time because the Observe-only prelude
@@ -174,7 +175,7 @@ async fn two_conditions_overlapping_triggers() {
         return;
     }
 
-    let (evaluator, mut rx, _ctx) = test_evaluator().await;
+    let (evaluator, mailbox, _ctx) = test_evaluator().await; let mut rx = mailbox.lock_rx().await;
 
     evaluator
         .register_interval(
@@ -231,8 +232,9 @@ async fn min_period_rejection() {
         tokio::runtime::Handle::current(),
     ));
 
-    let (tx, _rx) = mpsc::unbounded_channel();
-    let evaluator = CustomEvaluator::new(tx, vec![], tokio::runtime::Handle::current(), ctx);
+    let (mailbox, _) = Mailbox::new(PersonaId::from("agent-min-period"));
+    let evaluator =
+        CustomEvaluator::new(mailbox, vec![], tokio::runtime::Handle::current(), ctx);
 
     let result = evaluator.register_interval(
         SmolStr::new("subsecond"),
@@ -452,7 +454,7 @@ async fn wake_eval_program_using_spawn_rejected_at_compile() {
         return;
     }
 
-    let (evaluator, mut rx, _ctx) = test_evaluator().await;
+    let (evaluator, mailbox, _ctx) = test_evaluator().await; let mut rx = mailbox.lock_rx().await;
 
     // This program imports Pattern.Spawn and attempts to call Spawn.ephemeral.
     // Pattern.Spawn must be absent from the wake-eval prelude because the Spawn
@@ -494,7 +496,7 @@ async fn wake_eval_program_using_shell_rejected_at_compile() {
         return;
     }
 
-    let (evaluator, mut rx, _ctx) = test_evaluator().await;
+    let (evaluator, mailbox, _ctx) = test_evaluator().await; let mut rx = mailbox.lock_rx().await;
 
     evaluator
         .register_interval(
@@ -527,7 +529,7 @@ async fn wake_eval_program_using_message_rejected_at_compile() {
         return;
     }
 
-    let (evaluator, mut rx, _ctx) = test_evaluator().await;
+    let (evaluator, mailbox, _ctx) = test_evaluator().await; let mut rx = mailbox.lock_rx().await;
 
     evaluator
         .register_interval(
@@ -560,7 +562,7 @@ async fn wake_eval_program_using_memory_get_succeeds() {
         return;
     }
 
-    let (evaluator, mut rx, _ctx) = test_evaluator().await;
+    let (evaluator, mailbox, _ctx) = test_evaluator().await; let mut rx = mailbox.lock_rx().await;
 
     // Memory.get is Observe-classed and the Memory category is kept.
     // This program reads a (non-existent) block and returns True regardless.
@@ -600,8 +602,8 @@ async fn condition_cap_enforced() {
         tokio::runtime::Handle::current(),
     ));
 
-    let (tx, _rx) = mpsc::unbounded_channel();
-    let evaluator = CustomEvaluator::new(tx, vec![], tokio::runtime::Handle::current(), ctx)
+    let (mailbox, _) = Mailbox::new(PersonaId::from("agent-cap"));
+    let evaluator = CustomEvaluator::new(mailbox, vec![], tokio::runtime::Handle::current(), ctx)
         .with_max_conditions(2);
 
     // Register two conditions — should succeed.
@@ -661,19 +663,24 @@ async fn unregister_aborts_custom_task_and_frees_cap_slot() {
         tokio::runtime::Handle::current(),
     ));
 
-    let (registry_tx, _registry_rx) =
-        mpsc::unbounded_channel::<pattern_runtime::mailbox::MailboxInput>();
-    let (evaluator_tx, _evaluator_rx) =
-        mpsc::unbounded_channel::<pattern_runtime::mailbox::MailboxInput>();
+    let (registry_mailbox, _) = Mailbox::new(PersonaId::from("agent-unreg-registry"));
+    let (evaluator_mailbox, _) = Mailbox::new(PersonaId::from("agent-unreg-evaluator"));
 
     let evaluator = Arc::new(
-        CustomEvaluator::new(evaluator_tx, vec![], tokio::runtime::Handle::current(), ctx)
-            .with_max_conditions(3),
+        CustomEvaluator::new(
+            evaluator_mailbox,
+            vec![],
+            tokio::runtime::Handle::current(),
+            ctx,
+        )
+        .with_max_conditions(3),
     );
 
-    let registry =
-        pattern_runtime::wake::WakeRegistry::new(registry_tx, tokio::runtime::Handle::current())
-            .with_custom_evaluator(Arc::clone(&evaluator));
+    let registry = pattern_runtime::wake::WakeRegistry::new(
+        registry_mailbox,
+        tokio::runtime::Handle::current(),
+    )
+    .with_custom_evaluator(Arc::clone(&evaluator));
 
     use pattern_runtime::wake::registry::WakeCondition;
     use smol_str::SmolStr;

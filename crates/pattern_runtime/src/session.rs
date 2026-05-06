@@ -1275,10 +1275,10 @@ impl SessionContext {
         &self.tokio_handle
     }
 
-    /// The session's mailbox — sender clones flow out via
-    /// [`crate::mailbox::Mailbox::sender`] so peers can deliver
-    /// activations; the [`MailboxTask`](crate::mailbox) (T3) holds the
-    /// receiver guard for the lifetime of the session.
+    /// The session's mailbox — peers clone the `Arc<Mailbox>` and
+    /// dispatch activations via [`crate::mailbox::Mailbox::send_input`].
+    /// The [`MailboxTask`](crate::mailbox) (T3) holds the receiver
+    /// guard for the lifetime of the session.
     pub fn mailbox(&self) -> &Arc<crate::mailbox::Mailbox> {
         &self.mailbox
     }
@@ -2158,10 +2158,10 @@ impl TidepoolSession {
             // Thread the tokio_handle so evaluator tasks can be spawned from the
             // eval-worker OS thread (which has no ambient runtime context).
             let ctx = if let Some(extras) = regs.wake_registry_extras {
-                let mailbox_tx = ctx.mailbox().sender();
+                let mailbox = ctx.mailbox().clone();
                 let tokio_handle = ctx.tokio_handle().clone();
                 let default_scope_for_wake = ctx.default_scope().clone();
-                let mut wake_reg = crate::wake::WakeRegistry::new(mailbox_tx, tokio_handle)
+                let mut wake_reg = crate::wake::WakeRegistry::new(mailbox, tokio_handle)
                     .with_default_scope(default_scope_for_wake);
                 if let Some(notifier) = extras.block_change_notifier {
                     wake_reg = wake_reg.with_block_change_notifier(notifier);
@@ -2411,7 +2411,7 @@ impl TidepoolSession {
         // Phase 7 Task 6: custom Haskell wake conditions.
         if let Some(wake_reg) = session.ctx.wake_registry() {
             let evaluator = crate::wake::custom::CustomEvaluator::new(
-                session.ctx.mailbox().sender(),
+                session.ctx.mailbox().clone(),
                 include_paths.clone(),
                 session.ctx.tokio_handle().clone(),
                 session.ctx.clone(),

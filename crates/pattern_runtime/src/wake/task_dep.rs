@@ -27,10 +27,9 @@ use pattern_core::types::memory_types::{TaskEdgeRef, TaskStatus};
 use pattern_core::types::origin::SystemReason;
 use smol_str::SmolStr;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::mailbox::MailboxInput;
+use crate::mailbox::Mailbox;
 use crate::wake::registry::wake_mailbox_input;
 
 /// Spawn the evaluator task for a
@@ -58,7 +57,7 @@ pub(super) fn spawn_task_dependency_resolved(
     block_scope: pattern_core::types::memory_types::Scope,
     store: Arc<dyn MemoryStore>,
     notifier: pattern_memory::subscriber::BlockChangeNotifier,
-    mailbox_tx: mpsc::UnboundedSender<MailboxInput>,
+    mailbox: Arc<Mailbox>,
     tokio_handle: &Handle,
 ) -> JoinHandle<()> {
     let fired = Arc::new(AtomicBool::new(false));
@@ -67,7 +66,7 @@ pub(super) fn spawn_task_dependency_resolved(
     let _agent_for_cb = agent_id.clone();
     let scope_for_cb = block_scope.clone();
     let store_for_cb = store.clone();
-    let mailbox_for_cb = mailbox_tx.clone();
+    let mailbox_for_cb = mailbox.clone();
     let parent_label = parent_block.label.clone();
 
     let callback: pattern_memory::subscriber::BlockChangeCallback = Arc::new(move |_bref| {
@@ -95,7 +94,9 @@ pub(super) fn spawn_task_dependency_resolved(
                     },
                     &body,
                 );
-                let _ = mailbox_for_cb.send(input);
+                // send_input bumps `pending` so the drain loop's
+                // note_consumed call balances out.
+                let _ = mailbox_for_cb.send_input(input);
             }
             Ok(_) | Err(_) => {
                 // Not yet completed, or transient read failure. The

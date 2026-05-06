@@ -14,10 +14,9 @@ use pattern_core::types::memory_types::TaskEdgeRef;
 use pattern_core::types::origin::SpanCompare;
 use smol_str::SmolStr;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::mailbox::MailboxInput;
+use crate::mailbox::{Mailbox, MailboxInput};
 
 /// A wake-condition declaration, decoupled from its evaluator.
 ///
@@ -216,7 +215,14 @@ struct RegisteredCondition {
 /// registrations return [`WakeError::SubscriberNotConfigured`].
 pub struct WakeRegistry {
     conditions: Mutex<Vec<RegisteredCondition>>,
-    mailbox_tx: mpsc::UnboundedSender<MailboxInput>,
+    /// Session mailbox. Wake evaluators enqueue activations via
+    /// [`Mailbox::send_input`] so the `pending` counter stays in sync
+    /// with the channel queue depth. Holding the `Arc<Mailbox>` —
+    /// rather than a raw [`tokio::sync::mpsc::UnboundedSender`] clone —
+    /// closes the underflow bug where wake-driven sends bypassed the
+    /// counter and tripped `has_pending()` to permanently true after
+    /// the drain loop's `note_consumed` call.
+    mailbox: Arc<Mailbox>,
     /// Tokio runtime handle for spawning evaluator tasks. Required because
     /// `register` is called from the eval-worker OS thread, which has no
     /// ambient tokio runtime. Without this, `tokio::spawn` would panic.
@@ -252,7 +258,11 @@ pub struct WakeRegistry {
 
 impl WakeRegistry {
     /// Construct a new registry that delivers wake activations
-    /// through `mailbox_tx`.
+    /// through `mailbox`.
+    ///
+    /// Holds an `Arc<Mailbox>` (not a raw sender clone) so wake
+    /// evaluators can call [`Mailbox::send_input`] and keep the
+    /// mailbox's `pending` counter in lockstep with the channel.
     ///
     /// `tokio_handle` must be a live runtime handle so that evaluator
     /// tasks can be spawned from the eval-worker OS thread (which has
@@ -260,10 +270,10 @@ impl WakeRegistry {
     /// `cx.user().tokio_handle().clone()`; tests pass
     /// `tokio::runtime::Handle::current()` from inside a
     /// `#[tokio::test]`.
-    pub fn new(mailbox_tx: mpsc::UnboundedSender<MailboxInput>, tokio_handle: Handle) -> Self {
+    pub fn new(mailbox: Arc<Mailbox>, tokio_handle: Handle) -> Self {
         Self {
             conditions: Mutex::new(Vec::new()),
-            mailbox_tx,
+            mailbox,
             tokio_handle,
             min_period: jiff::Span::new().seconds(1),
             block_change_notifier: None,
@@ -277,10 +287,7 @@ impl WakeRegistry {
     /// task-dependency wakes look up watched blocks at the right scope.
     /// Production callers pass `cx.user().default_scope().clone()`.
     #[must_use]
-    pub fn with_default_scope(
-        mut self,
-        scope: pattern_core::types::memory_types::Scope,
-    ) -> Self {
+    pub fn with_default_scope(mut self, scope: pattern_core::types::memory_types::Scope) -> Self {
         self.default_scope = Some(scope);
         self
     }
@@ -350,7 +357,7 @@ impl WakeRegistry {
                 super::rust_primitives::validate_period(period.0, self.min_period)?;
                 super::rust_primitives::spawn_interval(
                     period.0,
-                    self.mailbox_tx.clone(),
+                    self.mailbox.clone(),
                     &self.tokio_handle,
                 )?
             }
@@ -358,7 +365,7 @@ impl WakeRegistry {
                 super::rust_primitives::spawn_task_timeout(
                     task.clone(),
                     deadline.0,
-                    self.mailbox_tx.clone(),
+                    self.mailbox.clone(),
                     &self.tokio_handle,
                 )?
             }
@@ -370,7 +377,7 @@ impl WakeRegistry {
                 super::block_changed::spawn_block_changed(
                     block.clone(),
                     notifier.clone(),
-                    self.mailbox_tx.clone(),
+                    self.mailbox.clone(),
                     &self.tokio_handle,
                 )
             }
@@ -420,7 +427,7 @@ impl WakeRegistry {
                     lookup_scope,
                     store.clone(),
                     notifier.clone(),
-                    self.mailbox_tx.clone(),
+                    self.mailbox.clone(),
                     &self.tokio_handle,
                 )
             }
@@ -582,12 +589,64 @@ mod tests {
     //! These unit tests cover the registry's own preflight errors.
 
     use super::*;
+    use crate::mailbox::Mailbox;
+    use pattern_core::types::ids::PersonaId;
     use pattern_core::types::memory_types::TaskEdgeRef;
 
-    fn fresh_registry() -> (WakeRegistry, mpsc::UnboundedReceiver<MailboxInput>) {
-        let (tx, rx) = mpsc::unbounded_channel();
+    fn fresh_registry() -> (WakeRegistry, Arc<Mailbox>) {
+        let (mailbox, _) = Mailbox::new(PersonaId::from("wake-registry-test"));
         let handle = tokio::runtime::Handle::current();
-        (WakeRegistry::new(tx, handle), rx)
+        (WakeRegistry::new(mailbox.clone(), handle), mailbox)
+    }
+
+    /// Regression: wake evaluators must keep [`Mailbox::pending`] in sync
+    /// with the channel queue depth.
+    ///
+    /// Before the fix, every wake spawn helper sent activations through a
+    /// raw `mpsc::UnboundedSender<MailboxInput>`, bypassing
+    /// [`Mailbox::send_input`] (which bumps `pending`). The mailbox drain
+    /// task's `note_consumed` call then underflowed the `AtomicUsize`
+    /// from `0` to `usize::MAX`, leaving `has_pending()` permanently
+    /// true. The flag is consulted between continuation turns in
+    /// [`crate::agent_loop::drive_step`] — once tripped, the runtime
+    /// silently locked into "single-turn mode" for the lifetime of the
+    /// session, breaking every tool_use chain after the first wake
+    /// fired.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wake_drain_does_not_underflow_pending_counter() {
+        use crate::mailbox::Mailbox;
+        use pattern_core::types::ids::PersonaId;
+
+        let (mailbox, _) = Mailbox::new(PersonaId::from("wake-pending"));
+        let handle = tokio::runtime::Handle::current();
+        let reg = WakeRegistry::new(mailbox.clone(), handle)
+            .with_min_period(jiff::Span::new().milliseconds(10));
+        reg.register(
+            "iv-pending".into(),
+            WakeCondition::Interval {
+                period: SpanCompare(jiff::Span::new().milliseconds(50)),
+            },
+        )
+        .expect("register interval");
+
+        // Wait for the first interval tick to land in the mailbox.
+        let mut rx = mailbox.lock_rx().await;
+        let _input = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("wake should fire within 500ms")
+            .expect("mailbox channel open");
+        drop(rx);
+
+        // Simulate the drain loop's bookkeeping (mailbox.rs:305).
+        mailbox.note_consumed();
+
+        assert!(
+            !mailbox.has_pending(),
+            "after draining a wake-fired message, has_pending() must be \
+             false; underflow here means a wake evaluator bypassed \
+             Mailbox::send_input — pending counter and channel depth \
+             have diverged"
+        );
     }
 
     #[tokio::test]
@@ -611,9 +670,9 @@ mod tests {
 
     #[tokio::test]
     async fn task_dep_without_store_is_memory_store_not_configured() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mailbox, _) = Mailbox::new(PersonaId::from("task-dep-no-store"));
         let notifier = pattern_memory::subscriber::BlockChangeNotifier::new();
-        let reg = WakeRegistry::new(tx, tokio::runtime::Handle::current())
+        let reg = WakeRegistry::new(mailbox, tokio::runtime::Handle::current())
             .with_block_change_notifier(notifier);
         let edge = TaskEdgeRef {
             block: SmolStr::new("tasks"),
@@ -634,10 +693,10 @@ mod tests {
     #[tokio::test]
     async fn task_dep_block_level_ref_is_task_item_required() {
         use crate::testing::in_memory_store::InMemoryMemoryStore;
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mailbox, _) = Mailbox::new(PersonaId::from("task-dep-block-level"));
         let notifier = pattern_memory::subscriber::BlockChangeNotifier::new();
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
-        let reg = WakeRegistry::new(tx, tokio::runtime::Handle::current())
+        let reg = WakeRegistry::new(mailbox, tokio::runtime::Handle::current())
             .with_block_change_notifier(notifier)
             .with_memory_store(store);
         let edge = TaskEdgeRef {
@@ -659,10 +718,10 @@ mod tests {
     #[tokio::test]
     async fn task_dep_unknown_parent_block_surfaces_clear_error() {
         use crate::testing::in_memory_store::InMemoryMemoryStore;
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mailbox, _) = Mailbox::new(PersonaId::from("task-dep-ghost"));
         let notifier = pattern_memory::subscriber::BlockChangeNotifier::new();
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
-        let reg = WakeRegistry::new(tx, tokio::runtime::Handle::current())
+        let reg = WakeRegistry::new(mailbox, tokio::runtime::Handle::current())
             .with_block_change_notifier(notifier)
             .with_memory_store(store);
         let edge = TaskEdgeRef {
@@ -689,8 +748,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn custom_condition_is_accepted_with_parked_evaluator() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let reg = WakeRegistry::new(tx, tokio::runtime::Handle::current());
+        let (mailbox, _) = Mailbox::new(PersonaId::from("custom-parked"));
+        let reg = WakeRegistry::new(mailbox.clone(), tokio::runtime::Handle::current());
         let id = reg
             .register(
                 SmolStr::new("custom-1"),
@@ -704,17 +763,11 @@ mod tests {
         assert_eq!(id.as_str(), "custom-1");
         assert_eq!(reg.len(), 1);
 
-        // Important 1: The parked evaluator must NOT fire any wake activation.
-        // Keep `rx` alive and assert nothing arrives for at least 100ms.
-        let no_fire = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            tokio::task::spawn(async move {
-                // Move rx into a spawned task so the block won't prevent
-                // the registry from being used above.
-                let mut rx = rx;
-                rx.recv().await
-            }),
-        )
+        // The parked evaluator must NOT fire any wake activation.
+        // Hold the mailbox receiver and assert nothing arrives for 100ms.
+        let no_fire = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            mailbox.lock_rx().await.recv().await
+        })
         .await;
         assert!(
             no_fire.is_err(),
@@ -742,9 +795,9 @@ mod tests {
         // Build a real multi-threaded runtime to host evaluator tasks.
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let handle = rt.handle().clone();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let reg =
-            WakeRegistry::new(tx, handle).with_min_period(jiff::Span::new().milliseconds(100));
+        let (mailbox, _) = Mailbox::new(PersonaId::from("sync-thread"));
+        let reg = WakeRegistry::new(mailbox, handle)
+            .with_min_period(jiff::Span::new().milliseconds(100));
 
         // Call register from a plain OS thread — no ambient tokio context.
         // This must not panic with "no reactor running".

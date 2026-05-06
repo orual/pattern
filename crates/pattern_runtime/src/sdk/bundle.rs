@@ -33,7 +33,7 @@ use crate::sdk::handlers::{
     ConstellationHandler, DiagnosticsHandler, DisplayHandler, FileHandler, FrontingHandler,
     LogHandler, McpHandler, MemoryHandler, MessageHandler, PortHandler, RecallHandler,
     SearchHandler, ShellHandler, SkillsHandler, SpawnHandler, TasksHandler, TimeHandler,
-    WakeHandler,
+    WakeHandler, WebHandler,
 };
 
 /// The full 17-handler SDK bundle, typed as a `frunk::HList`.
@@ -67,6 +67,7 @@ pub type SdkBundle = frunk::HList![
     FrontingHandler,
     PortHandler,
     ConstellationHandler,
+    WebHandler,
 ];
 
 /// Collect [`crate::sdk::describe::EffectDecl`] from every handler in
@@ -195,6 +196,7 @@ pub const CANONICAL_EFFECT_ROW: &[&str] = &[
     "Fronting",
     "Port",
     "Constellation",
+    "Web",
 ];
 
 #[cfg(test)]
@@ -202,12 +204,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_decls_has_18_entries() {
+    fn canonical_decls_has_19_entries() {
         let decls = canonical_effect_decls();
         assert_eq!(
             decls.len(),
-            18,
-            "expected 18 handler decls, got {}",
+            19,
+            "expected 19 handler decls, got {}",
             decls.len()
         );
     }

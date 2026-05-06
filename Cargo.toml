@@ -70,6 +70,8 @@ parking_lot = "0.12"
 dirs = "5.0"
 
 # HTTP/Web
+html2md = "0.2"
+scraper = "0.22"
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }

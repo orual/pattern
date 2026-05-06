@@ -24,6 +24,7 @@ pub mod spawn;
 pub mod tasks;
 pub mod time;
 pub mod wake;
+pub mod web;
 
 pub use constellation::ConstellationReq;
 pub use diagnostics::DiagnosticsReq;
@@ -43,6 +44,7 @@ pub use spawn::SpawnReq;
 pub use tasks::TasksReq;
 pub use time::TimeReq;
 pub use wake::WakeReq;
+pub use web::WebReq;
 
 #[cfg(test)]
 mod parity {
@@ -104,8 +106,7 @@ mod parity {
                 "DeleteLines",
             ],
         ),
-        ("McpReq", &["Use"]),
-        // RpcReq retired in v3-sandbox-io Phase 4 (replaced by PortReq).
+        ("McpReq", &["Call", "Introspect", "ListServers", "Unload"]),
         (
             "SpawnReq",
             &[
@@ -140,6 +141,7 @@ mod parity {
         ("FrontingReq", &["Current", "Set", "Route", "Clear"]),
         ("PortReq", &["List", "Call", "Subscribe", "Unsubscribe"]),
         ("ConstellationReq", &["List", "Find", "Groups"]),
+        ("WebReq", &["WebSearch", "WebFetch", "WebFetchContinue"]),
     ];
 
     /// Sanity check: the table isn't empty and each entry lists at least

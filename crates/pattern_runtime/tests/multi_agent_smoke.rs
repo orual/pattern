@@ -673,7 +673,7 @@ async fn smoke_integrated_turn_loop(
         eprintln!("--- end spec_sink dump ---");
         eprintln!(
             "--- registry: specialist sender registered? {} ---",
-            agent_reg.sender(&specialist_id.into()).is_some()
+            agent_reg.mailbox(&specialist_id.into()).is_some()
         );
         panic!(
             "specialist's task exchange must persist specialist-result \

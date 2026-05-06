@@ -50,7 +50,6 @@ use dashmap::DashMap;
 use pattern_core::types::ids::PersonaId;
 use pattern_core::types::message::Message;
 use pattern_core::types::origin::MessageOrigin;
-use tokio::sync::mpsc;
 
 /// Lifecycle status of a registered persona.
 ///
@@ -282,18 +281,20 @@ impl AgentRegistry {
         self.aliases.get(id).map(|r| r.clone())
     }
 
-    /// Return a clone of the mailbox sender for an `Active` persona, or
+    /// Return a clone of the `Arc<Mailbox>` for an `Active` persona, or
     /// `None` if the persona is not registered or is in `Draft` status.
     /// Resolves through the alias map on canonical miss.
     ///
-    /// Callers route messages through the returned sender. Draft personas
-    /// do not have a live receiving session; use [`Self::route_or_queue`]
-    /// which handles both cases atomically.
-    pub fn sender(&self, id: &PersonaId) -> Option<mpsc::UnboundedSender<MailboxInput>> {
+    /// Production callers route messages through [`Self::route_or_queue`]
+    /// which handles `Active`/`Draft` atomically and goes through
+    /// [`Mailbox::send_input`]. This method exists for tests and
+    /// observability — direct enqueues should still go through
+    /// `Mailbox::send_input` so the `pending` counter stays in sync.
+    pub fn mailbox(&self, id: &PersonaId) -> Option<Arc<Mailbox>> {
         let canonical = self.resolve_to_canonical(id)?;
         let slot = self.slots.get(&canonical)?;
         match &*slot {
-            AgentSlot::Active { mailbox } => Some(mailbox.sender()),
+            AgentSlot::Active { mailbox } => Some(mailbox.clone()),
             AgentSlot::Draft { .. } => None,
         }
     }
@@ -533,7 +534,7 @@ mod tests {
         reg.register("persona-a".into(), mailbox, SessionStatus::Active);
 
         assert_eq!(reg.status(&"persona-a".into()), Some(SessionStatus::Active));
-        assert!(reg.sender(&"persona-a".into()).is_some());
+        assert!(reg.mailbox(&"persona-a".into()).is_some());
     }
 
     #[test]
@@ -545,14 +546,14 @@ mod tests {
         // Status is Draft, not Active.
         assert_eq!(reg.status(&"draft-b".into()), Some(SessionStatus::Draft));
         // No sender for draft personas — use queue_for_draft instead.
-        assert!(reg.sender(&"draft-b".into()).is_none());
+        assert!(reg.mailbox(&"draft-b".into()).is_none());
     }
 
     #[test]
     fn unregistered_persona_returns_none() {
         let reg = AgentRegistry::new();
         assert_eq!(reg.status(&"nobody".into()), None);
-        assert!(reg.sender(&"nobody".into()).is_none());
+        assert!(reg.mailbox(&"nobody".into()).is_none());
     }
 
     /// AC6.4: looking up a nonexistent persona must yield PersonaNotFound.
@@ -667,16 +668,16 @@ mod tests {
         );
     }
 
-    /// Active persona can send a live message through the sender.
+    /// Active persona can send a live message via send_input.
     #[tokio::test]
     async fn active_sender_delivers_message() {
         let reg = Arc::new(AgentRegistry::new());
         let (mailbox, _) = Mailbox::new("active-h".into());
         reg.register("active-h".into(), mailbox.clone(), SessionStatus::Active);
 
-        let sender = reg.sender(&"active-h".into()).unwrap();
-        sender
-            .send(MailboxInput {
+        let resolved = reg.mailbox(&"active-h".into()).unwrap();
+        resolved
+            .send_input(MailboxInput {
                 from: test_origin(),
                 msg: test_message("delivered"),
                 delivery: DeliveryMode::Queue,
@@ -932,9 +933,9 @@ mod tests {
         reg.register_alias("alias-x".into(), "canonical-x".into())
             .unwrap();
 
-        assert!(reg.sender(&"canonical-x".into()).is_some());
+        assert!(reg.mailbox(&"canonical-x".into()).is_some());
         assert!(
-            reg.sender(&"alias-x".into()).is_some(),
+            reg.mailbox(&"alias-x".into()).is_some(),
             "alias should resolve to active sender"
         );
     }

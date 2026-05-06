@@ -464,9 +464,9 @@ mod tests {
         );
         assert!(
             preamble.contains(
-                "File.File, Mcp.Mcp, Spawn, Diagnostics.Diagnostics, Wake.Wake, Fronting.Fronting, Port.Port, Constellation.Constellation]"
+                "File.File, Mcp.Mcp, Spawn, Diagnostics.Diagnostics, Wake.Wake, Fronting.Fronting, Port.Port, Constellation.Constellation, Web.Web]"
             ),
-            "missing File/Mcp/Spawn/Diagnostics/Wake/Fronting/Port/Constellation in type M"
+            "missing File/Mcp/Spawn/Diagnostics/Wake/Fronting/Port/Constellation/Web in type M"
         );
         // Sources and Rpc are retired; verify they are absent from type M.
         assert!(
@@ -701,8 +701,10 @@ mod tests {
             "type M must start in canonical order, got: {row}"
         );
         assert!(
-            row.ends_with("Wake.Wake, Fronting.Fronting, Port.Port, Constellation.Constellation]"),
-            "type M must end with Wake/Fronting/Port/Constellation (last in canonical row); got: {row}"
+            row.ends_with(
+                "Wake.Wake, Fronting.Fronting, Port.Port, Constellation.Constellation, Web.Web]"
+            ),
+            "type M must end with Wake/Fronting/Port/Constellation/Web (last in canonical row); got: {row}"
         );
     }
 

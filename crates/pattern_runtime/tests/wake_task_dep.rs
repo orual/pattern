@@ -15,13 +15,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use smol_str::SmolStr;
-use tokio::sync::mpsc;
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
+use pattern_core::types::ids::PersonaId;
 use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope, TaskEdgeRef};
 use pattern_core::types::origin::{Author, SystemReason};
 
+use pattern_runtime::mailbox::Mailbox;
 use pattern_runtime::sdk::handlers::tasks::{handle_create, handle_transition};
 use pattern_runtime::testing::in_memory_store::InMemoryMemoryStore;
 use pattern_runtime::wake::{WakeCondition, WakeRegistry};
@@ -67,8 +68,8 @@ async fn task_dep_resolved_fires_on_completion() {
         .to_string();
 
     let notifier = pattern_memory::subscriber::BlockChangeNotifier::new();
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let registry = WakeRegistry::new(tx, tokio::runtime::Handle::current())
+    let (mailbox, _) = Mailbox::new(PersonaId::from(agent));
+    let registry = WakeRegistry::new(mailbox.clone(), tokio::runtime::Handle::current())
         .with_block_change_notifier(notifier.clone())
         .with_memory_store(store.clone());
 
@@ -89,6 +90,8 @@ async fn task_dep_resolved_fires_on_completion() {
 
     // Yield so the spawned evaluator task is scheduled.
     tokio::task::yield_now().await;
+
+    let mut rx = mailbox.lock_rx().await;
 
     // First fire while still Pending — should NOT produce a wake.
     let bref = pattern_core::types::block_ref::BlockRef::with_owner(

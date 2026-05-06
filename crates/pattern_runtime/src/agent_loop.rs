@@ -664,18 +664,12 @@ fn load_snapshot_blocks_with_visibility(
             let rendered = render_block_for_snapshot(&doc, true);
 
             // Persona is NEVER rendered inline (already in segment 1).
-            // Otherwise: both Full and Delta apply the pinned/block_refs
-            // visibility gate for Working blocks. Full skips the
-            // "changed since last shown" dedup (no prior state exists).
+            // Otherwise: Full always renders everything; Delta applies
+            // the pinned/block_refs visibility gate for Working blocks.
             let visible = if is_persona {
                 false
             } else if is_full {
-                // Core always visible; Working only if pinned or ref'd.
-                use pattern_core::types::memory_types::MemoryBlockType;
-                match doc.block_type() {
-                    MemoryBlockType::Core => true,
-                    _ => doc.is_pinned() || block_refs.iter().any(|r| r.label.as_str() == meta.label.as_str()),
-                }
+                true
             } else {
                 block_visibility_from_hashes(&doc, block_refs, shown_hashes, rendered.content_hash)
             };
@@ -1237,6 +1231,8 @@ pub async fn drive_step(
                 ));
         }
 
+        tracing::info!("stop_reason: {:?}", turn.stop_reason);
+
         // ---- Mid-batch delta attachment ----
         //
         // On non-terminal turns (tool_use), check if memory state has
@@ -1423,9 +1419,11 @@ pub async fn drive_step(
         )
         .await?;
 
+        let stop_reason = turn.stop_reason;
         turns.push(turn);
 
         if terminal {
+            tracing::info!("terminal turn reached, reason{stop_reason:?}; breaking loop");
             break;
         }
 
@@ -1447,6 +1445,8 @@ pub async fn drive_step(
         // [assistant(tool_use), tool_result] from history.
         cur_input = TurnInput::continuation(batch_id.clone(), agent_id.clone());
     }
+
+    tracing::info!("leaving turn loop");
 
     let final_stop_reason = turns
         .last()
