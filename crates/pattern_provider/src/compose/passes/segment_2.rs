@@ -21,6 +21,8 @@
 //! not depend on `pattern_db`.
 
 use genai::chat::ChatMessage;
+use jiff::Unit;
+use jiff::tz::TimeZone;
 use pattern_core::error::ProviderError;
 use pattern_core::types::message::Message;
 
@@ -111,7 +113,13 @@ impl ComposerPass for Segment2Pass {
         // Prior messages: render attachments inline, splice, push with origin.
         for msg in &self.prior_messages {
             let mut chat = msg.chat_message.clone();
-            if let Some(rendered) = render_attachments_for_message(&msg.attachments) {
+            if let Some(mut rendered) = render_attachments_for_message(&msg.attachments) {
+                let time = msg
+                    .created_at
+                    .to_zoned(TimeZone::system())
+                    .round(Unit::Minute)
+                    .unwrap_or(msg.created_at.to_zoned(TimeZone::system()));
+                rendered.push_str(format!("\n\nmessage time: {time}").as_str());
                 splice_text_onto_message(&mut chat, &rendered);
             }
             partial.push_message(chat, Some(msg.id.clone()));

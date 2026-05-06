@@ -369,10 +369,11 @@ pub async fn orchestrate(
     );
 
     // 7. Emit the Stop event and assemble TurnOutput.
-    ctx.hook_bus().emit(pattern_core::hooks::HookEvent::notification(
-        pattern_core::hooks::tags::TURN_STOP,
-        serde_json::json!({ "stop_reason": format!("{:?}", stop_reason) }),
-    ));
+    ctx.hook_bus()
+        .emit(pattern_core::hooks::HookEvent::notification(
+            pattern_core::hooks::tags::TURN_STOP,
+            serde_json::json!({ "stop_reason": format!("{:?}", stop_reason) }),
+        ));
     sink.emit(TurnEvent::Stop(stop_reason));
 
     // Assemble messages in wire order: assistant message first (if any),
@@ -663,12 +664,18 @@ fn load_snapshot_blocks_with_visibility(
             let rendered = render_block_for_snapshot(&doc, true);
 
             // Persona is NEVER rendered inline (already in segment 1).
-            // Otherwise: Full always renders everything; Delta applies
-            // the pinned/block_refs visibility gate for Working blocks.
+            // Otherwise: both Full and Delta apply the pinned/block_refs
+            // visibility gate for Working blocks. Full skips the
+            // "changed since last shown" dedup (no prior state exists).
             let visible = if is_persona {
                 false
             } else if is_full {
-                true
+                // Core always visible; Working only if pinned or ref'd.
+                use pattern_core::types::memory_types::MemoryBlockType;
+                match doc.block_type() {
+                    MemoryBlockType::Core => true,
+                    _ => doc.is_pinned() || block_refs.iter().any(|r| r.label.as_str() == meta.label.as_str()),
+                }
             } else {
                 block_visibility_from_hashes(&doc, block_refs, shown_hashes, rendered.content_hash)
             };
@@ -1170,9 +1177,13 @@ pub async fn drive_step(
         let compaction_outcome =
             crate::compaction::maybe_compact(&ctx, &turn_history, ctx.context_policy(), &req)
                 .await?;
-        tracing::debug!(?compaction_outcome, "compaction check");
+        tracing::info!(?compaction_outcome, "compaction check");
 
-        if matches!(compaction_outcome, crate::compaction::CompactionOutcome::Fired { .. }) {
+        if matches!(
+            compaction_outcome,
+            crate::compaction::CompactionOutcome::Fired { .. }
+        ) {
+            tracing::info!("compaction fired, recomposing request");
             let (recomposed, has_seg_1) =
                 compose_request_for_turn(&ctx, &turn_history, &cur_input, &cache_profile).await?;
             req = recomposed;
@@ -1199,10 +1210,11 @@ pub async fn drive_step(
         let _dispatch_origin_guard = CurrentDispatchOriginGuard::enter(&ctx, &dispatch_origin);
 
         // Hook: turn.before
-        ctx.hook_bus().emit(pattern_core::hooks::HookEvent::notification(
-            pattern_core::hooks::tags::TURN_BEFORE,
-            serde_json::json!({}),
-        ));
+        ctx.hook_bus()
+            .emit(pattern_core::hooks::HookEvent::notification(
+                pattern_core::hooks::tags::TURN_BEFORE,
+                serde_json::json!({}),
+            ));
 
         let turn = orchestrate(
             req,
@@ -1218,10 +1230,11 @@ pub async fn drive_step(
         is_first_wire_turn_in_session = false;
         let terminal = turn.stop_reason.is_terminal();
         if terminal {
-            ctx.hook_bus().emit(pattern_core::hooks::HookEvent::notification(
-                pattern_core::hooks::tags::TURN_AFTER_SUCCESS,
-                serde_json::json!({ "stop_reason": format!("{:?}", turn.stop_reason) }),
-            ));
+            ctx.hook_bus()
+                .emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::TURN_AFTER_SUCCESS,
+                    serde_json::json!({ "stop_reason": format!("{:?}", turn.stop_reason) }),
+                ));
         }
 
         // ---- Mid-batch delta attachment ----

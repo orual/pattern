@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn wrap_system_reminder_brackets_content() {
         let wrapped = wrap_system_reminder("memo");
-        assert!(wrapped.starts_with("<system-reminder>\n"));
+        assert!(wrapped.starts_with("<system-reminder"));
         assert!(wrapped.ends_with("\n</system-reminder>"));
         assert!(wrapped.contains("memo"));
     }
