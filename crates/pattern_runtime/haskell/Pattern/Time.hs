@@ -1,13 +1,9 @@
 {-# LANGUAGE GADTs #-}
 -- | Pattern.Time — time-oriented agent effects.
 --
--- Fully implemented in Phase 3. The runtime handler `TimeHandler` dispatches
--- `Now` by reading `jiff::Timestamp::now()` (UTC, nanosecond precision,
--- narrowed to Haskell `Int`) and `Sleep` by bounded `std::thread::sleep`.
---
--- Agent programs interact with the rich 'Instant' and 'Duration' newtypes
--- via the smart constructors below; the raw 'Int' wire format is an
--- internal detail of the freer-simple effect algebra.
+-- `Now` returns the current UTC timestamp as an RFC 3339 string.
+-- `NowNanos` returns epoch nanoseconds (Int) for duration arithmetic.
+-- `Sleep` performs a bounded sleep (milliseconds).
 module Pattern.Time
   ( -- * Effect algebra (internal)
     Time(..)
@@ -16,6 +12,7 @@ module Pattern.Time
   , Duration(..)
     -- * Smart constructors
   , now
+  , nowNanos
   , sleep
     -- * Duration builders
   , nanoseconds
@@ -23,45 +20,38 @@ module Pattern.Time
   , milliseconds
   , seconds
   , minutes
-    -- * Instant/Duration arithmetic
-  , addDuration
-  , diffInstant
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
+import Data.Text (Text, unpack)
 
--- | Time effect algebra. Variant names are mirrored byte-for-byte by
---
--- NOTE: We use 'Int' (machine-width, 64-bit) rather than 'Integer'
--- (arbitrary-precision) because (a) the runtime handler returns @i64@, and
--- (b) GHC's 'Integer' type has multiple internal constructors (IS\/IP\/IN)
--- that the tidepool JIT codegen does not yet support. 'Int' fits epoch
--- nanoseconds until approximately year 2262.
+-- | Time effect algebra.
 data Time a where
-  -- | Current wall-clock instant, in nanoseconds since the Unix epoch.
-  Now   :: Time Int
-  -- | Sleep for the given number of nanoseconds. Handler enforces an
-  -- upper bound; for longer waits use the scheduler effect (future).
-  Sleep :: Int -> Time ()
+  -- | Current wall-clock instant as RFC 3339 text (e.g. "2026-05-06T18:21:00Z").
+  Now      :: Time Text
+  -- | Current wall-clock instant as epoch nanoseconds (Int).
+  NowNanos :: Time Int
+  -- | Sleep for the given number of nanoseconds.
+  Sleep    :: Int -> Time ()
 
--- | An absolute point in time (epoch nanoseconds). Agent-facing wrapper
--- around the raw 'Int' wire format.
---
--- Derives 'Show' so agents can casually log timestamps via
--- @Log.info $ "at " <> show now@. The default derived representation
--- prints @Instant <nanos>@; format-heavy output should use a dedicated
--- render helper (TBD; for now prefer the raw nanosecond view).
-newtype Instant = Instant { instantNanos :: Int }
-  deriving Show
+-- | An absolute point in time. The Show instance displays the
+-- human-readable formatted timestamp.
+newtype Instant = Instant { instantFormatted :: Text }
 
--- | A non-negative time span (nanoseconds). Agent-facing wrapper.
--- Derives 'Show' so agents can log durations via @show dur@.
+instance Show Instant where
+  show (Instant t) = unpack t
+
+-- | A non-negative time span (nanoseconds).
 newtype Duration = Duration { durationNanos :: Int }
   deriving Show
 
--- | Get the current wall-clock instant.
+-- | Get the current wall-clock instant as a formatted string.
 now :: Member Time effs => Eff effs Instant
 now = Instant <$> send Now
+
+-- | Get current epoch nanoseconds (for duration arithmetic).
+nowNanos :: Member Time effs => Eff effs Int
+nowNanos = send NowNanos
 
 -- | Sleep for the given duration.
 sleep :: Member Time effs => Duration -> Eff effs ()
@@ -86,11 +76,3 @@ seconds n = Duration (n * 1000000000)
 -- | Build a 'Duration' from minutes.
 minutes :: Int -> Duration
 minutes n = Duration (n * 60 * 1000000000)
-
--- | Add a 'Duration' to an 'Instant'.
-addDuration :: Instant -> Duration -> Instant
-addDuration (Instant a) (Duration b) = Instant (a + b)
-
--- | Compute the 'Duration' between two 'Instant's.
-diffInstant :: Instant -> Instant -> Duration
-diffInstant (Instant a) (Instant b) = Duration (a - b)

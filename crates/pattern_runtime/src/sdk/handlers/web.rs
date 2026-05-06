@@ -26,7 +26,7 @@ pub struct WebHandler {
 impl WebHandler {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 (X11; Linux x86_64; rv:141.0) Gecko/20100101 Firefox/141.0")
+            .user_agent("Mozilla/5.0 (X11; Linux x86_64; rv:149.0) Gecko/20100101 Firefox/149.0")
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_default();
@@ -91,24 +91,25 @@ impl EffectHandler<SessionContext> for WebHandler {
         )?;
 
         let client = self.client.clone();
+        let handle = cx.user().tokio_handle().clone();
         let request_repr = format!("{req:?}");
 
         let result = match req {
             WebReq::WebSearch(query, limit) => {
                 let limit = limit.unwrap_or(10).min(20) as usize;
-                search_brave(&client, &query, limit).or_else(|e| {
+                search_brave(&handle, &client, &query, limit).or_else(|e| {
                     tracing::warn!("Brave search failed: {e}, falling back to DuckDuckGo");
-                    search_ddg(&client, &query, limit)
+                    search_ddg(&handle, &client, &query, limit)
                 })
             }
             WebReq::WebFetch(url, format) => {
                 let readable = format.as_deref() != Some("raw");
-                fetch_page(&client, &url, readable, 0, None)
+                fetch_page(&handle, &client, &url, readable, 0, None)
             }
             WebReq::WebFetchContinue(url, offset, limit) => {
                 let offset = offset as usize;
                 let limit = limit.map(|l| l as usize);
-                fetch_page(&client, &url, true, offset, limit)
+                fetch_page(&handle, &client, &url, true, offset, limit)
             }
         };
 
@@ -128,14 +129,17 @@ impl EffectHandler<SessionContext> for WebHandler {
 
 // ---- Search implementations ----
 
-fn search_brave(client: &reqwest::Client, query: &str, limit: usize) -> Result<String, String> {
-    let rt = tokio::runtime::Handle::try_current().map_err(|e| format!("no tokio runtime: {e}"))?;
-
+fn search_brave(
+    handle: &tokio::runtime::Handle,
+    client: &reqwest::Client,
+    query: &str,
+    limit: usize,
+) -> Result<String, String> {
     let response = std::thread::scope(|s| {
         let client = client.clone();
         let query = query.to_string();
         s.spawn(move || {
-            rt.block_on(async {
+            handle.block_on(async {
                 client
                     .get("https://search.brave.com/search")
                     .query(&[("q", &query)])
@@ -161,14 +165,20 @@ fn parse_brave_results(html: &str, limit: usize) -> Result<String, String> {
     let document = Html::parse_document(html);
 
     // Brave uses various selectors for results. Try multiple patterns.
-    let result_sel = Selector::parse(".snippet").unwrap();
-    let title_sel = Selector::parse("a.heading-serpresult, .snippet-title a, h3 a").unwrap();
-    let desc_sel = Selector::parse(".snippet-description, .snippet-content p").unwrap();
-    let url_sel = Selector::parse(".snippet-url cite, cite").unwrap();
+    let result_sel = Selector::parse("div.snippet[data-type=\"web\"]").unwrap();
+    let title_sel = Selector::parse(".search-snippet-title").unwrap();
+    let link_sel = Selector::parse("a[href]").unwrap();
+    // Brave description: the text content is in a .content div inside .generic-snippet
+    // The class may include svelte hashes: "content desktop-default-regular t-primary..."
+    let desc_sel = Selector::parse(".content").unwrap();
 
     let mut results = Vec::new();
+    let total_snippets = document.select(&result_sel).count();
+    tracing::debug!(total_snippets, "brave: found snippet elements");
 
     for elem in document.select(&result_sel).take(limit) {
+        let desc_count = elem.select(&desc_sel).count();
+        tracing::debug!(desc_count, "brave: desc matches in snippet");
         let title = elem
             .select(&title_sel)
             .next()
@@ -176,7 +186,7 @@ fn parse_brave_results(html: &str, limit: usize) -> Result<String, String> {
             .unwrap_or_default();
 
         let url = elem
-            .select(&title_sel)
+            .select(&link_sel)
             .next()
             .and_then(|e| e.value().attr("href"))
             .unwrap_or_default()
@@ -221,14 +231,17 @@ fn parse_brave_results(html: &str, limit: usize) -> Result<String, String> {
     serde_json::to_string(&results).map_err(|e| format!("failed to serialize results: {e}"))
 }
 
-fn search_ddg(client: &reqwest::Client, query: &str, limit: usize) -> Result<String, String> {
-    let rt = tokio::runtime::Handle::try_current().map_err(|e| format!("no tokio runtime: {e}"))?;
-
+fn search_ddg(
+    handle: &tokio::runtime::Handle,
+    client: &reqwest::Client,
+    query: &str,
+    limit: usize,
+) -> Result<String, String> {
     let response = std::thread::scope(|s| {
         let client = client.clone();
         let query = query.to_string();
         s.spawn(move || {
-            rt.block_on(async {
+            handle.block_on(async {
                 client
                     .get("https://html.duckduckgo.com/html/")
                     .query(&[("q", &query)])
@@ -289,19 +302,19 @@ fn parse_ddg_results(html: &str, limit: usize) -> Result<String, String> {
 // ---- Fetch implementation ----
 
 fn fetch_page(
+    handle: &tokio::runtime::Handle,
     client: &reqwest::Client,
     url: &str,
     readable: bool,
     offset: usize,
     limit: Option<usize>,
 ) -> Result<String, String> {
-    let rt = tokio::runtime::Handle::try_current().map_err(|e| format!("no tokio runtime: {e}"))?;
-
     let html = std::thread::scope(|s| {
         let client = client.clone();
+        let handle = handle.clone();
         let url = url.to_string();
         s.spawn(move || {
-            rt.block_on(async {
+            handle.block_on(async {
                 client
                     .get(&url)
                     .header("Accept", "text/html,application/xhtml+xml,*/*")
@@ -365,4 +378,81 @@ fn preprocess_html(html: &str) -> String {
     cleaned = svg_re.replace_all(&cleaned, "").to_string();
     cleaned = noscript_re.replace_all(&cleaned, "").to_string();
     cleaned
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_brave_results_from_fixture() {
+        let html = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/brave-search.html"
+        ))
+        .expect("fixture file");
+
+        let results_json = parse_brave_results(&html, 10).expect("parse should succeed");
+        let results: Vec<serde_json::Value> = serde_json::from_str(&results_json).unwrap();
+
+        eprintln!("Total results: {}", results.len());
+        for (i, r) in results.iter().enumerate() {
+            let snippet_preview = &r["snippet"].as_str().unwrap_or("");
+            let preview = &snippet_preview[..std::cmp::min(80, snippet_preview.len())];
+            eprintln!(
+                "Result {}: title={:?} snippet={:?}",
+                i,
+                r["title"].as_str().unwrap_or(""),
+                preview
+            );
+        }
+
+        // Diagnose selectors
+        use scraper::{Html, Selector};
+        let document = Html::parse_document(&html);
+
+        let result_sel = Selector::parse("div.snippet[data-type=\"web\"]").unwrap();
+        let snippet_count = document.select(&result_sel).count();
+        eprintln!("div.snippet[data-type=web] matches: {}", snippet_count);
+
+        let selectors = [
+            ".content",
+            ".generic-snippet",
+            ".generic-snippet .content",
+            ".generic-snippet > .content",
+            "div.content",
+        ];
+        for sel_str in &selectors {
+            let sel = Selector::parse(sel_str).unwrap();
+            let top = document.select(&sel).count();
+            let inner = document
+                .select(&result_sel)
+                .next()
+                .map(|e| e.select(&sel).count())
+                .unwrap_or(0);
+            eprintln!(
+                "Selector {:?}: top-level={}, in-first-snippet={}",
+                sel_str, top, inner
+            );
+        }
+
+        // Detailed look at first snippet's desc element
+        let desc_sel = Selector::parse(".content").unwrap();
+        if let Some(first_snippet) = document.select(&result_sel).next() {
+            if let Some(desc_elem) = first_snippet.select(&desc_sel).next() {
+                let inner = desc_elem.inner_html();
+                let text_pieces: Vec<&str> = desc_elem.text().collect();
+                eprintln!(
+                    "DESC inner_html (first 200): {:?}",
+                    &inner[..std::cmp::min(200, inner.len())]
+                );
+                eprintln!("DESC text pieces: {:?}", text_pieces);
+                eprintln!("DESC text joined: {:?}", text_pieces.join("").trim());
+            } else {
+                eprintln!("NO desc element found in first snippet!");
+            }
+        }
+
+        assert!(snippet_count > 0, "should find snippet elements");
+    }
 }

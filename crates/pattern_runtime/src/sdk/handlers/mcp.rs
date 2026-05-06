@@ -1,5 +1,4 @@
-//! Stub handler for `Pattern.Mcp`. Returns a `Handler` error identifying
-//! which phase will implement it.
+//! Handler for MCP
 
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;

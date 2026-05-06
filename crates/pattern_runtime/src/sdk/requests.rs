@@ -67,7 +67,7 @@ mod parity {
     /// "core name" is the string used in `#[core(name = "...")]` and
     /// equals the Haskell constructor name.
     const EXPECTED: &[(&str, &[&str])] = &[
-        ("TimeReq", &["Now", "Sleep"]),
+        ("TimeReq", &["Now", "NowNanos", "Sleep"]),
         ("LogReq", &["Debug", "Info", "Warn", "Error"]),
         ("DisplayReq", &["Chunk", "Final", "Note"]),
         (
@@ -81,6 +81,13 @@ mod parity {
                 "Search",
                 "Recall",
                 "GetShared",
+                "Pin",
+                "Unpin",
+                "GetSchema",
+                "GetField",
+                "SetField",
+                "UpdateDesc",
+                "Delete",
             ],
         ),
         (
@@ -194,8 +201,9 @@ mod parity {
         use super::TimeReq;
         // Exhaustively mention each variant to force a failure on rename/add.
         let _ = TimeReq::Now;
+        let _ = TimeReq::NowNanos;
         let _ = TimeReq::Sleep(0);
-        assert_eq!(count("TimeReq"), 2);
+        assert_eq!(count("TimeReq"), 3);
     }
 
     #[test]
@@ -236,7 +244,14 @@ mod parity {
         let _ = MemoryReq::Search(String::new());
         let _ = MemoryReq::Recall(String::new());
         let _ = MemoryReq::GetShared(String::new(), String::new());
-        assert_eq!(count("MemoryReq"), 8);
+        let _ = MemoryReq::Pin(String::new());
+        let _ = MemoryReq::Unpin(String::new());
+        let _ = MemoryReq::GetSchema(String::new());
+        let _ = MemoryReq::GetField(String::new(), String::new());
+        let _ = MemoryReq::SetField(String::new(), String::new(), String::new());
+        let _ = MemoryReq::UpdateDesc(String::new(), String::new());
+        let _ = MemoryReq::Delete(String::new());
+        assert_eq!(count("MemoryReq"), 15);
     }
 
     #[test]

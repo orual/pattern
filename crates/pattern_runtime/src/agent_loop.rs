@@ -498,8 +498,19 @@ fn build_snapshot_attachment(
     current_blocks: Vec<RenderedBlock>,
     prior_tracked_hashes: Option<std::collections::HashMap<String, u64>>,
 ) -> MessageAttachment {
-    let block_names: Vec<smol_str::SmolStr> =
-        current_blocks.iter().map(|b| b.label.clone()).collect();
+    let block_names: Vec<smol_str::SmolStr> = current_blocks
+        .iter()
+        .filter(|b| {
+            // Include blocks that are tracked-but-silent (rendered: None)
+            // — they're valid blocks not shown this turn. Only exclude
+            // blocks with explicitly empty content (rendered: Some("")).
+            match b.rendered.as_ref() {
+                None => true, // tracked but silent — keep in namespace
+                Some(r) => !r.trim().is_empty(),
+            }
+        })
+        .map(|b| b.label.clone())
+        .collect();
 
     match &kind {
         SnapshotKind::Full => MessageAttachment::BatchOpeningSnapshot {
@@ -1065,6 +1076,25 @@ pub async fn drive_step(
         // Attach to the first user message.
         if let Some(first_msg) = cur_input.messages.first_mut() {
             first_msg.attachments.push(attachment);
+
+            // Periodic memory-check reminder: every N batches, nudge the
+            // agent to consider updating memory blocks or archival.
+            const MEMORY_CHECK_INTERVAL: u32 = 10;
+            let batches_active = turn_history
+                .lock()
+                .map(|h| h.active_len() as u32)
+                .unwrap_or(0);
+            if batches_active > 0 && batches_active % MEMORY_CHECK_INTERVAL == 0 {
+                first_msg.attachments.push(MessageAttachment::Custom {
+                    content: concat!(
+                        "[memory:check] Review this conversation for information worth ",
+                        "persisting. Update working blocks if you learned something, ",
+                        "archive finished work via Recall.insert, or search past context ",
+                        "with Recall.search / Search.messages if something feels familiar. ",
+                        "No confirmation needed — just do it if relevant."
+                    ).to_string(),
+                });
+            }
         }
 
         // Update TurnHistory snapshot tracking.

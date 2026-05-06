@@ -127,11 +127,17 @@ pub fn render_attachment_content(attachment: &MessageAttachment) -> String {
                 }
             }
 
-            if block_names.is_empty() {
-                parts.push("(no blocks loaded)".to_string());
-            } else {
-                let names: Vec<&str> = block_names.iter().map(|s| s.as_str()).collect();
-                parts.push(format!("Available blocks: {}", names.join(", ")));
+            // Show block list on Full snapshots always, on Delta only when
+            // blocks changed (avoids repeating unchanged list every turn).
+            let show_block_list = matches!(kind, SnapshotKind::Full)
+                || !edited_blocks.is_empty();
+            if show_block_list {
+                if block_names.is_empty() {
+                    parts.push("(no blocks loaded)".to_string());
+                } else {
+                    let names: Vec<&str> = block_names.iter().map(|s| s.as_str()).collect();
+                    parts.push(format!("Available blocks: {}", names.join(", ")));
+                }
             }
 
             for block in blocks {

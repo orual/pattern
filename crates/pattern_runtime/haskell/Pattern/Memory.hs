@@ -80,6 +80,7 @@ data Memory a where
   SetField   :: BlockHandle -> Text -> Text -> Memory ()
   -- | Update the description of an existing block.
   UpdateDesc :: BlockHandle -> Text -> Memory ()
+  Delete :: BlockHandle -> Memory ()
 
 -- | Fetch a block's rendered content by label.
 get :: Member Memory effs => BlockHandle -> Eff effs Content
@@ -143,3 +144,6 @@ setField h f v = send (SetField h f v)
 -- | Update a block's description.
 updateDesc :: Member Memory effs => BlockHandle -> Text -> Eff effs ()
 updateDesc h d = send (UpdateDesc h d)
+
+delete :: Member Memory effs => BlockHandle -> Eff effs ()
+delete h = send (Delete h)

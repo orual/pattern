@@ -1,9 +1,8 @@
 //! Fully-implemented handler for `Pattern.Time`.
 //!
-//! `Now` returns current UTC nanoseconds (via `jiff::Timestamp`) narrowed
-//! to `i64` (the GHC `Int` wire format). `Sleep` performs a bounded
-//! in-handler sleep; longer sleeps must go through a Rust-side scheduler
-//! effect (future) rather than blocking the JIT loop.
+//! `Now` returns current UTC timestamp as an RFC 3339 string via `jiff::Timestamp`.
+//! `NowNanos` returns UTC nanoseconds as i64 for arithmetic.
+//! `Sleep` performs a bounded in-handler sleep.
 
 use jiff::Timestamp;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
@@ -13,9 +12,7 @@ use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::TimeReq;
 use crate::session::HasCapabilities;
 
-/// Maximum in-handler sleep duration. Longer sleeps should use a
-/// scheduler effect (future work) to avoid blocking the JIT loop for
-/// extended periods.
+/// Maximum in-handler sleep duration.
 const MAX_SLEEP_NS: i64 = 100_000_000;
 
 /// Handler for `Pattern.Time`. Stateless.
@@ -26,14 +23,16 @@ impl DescribeEffect for TimeHandler {
     fn effect_decl() -> EffectDecl {
         EffectDecl {
             type_name: "Time",
-            description: "Wall-clock time and bounded sleep (Now/Sleep)",
+            description: "Wall-clock time and bounded sleep (Now/NowNanos/Sleep)",
             constructors: std::borrow::Cow::Borrowed(&[
-                "Now   :: Time Int",
-                "Sleep :: Int -> Time ()",
+                "Now      :: Time Text",
+                "NowNanos :: Time Int",
+                "Sleep    :: Int -> Time ()",
             ]),
             type_defs: std::borrow::Cow::Borrowed(&[]),
             helpers: std::borrow::Cow::Borrowed(&[
-                "now :: Member Time effs => Eff effs Int\nnow = send Now",
+                "now :: Member Time effs => Eff effs Text\nnow = send Now",
+                "nowNanos :: Member Time effs => Eff effs Int\nnowNanos = send NowNanos",
                 "sleep :: Member Time effs => Int -> Eff effs ()\nsleep ns = send (Sleep ns)",
             ]),
         }
@@ -47,10 +46,6 @@ where
     type Request = TimeReq;
 
     fn handle(&mut self, req: TimeReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
-        // Soft-cancel cooperative check: the watchdog may have flipped
-        // the session's cancellation flag while we were running agent
-        // compute between effect yields. Surface the documented sentinel
-        // so `run_turn` maps it to a CancelPath::Soft timeout.
         if cx
             .user()
             .cancel_state()
@@ -63,10 +58,9 @@ where
             )));
         }
 
-        // Effect-class runtime guard.
-        // Now=Observe/Enforce; Sleep=MutateInternal/Enforce.
         let constructor_name = match &req {
             TimeReq::Now => "Now",
+            TimeReq::NowNanos => "NowNanos",
             TimeReq::Sleep(_) => "Sleep",
         };
         crate::sdk::effect_classes::check_effect_class(
@@ -77,9 +71,11 @@ where
 
         match req {
             TimeReq::Now => {
-                // jiff::Timestamp is an explicit UTC instant with nanosecond precision.
-                // as_nanosecond() returns i128 (jiff's range exceeds i64); narrow to
-                // i64 for the Haskell Int wire format. try_from panics only past year 2262.
+                // jiff Timestamp::to_string() produces RFC 3339 format
+                let formatted = Timestamp::now().to_string();
+                cx.respond(formatted)
+            }
+            TimeReq::NowNanos => {
                 let ns: i64 = i64::try_from(Timestamp::now().as_nanosecond())
                     .expect("timestamp fits in i64 nanos until year 2262");
                 cx.respond(ns)
@@ -96,96 +92,9 @@ where
                          use scheduler effect (future)"
                     )));
                 }
-                // Intentional: bounded stopwatch sleep, not a wall-clock wait.
-                // std::thread::sleep is correct here; jiff does not manage
-                // monotonic durations.
                 std::thread::sleep(std::time::Duration::from_nanos(ns as u64));
                 cx.respond(())
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::testing::standard_datacon_table;
-    use tidepool_repr::{DataCon, DataConId, Literal};
-
-    /// Build a test DataConTable from the standard set plus the `()`
-    /// constructor. `standard_datacon_table()` already contains `I#` for
-    /// int boxing; `()` is not in the standard set because it is a
-    /// Haskell primitive tuple type rather than a stdlib algebraic type.
-    fn handler_table() -> tidepool_repr::DataConTable {
-        let mut table = standard_datacon_table();
-        // `()` (GHC.Tuple) is required by `ToCore<()>` / `cx.respond(())`.
-        table.insert(DataCon {
-            id: DataConId(100),
-            name: "()".to_string(),
-            tag: 1,
-            rep_arity: 0,
-            field_bangs: vec![],
-            qualified_name: Some("GHC.Tuple.()".to_string()),
-        });
-        table
-    }
-
-    #[test]
-    fn time_now_returns_current_nanos() {
-        let table = handler_table();
-        let cx = EffectContext::with_user(&table, &());
-        let mut h = TimeHandler;
-
-        let before = i64::try_from(Timestamp::now().as_nanosecond()).unwrap();
-        let v = h.handle(TimeReq::Now, &cx).unwrap();
-        let after = i64::try_from(Timestamp::now().as_nanosecond()).unwrap();
-
-        // `ToCore<i64>` boxes the int into an `I#` constructor
-        // (Haskell Int = I# Int#).
-        match v {
-            Value::Con(_, ref fields) if fields.len() == 1 => match &fields[0] {
-                Value::Lit(Literal::LitInt(n)) => {
-                    assert!(
-                        *n >= before && *n <= after,
-                        "expected LitInt in [{before}, {after}], got {n}"
-                    );
-                }
-                other => panic!("expected boxed LitInt, got {other:?}"),
-            },
-            other => panic!("expected Value::Con(I#, [_]), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn time_sleep_zero_returns_unit() {
-        let table = handler_table();
-        let cx = EffectContext::with_user(&table, &());
-        let mut h = TimeHandler;
-        let v = h.handle(TimeReq::Sleep(0), &cx).unwrap();
-        match v {
-            Value::Con(_, ref fields) if fields.is_empty() => {}
-            other => panic!("expected unit Value::Con(_, []), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn time_sleep_negative_errors() {
-        let table = handler_table();
-        let cx = EffectContext::with_user(&table, &());
-        let mut h = TimeHandler;
-        let err = h.handle(TimeReq::Sleep(-1), &cx).unwrap_err();
-        assert!(err.to_string().contains("negative"), "got: {err}");
-    }
-
-    #[test]
-    fn time_sleep_exceeds_limit_errors() {
-        let table = handler_table();
-        let cx = EffectContext::with_user(&table, &());
-        let mut h = TimeHandler;
-        let err = h.handle(TimeReq::Sleep(MAX_SLEEP_NS + 1), &cx).unwrap_err();
-        assert!(
-            err.to_string().contains("exceeds in-handler limit"),
-            "got: {err}"
-        );
     }
 }

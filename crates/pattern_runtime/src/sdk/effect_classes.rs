@@ -17,7 +17,7 @@ pub struct ConstructorClass {
 
 /// Canonical classification table. 76 entries.
 pub const ALL_CLASSES: &[ConstructorClass] = &[
-    // ── Pattern.Memory (10) ──────────────────────────────────────────────
+    // ── Pattern.Memory (15) ──────────────────────────────────────────────
     ConstructorClass {
         module: "Memory",
         constructor: "Get",
@@ -99,6 +99,12 @@ pub const ALL_CLASSES: &[ConstructorClass] = &[
     ConstructorClass {
         module: "Memory",
         constructor: "UpdateDesc",
+        class: EffectClass::MutateInternal,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
+    ConstructorClass {
+        module: "Memory",
+        constructor: "Delete",
         class: EffectClass::MutateInternal,
         runtime_check: RuntimeClassCheck::Enforce,
     },
@@ -270,10 +276,16 @@ pub const ALL_CLASSES: &[ConstructorClass] = &[
         class: EffectClass::Observe,
         runtime_check: RuntimeClassCheck::Enforce,
     },
-    // ── Pattern.Time (2) ─────────────────────────────────────────────────
+    // ── Pattern.Time (3) ─────────────────────────────────────────────────
     ConstructorClass {
         module: "Time",
         constructor: "Now",
+        class: EffectClass::Observe,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
+    ConstructorClass {
+        module: "Time",
+        constructor: "NowNanos",
         class: EffectClass::Observe,
         runtime_check: RuntimeClassCheck::Enforce,
     },

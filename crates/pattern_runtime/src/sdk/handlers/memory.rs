@@ -65,6 +65,7 @@ impl DescribeEffect for MemoryHandler {
                 "GetField       :: BlockHandle -> Text -> Memory (Maybe Text)",
                 "SetField       :: BlockHandle -> Text -> Text -> Memory ()",
                 "UpdateDesc     :: BlockHandle -> Text -> Memory ()",
+                "Delete         :: BlockHandle -> Memory ()",
             ]),
             type_defs: std::borrow::Cow::Borrowed(&[
                 "type BlockHandle = Text",
@@ -90,6 +91,7 @@ impl DescribeEffect for MemoryHandler {
                 "getField :: Member Memory effs => BlockHandle -> Text -> Eff effs (Maybe Text)\ngetField h f = send (GetField h f)",
                 "setField :: Member Memory effs => BlockHandle -> Text -> Text -> Eff effs ()\nsetField h f v = send (SetField h f v)",
                 "updateDesc :: Member Memory effs => BlockHandle -> Text -> Eff effs ()\nupdateDesc h d = send (UpdateDesc h d)",
+                "delete :: Member Memory effs => BlockHandle -> Eff effs ()\ndelete h = send (Delete h)",
             ]),
         }
     }
@@ -127,6 +129,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
             MemoryReq::GetField(_, _) => "GetField",
             MemoryReq::SetField(_, _, _) => "SetField",
             MemoryReq::UpdateDesc(_, _) => "UpdateDesc",
+            MemoryReq::Delete(_) => "Delete",
         };
         crate::sdk::effect_classes::check_effect_class(
             cx.user().capabilities(),
@@ -480,6 +483,16 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                 cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
                     pattern_core::hooks::tags::MEMORY_WRITE,
                     serde_json::json!({ "label": label, "scope": scope.to_string(), "operation": "update_desc" }),
+                ));
+                cx.respond(())
+            }
+            MemoryReq::Delete(label) => {
+                adapter
+                    .delete_block(&scope, &label)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Delete: {e}")))?;
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::MEMORY_WRITE,
+                    serde_json::json!({ "label": label, "scope": scope.to_string(), "operation": "delete" }),
                 ));
                 cx.respond(())
             }

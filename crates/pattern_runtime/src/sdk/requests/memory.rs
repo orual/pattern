@@ -159,4 +159,9 @@ pub enum MemoryReq {
 
     #[core(module = "Pattern.Memory", name = "UpdateDesc")]
     UpdateDesc(String, String),
+
+    /// `Delete label` — soft-delete a block. Recoverable in DB but
+    /// removed from the active block list.
+    #[core(module = "Pattern.Memory", name = "Delete")]
+    Delete(String),
 }

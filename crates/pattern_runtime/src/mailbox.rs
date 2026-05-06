@@ -319,9 +319,7 @@ async fn mailbox_task_body(
             drive_step(turn_input, ctx_c, hist_c, cp, disp.as_ref(), &pre, None).await
         });
         match step_handle.await {
-            Ok(Ok(reply)) => {
-                tracing::info!("drive_step completed successfully, reply: {reply:?}");
-            }
+            Ok(Ok(_)) => {}
             Ok(Err(err)) => {
                 tracing::warn!(
                     error = ?err,
