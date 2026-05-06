@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use pattern_core::traits::MemoryStore;
-use pattern_core::types::memory_types::SearchOptions;
+use pattern_core::types::memory_types::{MemorySearchScope, Scope, SearchOptions};
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
@@ -123,11 +123,26 @@ impl EffectHandler<SessionContext> for SearchHandler {
                     .search(
                         &query,
                         options.clone(),
-                        pattern_core::types::memory_types::MemorySearchScope::Scope(
-                            pattern_core::types::memory_types::Scope::Global(
-                                target_agent.as_str().into(),
-                            ),
-                        ),
+                        MemorySearchScope::Scope(Scope::Local(target_agent.as_str().into())),
+                    )
+                    .map_err(|e| {
+                        EffectError::Handler(format!("Pattern.Search: search failed: {e}"))
+                    })?;
+                for r in results {
+                    hits.push(serde_json::json!({
+                        "id": r.id,
+                        "agentId": target_agent,
+                        "content": r.content,
+                        "contentType": format!("{:?}", r.content_type),
+                        "score": r.score,
+                    }));
+                }
+                // TODO: gate this properly
+                let results = store
+                    .search(
+                        &query,
+                        options.clone(),
+                        MemorySearchScope::Scope(Scope::Global(target_agent.as_str().into())),
                     )
                     .map_err(|e| {
                         EffectError::Handler(format!("Pattern.Search: search failed: {e}"))
@@ -148,10 +163,12 @@ impl EffectHandler<SessionContext> for SearchHandler {
                 .iter()
                 .map(|h| serde_json::to_string(h).unwrap_or_default())
                 .collect();
-            cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
-                pattern_core::hooks::tags::SEARCH_QUERY,
-                serde_json::json!({ "query": query, "result_count": items.len() }),
-            ));
+            cx.user()
+                .hook_bridge()
+                .emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::SEARCH_QUERY,
+                    serde_json::json!({ "query": query, "results": hits }),
+                ));
             cx.respond(items)
         })();
 

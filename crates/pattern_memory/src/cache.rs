@@ -1592,8 +1592,8 @@ pub(crate) fn spawn_subscriber_for_block(
     // Recover the doc's typed Scope from the encoded `agent_id` it carries.
     // Pre-Phase-1 docs that haven't been migrated have a bare agent_id; we
     // treat those as `Scope::Global(agent_id)` so they keep working.
-    let doc_scope = Scope::from_db_key(doc.agent_id())
-        .unwrap_or_else(|| Scope::Global(doc.agent_id().into()));
+    let doc_scope =
+        Scope::from_db_key(doc.agent_id()).unwrap_or_else(|| Scope::Global(doc.agent_id().into()));
 
     // Determine the canonical file extension for this schema so we can compute
     // the block file path for the SyncedDoc. The extension must match what
@@ -1989,11 +1989,7 @@ fn db_archival_to_archival(entry: &pattern_db::models::ArchivalEntry) -> Archiva
 }
 
 impl MemoryStore for MemoryCache {
-    fn create_block(
-        &self,
-        scope: &Scope,
-        create: BlockCreate,
-    ) -> MemoryResult<StructuredDocument> {
+    fn create_block(&self, scope: &Scope, create: BlockCreate) -> MemoryResult<StructuredDocument> {
         let BlockCreate {
             label,
             description,
@@ -2036,10 +2032,8 @@ impl MemoryStore for MemoryCache {
         };
 
         // Create new StructuredDocument with metadata.
-        let doc = StructuredDocument::new_with_metadata(
-            block_metadata.clone(),
-            Some(agent_id.clone()),
-        );
+        let doc =
+            StructuredDocument::new_with_metadata(block_metadata.clone(), Some(agent_id.clone()));
 
         // For Skill blocks, initialize the "metadata" and "extras" LoroMap
         // containers with sensible defaults so the subscriber worker can
@@ -2168,8 +2162,7 @@ impl MemoryStore for MemoryCache {
         // Query DB for block metadata without loading full document.
         let key = scope.to_db_key();
         let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label)
-                .mem()?;
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label).mem()?;
 
         Ok(block.as_ref().map(db_block_to_metadata))
     }
@@ -2223,9 +2216,12 @@ impl MemoryStore for MemoryCache {
         conn.execute(
             "DELETE FROM memory_blocks WHERE agent_id = ?1 AND label = ?2",
             rusqlite::params![key, create.label],
-        ).map_err(|e| MemoryError::Other(format!("hard delete for replace: {e}")))?;
+        )
+        .map_err(|e| MemoryError::Other(format!("hard delete for replace: {e}")))?;
         // Also remove from in-memory cache if present.
-        if let Ok(Some(block)) = pattern_db::queries::get_block_by_label(&*conn, &key, &create.label) {
+        if let Ok(Some(block)) =
+            pattern_db::queries::get_block_by_label(&*conn, &key, &create.label)
+        {
             self.blocks.remove(&block.id);
         }
         drop(conn);
@@ -2236,8 +2232,7 @@ impl MemoryStore for MemoryCache {
         // Get block ID first.
         let key = scope.to_db_key();
         let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label)
-                .mem()?;
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label).mem()?;
 
         if let Some(block) = block {
             // Drop from cache first (will persist if dirty and cancel subscriber).
@@ -2267,7 +2262,9 @@ impl MemoryStore for MemoryCache {
         let key = scope.to_db_key();
         MemoryCache::mark_dirty_checked(self, &key, label, scope)?;
         self.persist(&key, label)?;
-        if let Ok(Some(block)) = pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label) {
+        if let Ok(Some(block)) =
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label)
+        {
             self.maybe_spawn_subscriber_for_block(&block.id);
         }
         Ok(())
@@ -2315,6 +2312,7 @@ impl MemoryStore for MemoryCache {
         // Use rich search with FTS mode.
         let search_conn = self.db.get().mem()?;
         let key = scope.to_db_key();
+        tracing::info!("agent id used: {key}");
         let results = pattern_db::search::search(&search_conn)
             .text(query)
             .mode(pattern_db::search::SearchMode::FtsOnly)
@@ -2326,6 +2324,7 @@ impl MemoryStore for MemoryCache {
         // Convert search results to ArchivalEntry.
         let mut entries = Vec::new();
         for result in results {
+            tracing::info!("search results: {:?}", result);
             if let Some(entry) =
                 pattern_db::queries::get_archival_entry(&search_conn, &result.id).mem()?
             {
@@ -2361,8 +2360,7 @@ impl MemoryStore for MemoryCache {
 
     fn list_shared_blocks(&self, scope: &Scope) -> MemoryResult<Vec<SharedBlockInfo>> {
         let key = scope.to_db_key();
-        let shared =
-            pattern_db::queries::get_shared_blocks(&*self.db.get().mem()?, &key).mem()?;
+        let shared = pattern_db::queries::get_shared_blocks(&*self.db.get().mem()?, &key).mem()?;
 
         Ok(shared
             .into_iter()
@@ -2454,8 +2452,7 @@ impl MemoryStore for MemoryCache {
         // Get block from DB.
         let key = scope.to_db_key();
         let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label)
-                .mem()?;
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label).mem()?;
 
         let block = block.ok_or_else(|| MemoryError::WriteToMissingBlock {
             scope: scope.clone(),
@@ -2551,8 +2548,7 @@ impl MemoryStore for MemoryCache {
         // Get block ID from DB.
         let key = scope.to_db_key();
         let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label)
-                .mem()?;
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label).mem()?;
 
         let block = block.ok_or_else(|| MemoryError::WriteToMissingBlock {
             scope: scope.clone(),
@@ -2638,8 +2634,7 @@ impl MemoryStore for MemoryCache {
     fn history_depth(&self, scope: &Scope, label: &str) -> MemoryResult<UndoRedoDepth> {
         let key = scope.to_db_key();
         let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label)
-                .mem()?;
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label).mem()?;
 
         let block = block.ok_or_else(|| MemoryError::WriteToMissingBlock {
             scope: scope.clone(),
@@ -2908,7 +2903,9 @@ mod tests {
         assert!(created_doc.id().starts_with("mem_"));
 
         // Get the block back (should return same doc since it's cached).
-        let doc = cache.get_block(&Scope::global("agent_1"), "test_block").unwrap();
+        let doc = cache
+            .get_block(&Scope::global("agent_1"), "test_block")
+            .unwrap();
         assert!(doc.is_some());
 
         // Verify content is initially empty.
@@ -2994,14 +2991,20 @@ mod tests {
             .unwrap();
 
         // Verify it exists.
-        let doc = cache.get_block(&Scope::global("agent_1"), "to_delete").unwrap();
+        let doc = cache
+            .get_block(&Scope::global("agent_1"), "to_delete")
+            .unwrap();
         assert!(doc.is_some());
 
         // Delete it.
-        cache.delete_block(&Scope::global("agent_1"), "to_delete").unwrap();
+        cache
+            .delete_block(&Scope::global("agent_1"), "to_delete")
+            .unwrap();
 
         // Verify it's gone (soft delete → get_block returns Ok(None)).
-        let doc = cache.get_block(&Scope::global("agent_1"), "to_delete").unwrap();
+        let doc = cache
+            .get_block(&Scope::global("agent_1"), "to_delete")
+            .unwrap();
         assert!(doc.is_none());
 
         // List should not include deleted block.
@@ -3039,7 +3042,9 @@ mod tests {
 
         // Mark dirty and persist.
         cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "content_test");
-        cache.persist_block(&Scope::global("agent_1"), "content_test").unwrap();
+        cache
+            .persist_block(&Scope::global("agent_1"), "content_test")
+            .unwrap();
 
         // Get rendered content.
         let content = cache
@@ -3155,7 +3160,9 @@ mod tests {
         )
         .unwrap();
         cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "persona");
-        cache.persist_block(&Scope::global("agent_1"), "persona").unwrap();
+        cache
+            .persist_block(&Scope::global("agent_1"), "persona")
+            .unwrap();
 
         // Create another block.
         cache
@@ -3177,7 +3184,9 @@ mod tests {
         )
         .unwrap();
         cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "notes");
-        cache.persist_block(&Scope::global("agent_1"), "notes").unwrap();
+        cache
+            .persist_block(&Scope::global("agent_1"), "notes")
+            .unwrap();
 
         // Search for "Rust" - should find persona block.
         let opts = SearchOptions {
@@ -3348,7 +3357,9 @@ mod tests {
         doc.set_text("I specialize in Rust programming and system design", true)
             .unwrap();
         cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "persona");
-        cache.persist_block(&Scope::global("agent_1"), "persona").unwrap();
+        cache
+            .persist_block(&Scope::global("agent_1"), "persona")
+            .unwrap();
 
         // Create an archival entry.
         cache
@@ -3393,12 +3404,20 @@ mod tests {
 
         // Insert archival for agent_1.
         cache
-            .insert_archival(&Scope::global("agent_1"), "Agent 1 secret information", None)
+            .insert_archival(
+                &Scope::global("agent_1"),
+                "Agent 1 secret information",
+                None,
+            )
             .unwrap();
 
         // Insert archival for agent_2.
         cache
-            .insert_archival(&Scope::global("agent_2"), "Agent 2 secret information", None)
+            .insert_archival(
+                &Scope::global("agent_2"),
+                "Agent 2 secret information",
+                None,
+            )
             .unwrap();
 
         // Search for agent_1 should only return agent_1's data.
@@ -3484,10 +3503,16 @@ mod tests {
             .unwrap();
         doc.set_text("Searchable block content", true).unwrap();
         cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "test_block");
-        cache.persist_block(&Scope::global("agent_1"), "test_block").unwrap();
+        cache
+            .persist_block(&Scope::global("agent_1"), "test_block")
+            .unwrap();
 
         cache
-            .insert_archival(&Scope::global("agent_1"), "Searchable archival content", None)
+            .insert_archival(
+                &Scope::global("agent_1"),
+                "Searchable archival content",
+                None,
+            )
             .unwrap();
 
         // Search with empty content_types - should search all types.
@@ -3514,7 +3539,11 @@ mod tests {
 
         // Insert archival entry.
         cache
-            .insert_archival(&Scope::global("agent_1"), "Test content for hybrid search", None)
+            .insert_archival(
+                &Scope::global("agent_1"),
+                "Test content for hybrid search",
+                None,
+            )
             .unwrap();
 
         // Search with Hybrid mode (should gracefully fall back to FTS).
@@ -3548,7 +3577,11 @@ mod tests {
 
         // Insert archival entry.
         cache
-            .insert_archival(&Scope::global("agent_1"), "Test content for vector search", None)
+            .insert_archival(
+                &Scope::global("agent_1"),
+                "Test content for vector search",
+                None,
+            )
             .unwrap();
 
         // Search with Vector mode (should gracefully fall back to FTS).
@@ -3631,7 +3664,9 @@ mod tests {
         // Set initial content.
         doc.set_text("Hello world, this is a test.", true).unwrap();
         cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "test_replace");
-        cache.persist(&Scope::global("agent_1").to_db_key(), "test_replace").unwrap();
+        cache
+            .persist(&Scope::global("agent_1").to_db_key(), "test_replace")
+            .unwrap();
 
         // Get the version vector before replacement.
         let vv_before = doc.inner().oplog_vv();
@@ -3643,7 +3678,9 @@ mod tests {
 
         // Persist the changes.
         cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "test_replace");
-        cache.persist(&Scope::global("agent_1").to_db_key(), "test_replace").unwrap();
+        cache
+            .persist(&Scope::global("agent_1").to_db_key(), "test_replace")
+            .unwrap();
 
         // Verify the content is correct.
         assert_eq!(doc.text_content(), "Hello universe, this is a test.");
@@ -3679,7 +3716,9 @@ mod tests {
         // Set initial content.
         doc.set_text("Hello world", true).unwrap();
         cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "test_replace");
-        cache.persist(&Scope::global("agent_1").to_db_key(), "test_replace").unwrap();
+        cache
+            .persist(&Scope::global("agent_1").to_db_key(), "test_replace")
+            .unwrap();
 
         // Try to replace something that doesn't exist.
         let replaced = doc

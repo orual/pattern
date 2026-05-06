@@ -8,7 +8,9 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use pattern_core::hooks::HookEvent;
 use pattern_core::traits::MemoryStore;
+use pattern_core::types::memory_types::Scope;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
@@ -108,12 +110,10 @@ impl EffectHandler<SessionContext> for RecallHandler {
                 let id = store
                     .insert_archival(&session_scope, &content, None)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Recall.Insert: {e}")))?;
-                cx.user()
-                    .hook_bridge()
-                    .emit(pattern_core::hooks::HookEvent::notification(
-                        pattern_core::hooks::tags::RECALL_INSERTED,
-                        serde_json::json!({ "entry_id": id }),
-                    ));
+                cx.user().hook_bridge().emit(HookEvent::notification(
+                    pattern_core::hooks::tags::RECALL_INSERTED,
+                    serde_json::json!({ "entry_id": id }),
+                ));
                 cx.respond(id)
             }
 
@@ -124,9 +124,22 @@ impl EffectHandler<SessionContext> for RecallHandler {
                 let mut hits: Vec<String> = Vec::new();
                 for target_agent in &agents {
                     // Cross-agent recall is persona-scoped (Global).
-                    let target_scope = pattern_core::types::memory_types::Scope::Global(
-                        target_agent.clone().into(),
-                    );
+                    let target_scope = Scope::Local(target_agent.clone().into());
+                    let results = store
+                        .search_archival(&target_scope, &query, 10)
+                        .map_err(|e| EffectError::Handler(format!("Pattern.Recall.Search: {e}")))?;
+                    for r in results {
+                        let hit = serde_json::json!({
+                            "id": r.id,
+                            "agentId": r.agent_id,
+                            "content": r.content,
+                            "createdAt": r.created_at.to_rfc3339(),
+                        });
+                        hits.push(serde_json::to_string(&hit).unwrap_or_default());
+                    }
+
+                    // TODO: gate this properly
+                    let target_scope = Scope::Global(target_agent.clone().into());
                     let results = store
                         .search_archival(&target_scope, &query, 10)
                         .map_err(|e| EffectError::Handler(format!("Pattern.Recall.Search: {e}")))?;
@@ -141,12 +154,10 @@ impl EffectHandler<SessionContext> for RecallHandler {
                     }
                 }
 
-                cx.user()
-                    .hook_bridge()
-                    .emit(pattern_core::hooks::HookEvent::notification(
-                        pattern_core::hooks::tags::RECALL_SEARCH,
-                        serde_json::json!({ "query": query, "result_count": hits.len() }),
-                    ));
+                cx.user().hook_bridge().emit(HookEvent::notification(
+                    pattern_core::hooks::tags::RECALL_SEARCH,
+                    serde_json::json!({ "query": query, "results": hits }),
+                ));
                 cx.respond(hits)
             }
 
@@ -161,9 +172,7 @@ impl EffectHandler<SessionContext> for RecallHandler {
                     ))
                 })?;
                 cx.respond(entry.content)
-            } // RecallReq::Delete removed (v3-memory-rework Phase 3, AC4.9).
-              // MemoryStore::delete_archival retained for human-operator
-              // tooling (CLI / TUI); agents cannot reach it via the SDK.
+            }
         })();
 
         if let Ok(ref value) = result {
