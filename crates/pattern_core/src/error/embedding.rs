@@ -77,4 +77,56 @@ pub enum EmbeddingError {
         help("provide at least one non-empty text to embed")
     )]
     EmptyInput,
+
+    /// The embedding model could not be loaded.
+    #[error("model load failed: {path}")]
+    #[diagnostic(
+        code(pattern_core::embedding::model_load),
+        help("check that the model file exists and is a valid GGUF")
+    )]
+    ModelLoad {
+        path: std::path::PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// Backend initialization failed (Vulkan, CUDA, etc.).
+    #[error("backend init failed")]
+    #[diagnostic(
+        code(pattern_core::embedding::backend_init),
+        help("check GPU drivers and backend availability")
+    )]
+    BackendInit(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Tokenization of the input text failed.
+    #[error("tokenization failed")]
+    #[diagnostic(
+        code(pattern_core::embedding::tokenization),
+        help("input may contain characters unsupported by the model's tokenizer")
+    )]
+    Tokenization(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// The model's decode/inference step failed.
+    #[error("inference failed")]
+    #[diagnostic(
+        code(pattern_core::embedding::inference),
+        help("input may exceed context window, or GPU ran out of memory")
+    )]
+    Inference(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// The input text was empty or otherwise unsuitable.
+    #[error("invalid input: empty after tokenization")]
+    #[diagnostic(
+        code(pattern_core::embedding::empty_input_after_tokenize),
+        help("provide non-empty text within the model's context window")
+    )]
+    EmptyAfterTokenize,
+
+    /// A blocking task (spawn_blocking) was cancelled or panicked.
+    #[error("async task failed")]
+    #[diagnostic(
+        code(pattern_core::embedding::task_failed),
+        help("the embedding computation was cancelled or panicked")
+    )]
+    TaskFailed(#[source] tokio::task::JoinError),
 }

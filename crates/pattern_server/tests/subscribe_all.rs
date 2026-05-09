@@ -139,7 +139,7 @@ async fn subscribe_all_receives_constellation_changed_on_add_relationship() {
     let tmp = make_mount();
     // Seed two personas via a separate registry handle so AddRelationship
     // has valid endpoints.
-    let mounted = pattern_memory::mount::attach(tmp.path(), None).expect("attach");
+    let mounted = pattern_memory::mount::attach(tmp.path(), None, None).expect("attach");
     let raw = pattern_db::ConstellationRegistryDb::new(mounted.db.clone());
     raw.register(PersonaRecord::new("alice", "Alice", PersonaStatus::Active))
         .await
@@ -194,7 +194,7 @@ async fn add_relationship_duplicate_emits_exactly_one_event() {
     use pattern_core::constellation::{PersonaRecord, PersonaStatus};
 
     let tmp = make_mount();
-    let mounted = pattern_memory::mount::attach(tmp.path(), None).expect("attach");
+    let mounted = pattern_memory::mount::attach(tmp.path(), None, None).expect("attach");
     let raw = pattern_db::ConstellationRegistryDb::new(mounted.db.clone());
     raw.register(PersonaRecord::new("alice", "Alice", PersonaStatus::Active))
         .await

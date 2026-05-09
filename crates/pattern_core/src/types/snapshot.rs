@@ -172,6 +172,11 @@ pub struct PersonaSnapshot {
     pub extra: serde_json::Value,
 
     // -- Session-state serialization ------------------------------------
+    /// MCP server configs loaded from persona KDL. These are merged with
+    /// plugin-sourced configs at session open and fed to McpRegistry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<crate::mcp::McpServerConfig>,
+
     /// File paths the agent had open at snapshot time. On restore, these
     /// are re-opened with fresh LoroDocs — no LoroDoc state persists
     /// across snapshot boundaries (loro docs are ephemeral per design).
@@ -207,6 +212,7 @@ impl PersonaSnapshot {
             capabilities: None,
             policy_rules: Vec::new(),
             extra: serde_json::Value::Null,
+            mcp_servers: Vec::new(),
             open_files: Vec::new(),
         }
     }

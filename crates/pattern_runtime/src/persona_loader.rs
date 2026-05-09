@@ -357,6 +357,11 @@ struct PersonaFile {
     /// `Precedence::KdlConfig` over Rust defaults at session open.
     #[knus(child)]
     policy: Option<PolicySectionDoc>,
+
+    /// `mcp` node — MCP server configurations loaded natively
+    /// (outside the CC adapter plugin system).
+    #[knus(child, default)]
+    mcp: McpSection,
 }
 
 /// `capabilities` section.
@@ -468,6 +473,63 @@ struct MatcherDoc {
     /// Glob pattern for `shell-command` and `file-path` matchers.
     #[knus(property, default)]
     pattern: Option<String>,
+}
+
+/// `mcp` section — native MCP server configurations.
+///
+/// KDL:
+/// ```text
+/// mcp {
+///     server "discord-mcp" {
+///         command "python"
+///         args "-m" "mcp_discord"
+///         env "DISCORD_TOKEN" "${DISCORD_TOKEN}"
+///     }
+///     server "playwright" {
+///         command "/path/to/playwright-mcp.sh"
+///         args "--headless"
+///     }
+/// }
+/// ```
+#[derive(Debug, Decode, Default)]
+struct McpSection {
+    #[knus(children(name = "server"))]
+    servers: Vec<McpServerDoc>,
+}
+
+/// One `server` child of `mcp`.
+#[derive(Debug, Decode)]
+struct McpServerDoc {
+    /// Server name (first positional argument).
+    #[knus(argument)]
+    name: String,
+
+    /// Command to spawn.
+    #[knus(child, unwrap(argument))]
+    command: String,
+
+    /// Command-line arguments (each is a positional argument on the
+    /// `args` node).
+    #[knus(child, default)]
+    args: McpArgsNode,
+
+    /// Environment variables as `env "KEY" "VALUE"` children.
+    #[knus(children(name = "env"))]
+    env_vars: Vec<McpEnvVar>,
+}
+
+#[derive(Debug, Decode, Default)]
+struct McpArgsNode {
+    #[knus(arguments)]
+    values: Vec<String>,
+}
+
+#[derive(Debug, Decode)]
+struct McpEnvVar {
+    #[knus(argument)]
+    key: String,
+    #[knus(argument)]
+    value: String,
 }
 
 /// `model` node.
@@ -757,6 +819,31 @@ fn convert(
     if let Some(policy_section) = file.policy {
         let rules = convert_policy(policy_section, path_str)?;
         snap = snap.with_policy_rules(rules);
+    }
+
+    // -- MCP servers --
+    if !file.mcp.servers.is_empty() {
+        let mcp_configs: Vec<pattern_core::mcp::McpServerConfig> = file
+            .mcp
+            .servers
+            .into_iter()
+            .map(|s| {
+                let env: std::collections::HashMap<String, String> = s
+                    .env_vars
+                    .into_iter()
+                    .map(|e| (e.key, e.value))
+                    .collect();
+                pattern_core::mcp::McpServerConfig {
+                    name: s.name,
+                    transport: pattern_core::mcp::TransportConfig::Stdio {
+                        command: s.command,
+                        args: s.args.values,
+                        env,
+                    },
+                }
+            })
+            .collect();
+        snap.mcp_servers = mcp_configs;
     }
 
     Ok(snap)

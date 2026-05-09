@@ -51,13 +51,74 @@ use pattern_core::types::provider::CompletionRequest;
 use pattern_core::types::snapshot::ContextPolicy;
 
 use pattern_provider::compose::compression::{
-    DEFAULT_SUMMARIZATION_DIRECTIVE, DEFAULT_SUMMARIZATION_SYSTEM_PROMPT, ImportanceScoringConfig,
+    DEFAULT_SUMMARIZATION_DIRECTIVE, DEFAULT_SUMMARIZATION_SYSTEM_PROMPT,
+    ENRICHED_SUMMARIZATION_DIRECTIVE, ImportanceScoringConfig,
     TurnSlice, apply_importance_based, apply_recursive_summarization, apply_time_decay,
     apply_truncate, should_compress,
 };
 
 use crate::memory::TurnHistory;
 use crate::session::SessionContext;
+
+/// Output from the summarization call, potentially including structured
+/// reflection and archival content extracted from XML tags.
+#[derive(Debug)]
+pub(crate) struct SummarizationOutput {
+    /// The conversation summary (XML tags stripped).
+    pub summary: String,
+    /// Optional reflection content for the persona's reflections block.
+    pub reflections: Option<String>,
+    /// Zero or more archival entries to insert via Recall.
+    pub archival_items: Vec<String>,
+}
+
+/// Parse structured XML tags from summarizer output.
+///
+/// Extracts `<reflections>...</reflections>` and `<archival>...</archival>`
+/// tags, returning the remaining text as the summary. If no tags are
+/// present, the entire text is treated as the summary.
+fn parse_summarization_output(raw: &str) -> SummarizationOutput {
+    let mut summary = raw.to_string();
+    let mut reflections = None;
+    let mut archival_items = Vec::new();
+
+    // Extract <reflections>...</reflections>
+    if let Some(start) = summary.find("<reflections>") {
+        if let Some(end) = summary.find("</reflections>") {
+            let tag_end = end + "</reflections>".len();
+            let content = &summary[start + "<reflections>".len()..end];
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                reflections = Some(trimmed.to_string());
+            }
+            summary.replace_range(start..tag_end, "");
+        }
+    }
+
+    // Extract all <archival>...</archival> tags
+    while let Some(start) = summary.find("<archival>") {
+        if let Some(end) = summary.find("</archival>") {
+            let tag_end = end + "</archival>".len();
+            let content = &summary[start + "<archival>".len()..end];
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                archival_items.push(trimmed.to_string());
+            }
+            summary.replace_range(start..tag_end, "");
+        } else {
+            break; // malformed — no closing tag
+        }
+    }
+
+    // Clean up any extra whitespace left by tag removal
+    let summary = summary.trim().to_string();
+
+    SummarizationOutput {
+        summary,
+        reflections,
+        archival_items,
+    }
+}
 
 /// Outcome reported by [`maybe_compact`]. Callers can log or inspect.
 #[derive(Debug)]
@@ -256,16 +317,22 @@ pub async fn maybe_compact(
             // path, and a transient summarizer failure shouldn't kill the
             // turn. The agent can still send the un-compacted request;
             // next turn will re-evaluate.
-            let summary_text = match generate_summary(
+            // Use enriched directive when summarizer is the main model
+            // (can handle structured XML output for reflection extraction).
+            let use_enriched = summarization_model == ctx.model_id();
+
+            let summarization_output = match generate_summary(
                 ctx,
                 turn_history,
                 chunk_size,
                 summarization_model,
                 summarization_prompt.as_deref(),
+                use_enriched,
+                if use_enriched { Some(composed_request) } else { None },
             )
             .await
             {
-                Ok(text) => text,
+                Ok(output) => output,
                 Err(e) => {
                     tracing::warn!(
                         error = ?e,
@@ -282,10 +349,60 @@ pub async fn maybe_compact(
                 }
             };
 
+
+            // Log summarization output for debugging compaction issues.
+            tracing::info!(
+                summary_len = summarization_output.summary.len(),
+                has_reflections = summarization_output.reflections.is_some(),
+                reflections_len = summarization_output.reflections.as_ref().map(|r| r.len()).unwrap_or(0),
+                archival_count = summarization_output.archival_items.len(),
+                "compaction: summarization output parsed",
+            );
+            tracing::debug!(
+                summary_preview = %&summarization_output.summary[..summarization_output.summary.len().min(500)],
+                "compaction: summary content preview",
+            );
+            if let Some(ref r) = summarization_output.reflections {
+                tracing::debug!(reflections_content = %r, "compaction: extracted reflections");
+            }
+
+            // Write extracted reflections and archival items if present.
+            // These are side effects of the enriched summarization path;
+            // soft-fail on write errors (summary still lands).
+            if let Some(ref reflections) = summarization_output.reflections {
+                let scope = ctx.default_scope();
+                let store = ctx.memory_store();
+                match store.get_block(&scope, "reflections") {
+                    Ok(Some(doc)) => {
+                        if let Err(e) = doc.append(&format!("\n\n{reflections}"), false) {
+                            tracing::warn!(error = ?e, "compaction: reflections append failed");
+                        } else if let Err(e) = store.commit_write(&scope, "reflections") {
+                            tracing::warn!(error = ?e, "compaction: reflections commit failed");
+                        }
+                    }
+                    _ => {
+                        tracing::warn!("compaction: reflections block not found; skipping");
+                    }
+                }
+            }
+            for item in &summarization_output.archival_items {
+                let scope = ctx.default_scope();
+                if let Err(e) = ctx.memory_store().insert_archival(
+                    &scope,
+                    item,
+                    None, // no metadata
+                ) {
+                    tracing::warn!(
+                        error = ?e,
+                        "compaction: failed to insert archival item; continuing",
+                    );
+                }
+            }
+
             let r = apply_recursive_summarization(
                 turns,
                 chunk_size,
-                Some(summary_text),
+                Some(summarization_output.summary),
                 token_threshold as u64,
                 reported_tokens,
             );
@@ -391,90 +508,105 @@ fn build_turn_slices(
 }
 
 /// Generate a summary via provider.complete for RecursiveSummarization.
+///
+/// When `use_enriched_directive` is true (summarizer == main model),
+/// the composed request is cloned and the directive is appended as a
+/// user message, reusing the prompt cache. The response is parsed for
+/// `<reflections>` and `<archival>` XML tags.
+///
+/// When false, a fresh request is built with just the oldest messages
+/// and a summarization-specific system prompt (haiku path).
 async fn generate_summary(
     ctx: &SessionContext,
     turn_history: &Arc<std::sync::Mutex<TurnHistory>>,
     chunk_size: usize,
     summarization_model: &str,
     summarization_prompt: Option<&str>,
-) -> Result<String, RuntimeError> {
+    use_enriched_directive: bool,
+    composed_request: Option<&CompletionRequest>,
+) -> Result<SummarizationOutput, RuntimeError> {
     use pattern_core::types::provider::{ChatMessage, ChatStreamEvent, CompletionRequest};
 
-    // Build the oldest chunk_size turns' messages.
-    let oldest_messages: Vec<ChatMessage> = {
-        let hist = turn_history
-            .lock()
-            .map_err(|_| RuntimeError::ProviderError {
-                reason: "turn_history mutex poisoned".into(),
-            })?;
-        hist.iter_active()
-            .take(chunk_size)
-            .flat_map(|tr| {
-                tr.input
-                    .messages
-                    .iter()
-                    .chain(tr.output.messages.iter())
-                    .map(|m| m.chat_message.clone())
-            })
-            .collect()
-    };
-
-    let summary_prompt = summarization_prompt.unwrap_or(DEFAULT_SUMMARIZATION_SYSTEM_PROMPT);
-
-    // Read the persona block (if any) and prepend it to the summarization
-    // system prompt so the summarizer model writes the summary in-character.
-    // No-op when the persona block is missing; uses spawn_blocking because
-    // MemoryStore::get_block hits the DB synchronously (matches the pattern
-    // in compose_request_for_turn).
-    let persona_text = {
-        let store = ctx.memory_store();
-        let scope = ctx.persona_scope();
-        tokio::task::spawn_blocking(move || {
-            store
-                .get_block(&scope, pattern_core::PERSONA_LABEL)
-                .ok()
-                .flatten()
-                .map(|doc| doc.render())
-                .unwrap_or_default()
-        })
-        .await
-        .unwrap_or_default()
-    };
-
-    let system = if persona_text.is_empty() {
-        summary_prompt.to_string()
+    let directive = if use_enriched_directive {
+        ENRICHED_SUMMARIZATION_DIRECTIVE
     } else {
-        format!("{persona_text}\n\n---\n\n{summary_prompt}")
+        DEFAULT_SUMMARIZATION_DIRECTIVE
     };
 
-    let mut messages = oldest_messages;
-    messages.push(ChatMessage::user(
-        DEFAULT_SUMMARIZATION_DIRECTIVE.to_string(),
-    ));
+    let req = if use_enriched_directive && composed_request.is_some() {
+        // Self-summarization path: clone the composed request (reuses
+        // prompt cache — system prompt, tools, and messages are identical
+        // to the wire request) and append the summarization directive as
+        // a final user message. The directive tells the model to focus
+        // on the oldest messages that are about to be archived.
+        let focus = format!(
+            "The oldest {} turns of this conversation are about to be \
+             archived. Focus your summary, reflections, and archival \
+             extraction on those oldest messages specifically — they \
+             are what will be lost from active context after this.\n\n",
+            chunk_size,
+        );
+        composed_request.unwrap().clone()
+            .append_message(ChatMessage::user(format!("{focus}{directive}")))
+    } else {
+        // Haiku / separate-model path: build a fresh request with just
+        // the oldest messages and a summarization-specific system prompt.
+        let oldest_messages: Vec<ChatMessage> = {
+            let hist = turn_history
+                .lock()
+                .map_err(|_| RuntimeError::ProviderError {
+                    reason: "turn_history mutex poisoned".into(),
+                })?;
+            hist.iter_active()
+                .take(chunk_size)
+                .flat_map(|tr| {
+                    tr.input
+                        .messages
+                        .iter()
+                        .chain(tr.output.messages.iter())
+                        .map(|m| m.chat_message.clone())
+                })
+                .collect()
+        };
 
-    // Enable capture flags so we can surface diagnostic information when
-    // the response comes back empty or otherwise unexpected. Without these
-    // flags, `StreamEnd::captured_*` are all `None` and we fly blind.
-    let chat_options = pattern_core::types::provider::ChatOptions::default()
-        .with_capture_usage(true)
-        .with_capture_content(true)
-        .with_capture_reasoning_content(true);
+        let summary_prompt = summarization_prompt.unwrap_or(DEFAULT_SUMMARIZATION_SYSTEM_PROMPT);
 
-    // Pre-populate `system_blocks` (NOT the legacy `chat.system` field) so
-    // the Anthropic shaper's preserve-branch keeps our content intact and
-    // only prepends slot[0] (routing literal). If we used `with_system`,
-    // the shaper would see `system_blocks = None`, build a full
-    // slot[0]+slot[1]+slot[2] from `ctx.persona` (None) + `DEFAULT_BASE_INSTRUCTIONS`,
-    // and assign that to `system_blocks` — which is then "authoritative,
-    // replaces chat.system" per the genai anthropic adapter, dropping our
-    // `with_system` content silently. The model would see the agent's main
-    // instructions but no summarization prompt — and produce empty output.
-    let req = CompletionRequest::new(summarization_model)
-        .with_system_blocks(vec![pattern_core::types::provider::SystemBlock::new(
-            system,
-        )])
-        .with_messages(messages)
-        .with_options(chat_options);
+        let persona_text = {
+            let store = ctx.memory_store();
+            let scope = ctx.persona_scope();
+            tokio::task::spawn_blocking(move || {
+                store
+                    .get_block(&scope, pattern_core::PERSONA_LABEL)
+                    .ok()
+                    .flatten()
+                    .map(|doc| doc.render())
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default()
+        };
+
+        let system = if persona_text.is_empty() {
+            summary_prompt.to_string()
+        } else {
+            format!("{persona_text}\n\n---\n\n{summary_prompt}")
+        };
+
+        let mut messages = oldest_messages;
+        messages.push(ChatMessage::user(directive.to_string()));
+
+        let chat_options = pattern_core::types::provider::ChatOptions::default()
+            .with_capture_usage(true)
+            .with_capture_content(true)
+            .with_capture_reasoning_content(true);
+
+        CompletionRequest::new(summarization_model)
+            .with_system_blocks(vec![pattern_core::types::provider::SystemBlock::new(
+                system,
+            )])
+            .with_messages(messages)
+            .with_options(chat_options)
+    };
 
     let mut stream =
         ctx.provider()
@@ -546,7 +678,26 @@ async fn generate_summary(
         });
     }
 
-    Ok(summary_text)
+    if use_enriched_directive {
+        tracing::info!(
+            raw_output_len = summary_text.len(),
+            has_reflections_tag = summary_text.contains("<reflections>"),
+            has_archival_tag = summary_text.contains("<archival>"),
+            "compaction: raw summarizer output before parsing",
+        );
+        tracing::debug!(
+            raw_preview = %&summary_text[..summary_text.len().min(800)],
+            "compaction: raw summarizer output preview",
+        );
+
+        Ok(parse_summarization_output(&summary_text))
+    } else {
+        Ok(SummarizationOutput {
+            summary: summary_text,
+            reflections: None,
+            archival_items: Vec::new(),
+        })
+    }
 }
 
 /// Post-strategy: mark archived messages in DB, write summary if present,

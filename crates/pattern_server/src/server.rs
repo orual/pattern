@@ -382,6 +382,10 @@ pub struct DaemonServer {
     /// The SendMessage handler no longer uses this directly — clients carry it
     /// from InitSession and embed it in every `AgentMessage::origin`.
     partner_id: SmolStr,
+    /// Shared embedding provider for vector search. Constructed once at
+    /// daemon start (loads the model into GPU memory) and passed to every
+    /// mount attach. `None` when no embedding model is available.
+    embedding_provider: Option<Arc<dyn pattern_core::traits::EmbeddingProvider>>,
     /// Number of available personas discovered during the last InitSession.
     /// Updated each time InitSession is called, used by GetStatus to report
     /// agent count to the TUI.
@@ -478,6 +482,7 @@ impl DaemonServer {
             sessions: sessions.clone(),
             session_locks: Arc::new(DashMap::new()),
             partner_id: new_id(),
+            embedding_provider,
             available_agents: 0,
             batch_to_agent: batch_to_agent.clone(),
             constellation_registry_override: None,
@@ -499,6 +504,51 @@ impl DaemonServer {
         let batch_to_agent = Arc::new(DashMap::new());
         let sessions: Arc<DashMap<AgentId, AgentSession>> = Arc::new(DashMap::new());
         let agent_to_mount: Arc<DashMap<AgentId, PathBuf>> = Arc::new(DashMap::new());
+
+        // Construct the local embedding provider if a model file exists in the
+        // pattern data directory. The model is loaded once into GPU memory
+        // (~500ms) and shared across all mounts/sessions.
+        let embedding_provider: Option<Arc<dyn pattern_core::traits::EmbeddingProvider>> = {
+            match pattern_memory::PatternPaths::default_paths() {
+                Ok(paths) => {
+                    let model_path = paths.data_root().join("embeddinggemma-300m-qat-Q8_0.gguf");
+                    if model_path.is_file() {
+                        let config = pattern_provider::embedding::LlamaEmbeddingConfig {
+                            model_path: model_path.clone(),
+                            ..Default::default()
+                        };
+                        match pattern_provider::embedding::LlamaEmbeddingProvider::new(config) {
+                            Ok(provider) => {
+                                tracing::info!(
+                                    model = %model_path.display(),
+                                    "local embedding provider loaded",
+                                );
+                                Some(Arc::new(provider) as _)
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    model = %model_path.display(),
+                                    error = %e,
+                                    "failed to load embedding provider; vector search disabled",
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        tracing::debug!(
+                            path = %model_path.display(),
+                            "no embedding model found; vector search disabled",
+                        );
+                        None
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to resolve pattern paths for embedding");
+                    None
+                }
+            }
+        };
+
         let server = Self {
             recv: msg_rx,
             event_rx,
@@ -514,6 +564,7 @@ impl DaemonServer {
             sessions: sessions.clone(),
             session_locks: Arc::new(DashMap::new()),
             partner_id: new_id(),
+            embedding_provider,
             available_agents: 0,
             batch_to_agent: batch_to_agent.clone(),
             // Production builds always use None; test builds may override
@@ -1412,7 +1463,7 @@ impl DaemonServer {
             std::path::PathBuf::from(pattern_runtime::sdk::FIRST_PARTY_SKILL_DIR);
 
         let (cache_key, mounted) =
-            match pattern_memory::mount::attach(&canonical, Some(first_party_skill_dir.clone())) {
+            match pattern_memory::mount::attach(&canonical, Some(first_party_skill_dir.clone()), self.embedding_provider.clone()) {
                 Ok(m) => (canonical.clone(), m),
                 Err(pattern_memory::mount::MountError::NotFound { .. }) => {
                     let paths = pattern_memory::PatternPaths::default_paths()
@@ -1447,7 +1498,7 @@ impl DaemonServer {
                     }
 
                     let mounted =
-                        pattern_memory::mount::attach(&global_path, Some(first_party_skill_dir))
+                        pattern_memory::mount::attach(&global_path, Some(first_party_skill_dir), self.embedding_provider.clone())
                             .map_err(|e| {
                                 format!(
                                     "global mount attach failed at {}: {e}",
@@ -3744,7 +3795,7 @@ mod tests {
 
         let db = {
             let mounted =
-                pattern_memory::mount::attach(tmp.path(), None).expect("test mount attach");
+                pattern_memory::mount::attach(tmp.path(), None, None).expect("test mount attach");
             let db = mounted.db.clone();
             drop(mounted);
             db

@@ -2076,6 +2076,7 @@ impl TidepoolSession {
         // simple.
         let agent_id_for_seed = persona.agent_id.to_string();
         let memory_blocks_for_seed = persona.memory_blocks.clone();
+        let persona_mcp_configs = persona.mcp_servers.clone();
         let store_for_seed = memory_store.clone();
 
         // Capture the alias mapping (display name → agent_id) for later
@@ -2484,6 +2485,25 @@ impl TidepoolSession {
                     }
                 });
             }
+        }
+
+        // Load MCP servers from persona KDL (native config path).
+        if !persona_mcp_configs.is_empty() {
+            let registry = session.ctx.mcp_registry.clone();
+            let configs = persona_mcp_configs;
+            tokio::spawn(async move {
+                let results = registry.load_servers(&configs).await;
+                for (name, result) in &results {
+                    match result {
+                        Ok(()) => {
+                            tracing::info!(server = %name, "persona MCP server connected")
+                        }
+                        Err(e) => {
+                            tracing::warn!(server = %name, error = %e, "persona MCP server failed to connect")
+                        }
+                    }
+                }
+            });
         }
 
         // Register this session with the AgentRegistry (Phase 4 T4) if the

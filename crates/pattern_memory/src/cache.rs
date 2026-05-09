@@ -47,7 +47,7 @@ pub struct MemoryCache {
     db: Arc<ConstellationDb>,
 
     /// Optional embedding provider for vector/hybrid search.
-    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    pub(crate) embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
 
     /// Cached blocks: block_id -> CachedBlock.
     ///

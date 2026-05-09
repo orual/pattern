@@ -207,7 +207,7 @@ fn standalone_init_then_attach_resolves_via_registry() {
     // Attach from the project path: must resolve to the standalone mount
     // via the registry, not via a `.pattern/shared/` walk-up.
     let store =
-        mount::attach_with_paths(&project_path, &paths, None).expect("attach should succeed");
+        mount::attach_with_paths(&project_path, &paths, None, None).expect("attach should succeed");
 
     match &store.mode {
         StorageMode::Standalone {

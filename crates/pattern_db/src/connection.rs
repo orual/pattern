@@ -132,6 +132,9 @@ impl ConstellationDb {
         {
             let mut conn = pool.get().map_err(DbError::Pool)?;
             crate::migrations::run_memory_migrations(&mut conn)?;
+            if let Err(e) = crate::vector::ensure_embeddings_table(&conn, 768) {
+                tracing::warn!(error = %e, "failed to create embeddings virtual table (in-memory)");
+            }
         }
 
         // Now safe to drop the temporary msg connection — the pool's
@@ -226,11 +229,21 @@ impl ConstellationDb {
         {
             let mut mem_conn = Connection::open(memory_path)?;
             crate::migrations::run_memory_migrations(&mut mem_conn)?;
+            // Create the vec0 virtual table for embeddings. Virtual tables
+            // can't be created via rusqlite_migration (extension-specific
+            // DDL), so we do it programmatically after regular migrations.
+            // Idempotent: uses CREATE VIRTUAL TABLE IF NOT EXISTS.
+            if let Err(e) = crate::vector::ensure_embeddings_table(&mem_conn, 768) {
+                tracing::warn!(error = %e, "failed to create embeddings virtual table");
+            }
         }
         debug!("running messages migrations");
         {
             let mut msg_conn = Connection::open(messages_path)?;
             crate::migrations::run_messages_migrations(&mut msg_conn)?;
+            if let Err(e) = crate::vector::ensure_embeddings_table(&msg_conn, 768) {
+                tracing::warn!(error = %e, "failed to create embeddings virtual table (messages)");
+            }
         }
         info!("database migrations complete");
         Ok(())

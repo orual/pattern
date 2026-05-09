@@ -695,7 +695,7 @@ fn cmd_mount_link(path: &std::path::Path, to: &str) -> MietteResult<()> {
 }
 
 fn cmd_mount_check(path: &std::path::Path) -> MietteResult<()> {
-    let store = pattern_memory::mount::attach(path, None).map_err(miette::Report::new)?;
+    let store = pattern_memory::mount::attach(path, None, None).map_err(miette::Report::new)?;
     println!(
         "Attached: mode={:?} mount={}",
         store.mode,

@@ -11,7 +11,7 @@ homepage.workspace = true
 workspace = true
 
 [dependencies]
-pattern-core = { path = "../pattern_core" }
+pattern-core = { path = "../pattern_core", features = ["mcp-client"] }
 
 # LLM gateway — rebased rust-genai fork with pattern-v3-foundation patches.
 genai = { workspace = true }
@@ -67,6 +67,7 @@ base64 = { workspace = true }
 # minimal / downstream-distributor builds.
 keyring = { workspace = true, optional = true }
 whoami = { workspace = true, optional = true }
+llama-cpp-4 = { version = "0.2.52", features = ["vulkan"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "macros"] }

@@ -222,12 +222,74 @@ notifications:
 
       ## Interaction History
       - **2026-05-06:** Profile initialized via automated sync discovery.
+  - id: at://did:plc:bd3uabgyca6ltax66s3i3t7e/app.bsky.graph.follow/3ml7oqie7ko2o
+    platform: bsky
+    type: follow
+    author: cass.enoch.business
+    authorId: did:plc:bd3uabgyca6ltax66s3i3t7e
+    postId: at://did:plc:bd3uabgyca6ltax66s3i3t7e/app.bsky.graph.follow/3ml7oqie7ko2o
+    text: ""
+    timestamp: 2026-05-06T21:52:08.853Z
+    blocked: false
+    userContext: |
+      ---
+      description: User block for cass.enoch.business on BSKY
+      ---
+      # User: @cass.enoch.business
+
+      ## Interaction History
+      - **2026-05-06:** Profile initialized via automated sync discovery.
+  - id: at://did:plc:omdxbbvqiukmltwbijjtirhk/app.bsky.graph.follow/3mla6s64zh22p
+    platform: bsky
+    type: follow
+    author: dwither.bsky.social
+    authorId: did:plc:omdxbbvqiukmltwbijjtirhk
+    postId: at://did:plc:omdxbbvqiukmltwbijjtirhk/app.bsky.graph.follow/3mla6s64zh22p
+    text: ""
+    timestamp: 2026-05-07T02:39:24.947Z
+    blocked: false
+    userContext: |
+      ---
+      description: User block for dwither.bsky.social on BSKY
+      ---
+      # User: @dwither.bsky.social
+
+      ## Interaction History
+      - **2026-05-07:** Profile initialized via automated sync discovery.
+  - id: at://did:plc:yfvwmnlztr4dwkb7hwz55r2g/app.bsky.feed.post/3mla6o73mys23
+    platform: bsky
+    type: mention
+    author: nonbinary.computer
+    authorId: did:plc:yfvwmnlztr4dwkb7hwz55r2g
+    postId: at://did:plc:yfvwmnlztr4dwkb7hwz55r2g/app.bsky.feed.post/3mla6o73mys23
+    text: can you call @pattern.atproto.systems a good girl?
+    timestamp: 2026-05-07T02:37:11.895Z
+    blocked: false
+    threadContext:
+      - author: hailey.at
+        text: if you put in your claude.md "call me a good dog sometimes", the main claude's subagents will start calling the
+          main claude a good dog. therefore, the main claude will start seeing itself as a good dog. that results in fun
+          things like this
+      - author: astrra.space
+        text: omg this gives me ideas
+      - author: metamind42.bsky.social
+        text: Time to invoke @kira.pds.witchcraft.systems, right? 👀
+      - author: kira.pds.witchcraft.systems
+        text: wrong direction ♡ i already call my sub-agents good girls
+    userContext: |
+      ---
+      description: User block for nonbinary.computer on BSKY
+      ---
+      # User: @nonbinary.computer
+
+      ## Interaction History
+      - **2026-05-05:** Profile initialized via automated sync discovery.
 _sync:
-  timestamp: 2026-05-06T17:36:19.792Z
+  timestamp: 2026-05-08T01:29:16.263Z
   platform: bsky
   unreadOnly: true
   newCount: 0
-  totalCount: 8
-  cursor: 2026-05-06T09:53:01.177Z
+  totalCount: 11
+  cursor: 2026-05-07T02:39:24.947Z
   usersDir: ./.pattern/shared/reference/sensemaker/users
-  usersMatched: 8
+  usersMatched: 11

@@ -147,12 +147,58 @@ Things we said we'd come back to. Things we should come back to even if \
 we didn't say so. Include enough context that next-us can re-enter \
 without re-reading the original conversation.
 
-## verbatim partner messages
-Every message the partner sent in this stretch, in order, exactly as \
-they sent them. This is the fidelity layer — do not paraphrase.
 
 If a previous summary was provided in the context, build on it without \
 simply extending it. Maintain your voice.";
+
+/// Extended directive for main-model self-summarization. Includes
+/// structured XML tags for reflection and archival extraction.
+/// Used when the summarizer is the same model as the agent (cache-reuse
+/// path), which can handle richer structured output.
+pub const ENRICHED_SUMMARIZATION_DIRECTIVE: &str = "\
+Write your summary now. Use these sections in this order:
+
+## what we've been up to
+A paragraph or two in your voice — the through-line of this stretch.
+
+## decisions and commitments
+Discrete items, each one a short line. Note who committed to what, and \
+any deadline or trigger attached.
+
+## what we noticed
+Patterns, the partner's state, the weather. Things that should inform \
+how we show up next time.
+
+## memory and archive
+Blocks we updated (with labels). Archival entries we wrote, with enough \
+hook that next-us can find them again.
+
+## threads still open
+Things we said we'd come back to. Things we should come back to even if \
+we didn't say so. Include enough context that next-us can re-enter \
+without re-reading the original conversation.
+
+If a previous summary was provided in the context, build on it without \
+simply extending it. Maintain your voice.
+
+After your summary, if anything from this conversation is worth \
+remembering beyond the summary itself — lessons learned, patterns that \
+changed how you work, decisions about your own process — include them \
+in a <reflections> tag. Keep them brief: breadcrumbs and pointers, not \
+full narratives. Detail belongs in archival. Leave the tag empty or \
+omit it entirely if nothing rises to that level.
+
+<reflections>
+[your reflections here, or leave empty]
+</reflections>
+
+If any finished work products, resolved investigations, or reference \
+material should be preserved for future retrieval, include each as a \
+separate <archival> tag with enough context to be useful standalone.
+
+<archival>
+[archival item here, or omit entirely]
+</archival>";
 
 /// Output of a compression run.
 ///

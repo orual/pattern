@@ -36,6 +36,7 @@
       # path is belt-and-suspenders for workflows that don't inherit the
       # devshell PATH (e.g. nix-shell --command).
       TIDEPOOL_EXTRACT = "${tidepool-extract}/bin/tidepool-extract";
+      LIBCLANG_PATH = "${pkgs.llvmPackages_18.libclang.lib}/lib";
 
       packages = with pkgsWithUnfree;
         [
@@ -48,6 +49,9 @@
           pkg-config
           cargo-expand
           jujutsu
+          cmake
+          pkg-config
+          llama-cpp-vulkan
           cargo-nextest
           git
           gh
@@ -56,6 +60,10 @@
           # pattern-provider deps: keyring (Secret Service) needs libdbus.
           dbus
           openssl
+          vulkan-headers
+          vulkan-loader
+          shaderc
+          llvmPackages_18.libclang
         ]
         ++ [
           # Tidepool GHC plugin binary (~300MB, GHC 9.12). Required at

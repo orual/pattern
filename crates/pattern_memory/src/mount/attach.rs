@@ -41,9 +41,10 @@ use crate::reembed::ReembedQueue;
 pub fn attach(
     start: &Path,
     first_party_skills_dir: Option<PathBuf>,
+    embedding_provider: Option<Arc<dyn pattern_core::traits::EmbeddingProvider>>,
 ) -> Result<MountedStore, MountError> {
     let paths = PatternPaths::default_paths()?;
-    attach_with_paths(start, &paths, first_party_skills_dir)
+    attach_with_paths(start, &paths, first_party_skills_dir, embedding_provider)
 }
 
 /// Attach to the nearest mount at or above `start` with an explicit
@@ -58,6 +59,7 @@ pub fn attach_with_paths(
     start: &Path,
     paths: &PatternPaths,
     first_party_skills_dir: Option<PathBuf>,
+    embedding_provider: Option<Arc<dyn pattern_core::traits::EmbeddingProvider>>,
 ) -> Result<MountedStore, MountError> {
     let mount_path = super::find_mount_with_paths(start, paths)?;
     let config = load_mount_config(&mount_path.join(".pattern.kdl"))?;
@@ -147,7 +149,7 @@ pub fn attach_with_paths(
     // See docs/implementation-plans/2026-04-19-v3-memory-rework/phase_08.md.
     let (reembed_queue, reembed_tx) = match tokio::runtime::Handle::try_current() {
         Ok(_) => {
-            let (queue, tx) = ReembedQueue::spawn(None, Arc::clone(&db));
+            let (queue, tx) = ReembedQueue::spawn(embedding_provider.clone(), Arc::clone(&db));
             (Some(queue), tx)
         }
         Err(_) => {
@@ -177,6 +179,9 @@ pub fn attach_with_paths(
     mc = mc.with_persona_state_dir(paths.personas_state_dir());
     if let Some(fp_dir) = first_party_skills_dir {
         mc = mc.with_first_party_skills_dir(fp_dir);
+    }
+    if let Some(provider) = embedding_provider {
+        mc.embedding_provider = Some(provider);
     }
     let cache = Arc::new(mc);
 

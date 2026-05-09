@@ -174,7 +174,7 @@ async fn smoke_e2e() {
     git_commit(&project_root, "baseline: init InRepo mode project");
 
     // --- Step 2: attach ---
-    let mount = attach_with_paths(&project_root, &paths, None).expect("attach");
+    let mount = attach_with_paths(&project_root, &paths, None, None).expect("attach");
     assert!(
         mount.mount_path.exists(),
         "mount path should exist: {}",
@@ -336,7 +336,7 @@ async fn smoke_e2e() {
     mount.detach();
 
     // --- Step 10: re-attach and verify ---
-    let mount2 = attach_with_paths(&project_root, &paths, None).expect("re-attach");
+    let mount2 = attach_with_paths(&project_root, &paths, None, None).expect("re-attach");
     let recovered = mount2
         .cache
         .get_rendered_content(&agent_scope, "notes")

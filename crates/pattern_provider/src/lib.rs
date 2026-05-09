@@ -28,6 +28,8 @@ pub mod shaper;
 pub mod token_count;
 
 pub use gateway::{PatternGatewayClient, PatternGatewayClientBuilder, RetryPolicy};
+pub mod embedding;
+
 
 // Note: the `auth` module is always compiled, but its internal submodules
 // (session_pickup, pkce) are feature-gated. `api_key` and the top-level

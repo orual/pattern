@@ -71,7 +71,7 @@ async fn seed_persona(
 /// that holds an `Arc<ConstellationDb>` — same Arc the daemon uses for the
 /// same path.
 async fn open_mount_db(mount: &std::path::Path) -> Arc<pattern_db::ConstellationDb> {
-    let mounted = pattern_memory::mount::attach(mount, None).expect("test mount attach");
+    let mounted = pattern_memory::mount::attach(mount, None, None).expect("test mount attach");
     let db = mounted.db.clone();
     // Detach without dropping the DB Arc so we can use it.
     drop(mounted);
