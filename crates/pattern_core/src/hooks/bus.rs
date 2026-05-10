@@ -11,7 +11,7 @@ use parking_lot::RwLock;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use super::event::{HookEvent, HookResponse, HookSemantics};
+use super::event::{HookEvent, HookResponse};
 use super::filter::HookFilter;
 
 /// Unique identifier for a subscription.
@@ -56,12 +56,8 @@ struct Subscription {
 
 #[derive(Debug)]
 enum SubscriberSender {
-    Blocking {
-        tx: mpsc::Sender<BlockingDelivery>,
-    },
-    Notification {
-        tx: mpsc::Sender<HookEvent>,
-    },
+    Blocking { tx: mpsc::Sender<BlockingDelivery> },
+    Notification { tx: mpsc::Sender<HookEvent> },
 }
 
 impl Default for HookBus {
@@ -236,7 +232,10 @@ mod tests {
 
         bus.emit(HookEvent::notification("test.hello", serde_json::json!({})));
 
-        assert!(rx.try_recv().is_err(), "should not receive non-matching event");
+        assert!(
+            rx.try_recv().is_err(),
+            "should not receive non-matching event"
+        );
     }
 
     #[tokio::test]

@@ -3,12 +3,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use pattern_core::plugin::manifest::PluginManifest;
 use pattern_core::traits::plugin::PluginExtension;
+use pattern_memory::paths::PatternPaths;
 use pattern_runtime::plugin::cc_adapter::CcPluginAdapter;
 use pattern_runtime::plugin::manifest;
 use pattern_runtime::plugin::registry::{InstallSource, PluginRegistry};
-use pattern_memory::paths::PatternPaths;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -28,10 +27,8 @@ fn test_env() -> (tempfile::TempDir, Arc<PatternPaths>) {
 #[test]
 fn cc_plugin_manifest_parses_with_cc_block() {
     let cc_dir = fixture("cc-test-plugin");
-    let manifest = manifest::from_cc_json_file(
-        &cc_dir.join(".claude-plugin").join("plugin.json"),
-    )
-    .expect("CC manifest should parse");
+    let manifest = manifest::from_cc_json_file(&cc_dir.join(".claude-plugin").join("plugin.json"))
+        .expect("CC manifest should parse");
 
     assert_eq!(manifest.name.as_str(), "cc-test-plugin");
     assert!(manifest.cc.is_some(), "CC plugin should have cc block");
@@ -42,24 +39,15 @@ fn cc_plugin_manifest_parses_with_cc_block() {
 #[test]
 fn cc_adapter_wraps_cc_manifest() {
     let cc_dir = fixture("cc-test-plugin");
-    let manifest = manifest::from_cc_json_file(
-        &cc_dir.join(".claude-plugin").join("plugin.json"),
-    )
-    .unwrap();
+    let manifest =
+        manifest::from_cc_json_file(&cc_dir.join(".claude-plugin").join("plugin.json")).unwrap();
 
-    let adapter = CcPluginAdapter::wrap(
-        "cc-test-plugin".into(),
-        cc_dir,
-        manifest,
-    );
+    let adapter = CcPluginAdapter::wrap("cc-test-plugin".into(), cc_dir, manifest);
 
     // CC adapter provides no ports (Phase 4 adds monitor→port translation).
     assert!(adapter.ports().is_empty());
     // CC adapter returns None for on_event (uses subscription receivers instead).
-    let event = pattern_core::hooks::HookEvent::notification(
-        "test.event",
-        serde_json::json!({}),
-    );
+    let event = pattern_core::hooks::HookEvent::notification("test.event", serde_json::json!({}));
     assert!(adapter.on_event(&event).is_none());
 }
 
@@ -73,9 +61,14 @@ fn install_cc_plugin_creates_extension() {
         InstallSource::LocalPath(&source),
         pattern_core::plugin::PluginScope::Global,
     );
-    assert!(result.is_ok(), "CC plugin install should succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "CC plugin install should succeed: {result:?}"
+    );
 
-    let lp = reg.get("cc-test-plugin").expect("should find installed plugin");
+    let lp = reg
+        .get("cc-test-plugin")
+        .expect("should find installed plugin");
     assert!(
         lp.extension.is_some(),
         "CC plugin should have extension trait object"
@@ -114,8 +107,8 @@ fn cc_plugin_skill_directory_exists() {
     assert!(skill_md.exists(), "SKILL.md fixture should exist");
 
     let raw = std::fs::read(&skill_md).unwrap();
-    let parsed = pattern_memory::fs::markdown_skill::parse::parse(&raw)
-        .expect("SKILL.md should parse");
+    let parsed =
+        pattern_memory::fs::markdown_skill::parse::parse(&raw).expect("SKILL.md should parse");
     assert_eq!(parsed.metadata.name, "summarize");
     assert_eq!(
         parsed.metadata.description.as_deref(),

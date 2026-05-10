@@ -213,7 +213,7 @@ pub(crate) struct WorkerConfig {
     pub block_change_notifier: crate::subscriber::notifier::BlockChangeNotifier,
     /// Owns disk_doc, last_written_mtime/hash (echo suppression), atomic_write,
     /// and last_saved_frontier. The worker imports Loro update bytes into
-    /// `synced_doc.disk_doc()`, renders via `render_canonical_from_disk_doc`,
+    /// `synced_doc.doc()`, renders via `render_canonical_from_disk_doc`,
     /// then calls `synced_doc.write_rendered(bytes)` to write and record state.
     /// External edits arrive via `synced_doc.apply_external_bytes`.
     pub synced_doc: Arc<SyncedDoc<BlockSchemaBridge>>,
@@ -246,10 +246,11 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
         synced_doc,
     } = config;
 
-    // Convenience: get a reference to the disk_doc owned by synced_doc.
-    // The worker imports Loro update bytes here; synced_doc.write_rendered()
-    // handles the disk write and echo-suppression bookkeeping.
-    let disk_doc = synced_doc.disk_doc();
+    // Single-doc world: synced_doc.doc() IS the source of truth. The worker
+    // listens to write notifications for FTS5/reembed coalescing; the actual
+    // disk persistence happens inside synced_doc.write_local() called by the
+    // agent's handler.
+    let disk_doc = synced_doc.doc();
 
     // Subscribe to write notifications from synced_doc so the worker can
     // trigger FTS5 + re-embed after each disk write (both local and external
@@ -490,13 +491,10 @@ fn render_cycle(
         return false;
     }
 
-    // Delegate atomic_write + echo-suppression bookkeeping to synced_doc.
-    // write_rendered writes the pre-rendered bytes to disk without going
-    // through the bridge (disk_doc is already up to date), and records
-    // last_written_mtime, last_written_hash, and last_saved_frontier.
-    if let Err(e) = synced_doc.write_rendered(&canonical_bytes) {
+    let _ = new_hash;
+    if let Err(e) = synced_doc.write_local() {
         metrics::counter!("memory.subscriber.fs_write_failed").increment(1);
-        tracing::error!(path = ?synced_doc.path(), error = %e, "write_rendered failed");
+        tracing::error!(path = ?synced_doc.path(), error = %e, "write_local failed");
         return false;
     }
 
@@ -902,12 +900,12 @@ mod tests {
 
         let ext = schema_ext(schema);
         let path = dir.path().join(format!("{block_id}.{ext}"));
-        let memory_doc = Arc::new(doc.inner().clone());
+        let loro_handle = doc.inner().clone();
         let bridge = Arc::new(BlockSchemaBridge::new(schema.clone()));
         Arc::new(
             SyncedDoc::open_router_owned(SyncedDocConfig {
                 path,
-                memory_doc,
+                doc: loro_handle,
                 bridge,
                 event_channel_bound: 64,
                 conflict_policy: ConflictPolicy::AutoMerge,
@@ -1745,7 +1743,7 @@ mod tests {
         let synced_doc = make_synced_doc("ext_block", &schema, &doc, &dir);
         // Retain a reference to disk_doc so the test can inject an external edit
         // directly (simulating what the watcher does on a human file edit).
-        let disk_doc_test = Arc::clone(synced_doc.disk_doc());
+        let disk_doc_test = synced_doc.doc().clone();
 
         let (tx, rx) = crossbeam_channel::bounded(64);
         let cancel = CancellationToken::new();

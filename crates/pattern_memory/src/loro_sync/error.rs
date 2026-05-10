@@ -28,6 +28,12 @@ pub enum SyncedDocError {
     /// A filesystem-layer error (atomic write, format conversion) from `FsError`.
     #[error("fs error: {0}")]
     Fs(#[from] crate::fs::FsError),
+    /// A conflict was previously detected by the watcher (under
+    /// `ConflictPolicy::RejectAndNotify`). Local writes are blocked until
+    /// the conflict is resolved via `reload()` (take disk version) or
+    /// `force_apply_external()` (accept external as authoritative).
+    #[error("conflict pending on {path}: agent has unresolved divergence from disk")]
+    ConflictPending { path: PathBuf },
     /// A generic operational error (e.g., line-range validation, Loro splice failure).
     #[error("{0}")]
     Other(String),

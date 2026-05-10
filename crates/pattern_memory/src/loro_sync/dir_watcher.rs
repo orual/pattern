@@ -267,11 +267,16 @@ mod tests {
         assert!(got_a, "subscriber_a should have received an event");
 
         // b.txt's subscriber should not have received anything yet.
-        // Drain a.txt's events and then write to b.
-        while rx_a.try_recv().is_ok() {}
-
-        // Give inotify a little time before the b write.
-        std::thread::sleep(Duration::from_millis(100));
+        // Drain a.txt's events through the full debounce window — under
+        // parallel test load, events for a.txt can arrive AFTER an initial
+        // try_recv-loop drain because the debouncer's 500ms window is wider
+        // than a single sleep. Repeat the drain for >debounce_window to
+        // ensure a.txt's tail events are flushed before we write b.txt.
+        let drain_deadline = std::time::Instant::now() + Duration::from_millis(700);
+        while std::time::Instant::now() < drain_deadline {
+            while rx_a.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(25));
+        }
 
         std::fs::write(&path_b, "change_b").unwrap();
 

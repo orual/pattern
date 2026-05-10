@@ -147,15 +147,13 @@ impl LoroSyncedFile {
             return Err(LoroSyncError::NotFound(path));
         }
         let bridge = Arc::new(TextBridge::from_path(&path));
-        let memory_doc = Arc::new(LoroDoc::new());
+        let doc = LoroDoc::new();
         let inner = SyncedDoc::open_with_subscription(
             SyncedDocConfig {
                 path,
-                memory_doc,
+                doc,
                 bridge,
                 event_channel_bound: 256,
-                // FileManager (Phase 2): surface conflicts rather than silently
-                // merging stale-base external writes.
                 conflict_policy: ConflictPolicy::RejectAndNotify,
             },
             router,
@@ -173,14 +171,12 @@ impl LoroSyncedFile {
             return Err(LoroSyncError::NotFound(path));
         }
         let bridge = Arc::new(TextBridge::from_path(&path));
-        let memory_doc = Arc::new(LoroDoc::new());
+        let doc = LoroDoc::new();
         let inner = SyncedDoc::open_standalone(SyncedDocConfig {
             path,
-            memory_doc,
+            doc,
             bridge,
             event_channel_bound: 256,
-            // Standalone open (tests + one-off usage): surface conflicts.
-            // Tests that need AutoMerge semantics open SyncedDoc directly.
             conflict_policy: ConflictPolicy::RejectAndNotify,
         })?;
         Ok(Self {
@@ -198,8 +194,9 @@ impl LoroSyncedFile {
     /// here and propagates them to disk automatically.
     ///
     /// Phase 2's `FileHandler` uses this for incremental edit support.
-    pub fn memory_doc(&self) -> &Arc<LoroDoc> {
-        self.inner.memory_doc()
+    /// Direct reference to the underlying `LoroDoc` for CRDT-native edits.
+    pub fn doc(&self) -> &LoroDoc {
+        self.inner.doc()
     }
 
     /// Read the current file content as a UTF-8 string.
@@ -213,10 +210,14 @@ impl LoroSyncedFile {
         })
     }
 
-    /// Write UTF-8 content to the file.
+    /// Write UTF-8 content to the file. Applies content as a CRDT update
+    /// (Myers-diff via bridge) then atomic-writes to disk synchronously.
+    /// Uses the agent-write path (write_bytes), not the watcher path
+    /// (apply_external_bytes), so bookkeeping stays correct.
     pub fn write(&self, content: &str) -> Result<(), LoroSyncError> {
         self.invalidate_line_index();
-        self.inner.write(content.as_bytes())
+        self.inner.write_bytes(content.as_bytes())?;
+        Ok(())
     }
 
     /// Subscribe to external change notifications.
@@ -244,6 +245,14 @@ impl LoroSyncedFile {
     /// to overwrite the disk version with the agent's content.
     pub fn apply_external_bytes(&self, content: &[u8]) -> Result<(), LoroSyncError> {
         self.inner.apply_external_bytes(content)
+    }
+
+    /// Force-apply content as the authoritative state. Clears any
+    /// pending-conflict flag and atomic-writes `content` to disk. Used by
+    /// the conflict-resolution path (`FileManager::force_write`).
+    pub fn force_apply_external_bytes(&self, content: &[u8]) -> Result<(), LoroSyncError> {
+        self.invalidate_line_index();
+        self.inner.force_apply_external_bytes(content)
     }
 
     /// Discard uncommitted memory_doc edits, replace with current disk content.
@@ -275,7 +284,7 @@ impl LoroSyncedFile {
         if let Some(ref idx) = *guard {
             return idx.clone();
         }
-        let text = self.inner.memory_doc().get_text("content").to_string();
+        let text = self.inner.doc().get_text("content").to_string();
         let idx = LineIndex::build(&text);
         *guard = Some(idx.clone());
         idx
@@ -291,7 +300,7 @@ impl LoroSyncedFile {
     /// The content string may contain newlines.
     pub fn insert_lines(&self, after_line: usize, content: &str) -> Result<(), LoroSyncError> {
         let idx = self.ensure_line_index();
-        let text = self.inner.memory_doc().get_text("content");
+        let text = self.inner.doc().get_text("content");
         let total_chars = text.len_unicode();
 
         let insert_pos = if after_line == 0 {
@@ -328,13 +337,11 @@ impl LoroSyncedFile {
 
         text.insert(insert_pos, &to_insert)
             .map_err(|e| LoroSyncError::Other(format!("insert failed: {e}")))?;
-        // Commit so loro fires the local-update callback registered by
-        // `SyncedDoc::open_with_subscription` — that callback drives the
-        // ingest thread → disk_doc → atomic_write pipeline. Without an
-        // explicit commit here, the ops sit in the uncommitted buffer
-        // and the file on disk never updates.
-        self.inner.memory_doc().commit();
+        self.inner.doc().commit();
         self.invalidate_line_index();
+        // Single-doc + explicit-flush: caller methods on LoroSyncedFile
+        // synchronously persist to disk after the CRDT op completes.
+        self.inner.write_local()?;
         Ok(())
     }
 
@@ -358,7 +365,7 @@ impl LoroSyncedFile {
                 idx.line_count()
             )));
         }
-        let text = self.inner.memory_doc().get_text("content");
+        let text = self.inner.doc().get_text("content");
         let total_chars = text.len_unicode();
 
         let start_pos = idx
@@ -384,8 +391,9 @@ impl LoroSyncedFile {
 
         text.splice(start_pos, delete_len, &replacement)
             .map_err(|e| LoroSyncError::Other(format!("splice failed: {e}")))?;
-        self.inner.memory_doc().commit();
+        self.inner.doc().commit();
         self.invalidate_line_index();
+        self.inner.write_local()?;
         Ok(())
     }
 
@@ -403,7 +411,7 @@ impl LoroSyncedFile {
                 idx.line_count()
             )));
         }
-        let text = self.inner.memory_doc().get_text("content");
+        let text = self.inner.doc().get_text("content");
         let total_chars = text.len_unicode();
 
         let start_pos = idx
@@ -416,8 +424,9 @@ impl LoroSyncedFile {
 
         text.splice(start_pos, delete_len, "")
             .map_err(|e| LoroSyncError::Other(format!("splice failed: {e}")))?;
-        self.inner.memory_doc().commit();
+        self.inner.doc().commit();
         self.invalidate_line_index();
+        self.inner.write_local()?;
         Ok(())
     }
 

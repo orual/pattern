@@ -9,6 +9,4 @@ import Control.Monad.Freer (Eff)
 import Pattern.Time
 
 agent :: Eff '[Time] Int
-agent = do
-  Instant ns <- now
-  pure ns
+agent = nowNanos

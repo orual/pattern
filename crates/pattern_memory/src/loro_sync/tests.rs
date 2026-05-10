@@ -155,10 +155,10 @@ fn external_edit_merges_into_doc() {
     // edit. LoroSyncedFile::open defaults to RejectAndNotify (surfaces
     // conflicts); use SyncedDoc directly when AutoMerge semantics are needed.
     let bridge = Arc::new(TextBridge::new("txt".into()));
-    let memory_doc = Arc::new(LoroDoc::new());
+    let loro_handle = LoroDoc::new();
     let file = SyncedDoc::open_standalone(SyncedDocConfig {
         path: path.clone(),
-        memory_doc,
+        doc: loro_handle.clone(),
         bridge,
         event_channel_bound: 256,
         conflict_policy: ConflictPolicy::AutoMerge,
@@ -287,7 +287,7 @@ fn open_nonexistent_returns_not_found() {
 /// Verify that `LoroSyncedFile::open` defaults to `ConflictPolicy::RejectAndNotify`.
 ///
 /// When no pending agent edits exist, external edits are applied cleanly
-/// (emit `Applied`). When the agent has unsaved edits in memory_doc beyond
+/// (emit `Applied`). When the agent has unsaved edits in loro_handle beyond
 /// `last_saved_frontier`, external edits emit `ConflictDetected`.
 ///
 /// This test uses `SyncedDoc` directly with `open_standalone` to control
@@ -300,12 +300,12 @@ fn loro_synced_file_defaults_to_reject_and_notify() {
     std::fs::write(&path, "initial").unwrap();
 
     // Use open_router_owned so local updates do NOT auto-flush to disk_doc.
-    // This lets us create genuinely unsaved edits in memory_doc.
+    // This lets us create genuinely unsaved edits in loro_handle.
     let bridge = Arc::new(TextBridge::new("txt".into()));
-    let memory_doc = Arc::new(LoroDoc::new());
+    let loro_handle = LoroDoc::new();
     let doc = SyncedDoc::open_router_owned(SyncedDocConfig {
         path: path.clone(),
-        memory_doc: Arc::clone(&memory_doc),
+        doc: loro_handle.clone(),
         bridge,
         event_channel_bound: 256,
         conflict_policy: ConflictPolicy::RejectAndNotify,
@@ -313,20 +313,20 @@ fn loro_synced_file_defaults_to_reject_and_notify() {
     .expect("open should succeed");
 
     // Write through SyncedDoc so last_saved_frontier is set.
-    doc.write(b"agent wrote this")
+    doc.write_bytes(b"agent wrote this")
         .expect("write should succeed");
 
-    // Create unsaved edits in memory_doc by writing directly to the CRDT.
+    // Create unsaved edits in loro_handle by writing directly to the CRDT.
     // Because we used open_router_owned, there is no local_update
     // subscription, so these ops do NOT auto-flush to disk_doc.
     {
-        let text = memory_doc.get_text("content");
+        let text = loro_handle.get_text("content");
         text.insert(0, "PENDING: ").unwrap();
-        memory_doc.commit();
+        loro_handle.commit();
     }
     assert!(
         doc.has_unsaved_edits(),
-        "memory_doc should have unsaved edits after direct CRDT write"
+        "loro_handle should have unsaved edits after direct CRDT write"
     );
 
     // Trigger external edit via apply_external_bytes (since open_router_owned
@@ -358,7 +358,7 @@ fn reject_and_notify_applies_clean_external_edit() {
     file.write("agent wrote this")
         .expect("write should succeed");
 
-    // No pending unsaved edits — memory_doc matches last_saved_frontier.
+    // No pending unsaved edits — loro_handle matches last_saved_frontier.
     // (The local_update subscription auto-flushed the write.)
 
     // Give inotify a moment to register.
@@ -376,12 +376,12 @@ fn reject_and_notify_applies_clean_external_edit() {
         "no pending edits → Applied, not ConflictDetected; got: {ev:?}"
     );
 
-    // memory_doc should reflect the external edit (it was applied).
+    // loro_handle should reflect the external edit (it was applied).
     std::thread::sleep(Duration::from_millis(50));
     let content = file.read().expect("read should succeed");
     assert_eq!(
         content, "external wrote this",
-        "memory_doc should reflect applied external edit"
+        "loro_handle should reflect applied external edit"
     );
 }
 
@@ -406,20 +406,20 @@ fn loro_text_crdt_disjoint_regions_merge_baseline() {
         .expect("base update should succeed");
     base_doc.commit();
 
-    // memory_doc is the agent's side — forked from base.
-    let memory_doc = base_doc.fork();
+    // loro_handle is the agent's side — forked from base.
+    let loro_handle = base_doc.fork();
     // disk_doc is the disk side — also forked from base (same OpIDs, independent future).
     let disk_doc = base_doc.fork();
 
-    // Agent edits memory_doc (line1 region).
-    memory_doc
+    // Agent edits loro_handle (line1 region).
+    loro_handle
         .get_text("content")
         .update("line1-EDITED\nline2\nline3\n", Default::default())
-        .expect("memory_doc text update should succeed");
-    memory_doc.commit();
+        .expect("loro_handle text update should succeed");
+    loro_handle.commit();
 
     // External edits disk_doc (line3 region). disk_doc still has the base
-    // content — the same common ancestor as memory_doc's starting state.
+    // content — the same common ancestor as loro_handle's starting state.
     let vv_before = disk_doc.oplog_vv();
     disk_doc
         .get_text("content")
@@ -432,14 +432,14 @@ fn loro_text_crdt_disjoint_regions_merge_baseline() {
         .export(loro::ExportMode::updates(&vv_before))
         .expect("export should succeed");
 
-    // Import the external edit into memory_doc — CRDT merge.
-    memory_doc
+    // Import the external edit into loro_handle — CRDT merge.
+    loro_handle
         .import(&external_ops)
         .expect("import should succeed");
 
     // Render via TextBridge to get the final merged text.
     let bridge = TextBridge::new("txt".into());
-    let (_ext, content_bytes) = bridge.render(&memory_doc).expect("render should succeed");
+    let (_ext, content_bytes) = bridge.render(&loro_handle).expect("render should succeed");
     let content = String::from_utf8(content_bytes).unwrap();
 
     assert!(
@@ -476,16 +476,16 @@ fn loro_text_crdt_overlapping_regions_merge_baseline() {
         .expect("base update should succeed");
     base_doc.commit();
 
-    // memory_doc (agent side) and disk_doc (disk side) both fork from base.
-    let memory_doc = base_doc.fork();
+    // loro_handle (agent side) and disk_doc (disk side) both fork from base.
+    let loro_handle = base_doc.fork();
     let disk_doc = base_doc.fork();
 
-    // Agent edit: "aXcdef" — applied to memory_doc.
-    memory_doc
+    // Agent edit: "aXcdef" — applied to loro_handle.
+    loro_handle
         .get_text("content")
         .update("aXcdef", Default::default())
-        .expect("memory_doc update should succeed");
-    memory_doc.commit();
+        .expect("loro_handle update should succeed");
+    loro_handle.commit();
 
     // External edit: "abcdYf" — applied to disk_doc from the base state.
     let vv_before = disk_doc.oplog_vv();
@@ -498,12 +498,12 @@ fn loro_text_crdt_overlapping_regions_merge_baseline() {
     let external_ops = disk_doc
         .export(loro::ExportMode::updates(&vv_before))
         .expect("export should succeed");
-    memory_doc
+    loro_handle
         .import(&external_ops)
         .expect("import should succeed");
 
     let bridge = TextBridge::new("txt".into());
-    let (_ext, content_bytes) = bridge.render(&memory_doc).expect("render should succeed");
+    let (_ext, content_bytes) = bridge.render(&loro_handle).expect("render should succeed");
     let content = String::from_utf8(content_bytes).unwrap();
 
     // Snapshot locks the deterministic Loro CRDT outcome.
@@ -539,10 +539,10 @@ fn e2e_realistic_sequential_editor_preserves_both_writes() {
     // now defaults to RejectAndNotify (surfaces conflicts rather than silently
     // merging); use SyncedDoc directly when AutoMerge semantics are needed.
     let bridge = Arc::new(TextBridge::new("txt".into()));
-    let memory_doc = Arc::new(LoroDoc::new());
+    let loro_handle = LoroDoc::new();
     let file = SyncedDoc::open_standalone(SyncedDocConfig {
         path: path.clone(),
-        memory_doc,
+        doc: loro_handle.clone(),
         bridge,
         event_channel_bound: 256,
         conflict_policy: ConflictPolicy::AutoMerge,
@@ -554,7 +554,7 @@ fn e2e_realistic_sequential_editor_preserves_both_writes() {
     std::thread::sleep(Duration::from_millis(100));
 
     // Agent writes line1-EDITED. Blocks until disk is updated.
-    file.write(b"line1-EDITED\nline2\nline3\n")
+    file.write_bytes(b"line1-EDITED\nline2\nline3\n")
         .expect("agent write should succeed");
 
     // Wait for the post-write echo window to fully settle. The debounce period
@@ -587,7 +587,7 @@ fn e2e_realistic_sequential_editor_preserves_both_writes() {
     });
     assert!(
         merged,
-        "external edit to line3 should be merged into memory_doc within 5s"
+        "external edit to line3 should be merged into loro_handle within 5s"
     );
 
     let content_bytes = file.read().expect("read should succeed after merge");
@@ -639,10 +639,10 @@ fn e2e_stale_base_external_lww_under_auto_merge() {
     // outcome. LoroSyncedFile::open now defaults to RejectAndNotify; AutoMerge
     // must be requested explicitly.
     let bridge = Arc::new(TextBridge::new("txt".into()));
-    let memory_doc = Arc::new(LoroDoc::new());
+    let loro_handle = LoroDoc::new();
     let file = SyncedDoc::open_standalone(SyncedDocConfig {
         path: path.clone(),
-        memory_doc,
+        doc: loro_handle.clone(),
         bridge,
         event_channel_bound: 256,
         conflict_policy: ConflictPolicy::AutoMerge,
@@ -654,7 +654,7 @@ fn e2e_stale_base_external_lww_under_auto_merge() {
     std::thread::sleep(Duration::from_millis(100));
 
     // Agent writes line1-EDITED. Blocks until disk is flushed.
-    file.write(b"line1-EDITED\nline2\nline3\n")
+    file.write_bytes(b"line1-EDITED\nline2\nline3\n")
         .expect("agent write should succeed");
 
     // Wait for post-write echo window to settle.
@@ -677,7 +677,7 @@ fn e2e_stale_base_external_lww_under_auto_merge() {
         "AutoMerge should always apply external edits, even stale-base ones"
     );
 
-    // Give the ingest thread a moment to finish the import into memory_doc.
+    // Give the ingest thread a moment to finish the import into loro_handle.
     std::thread::sleep(Duration::from_millis(50));
 
     let content_bytes = file.read().expect("read should succeed");
@@ -695,7 +695,7 @@ fn e2e_stale_base_external_lww_under_auto_merge() {
 /// AC1.7 stale-base scenario under `ConflictPolicy::RejectAndNotify`.
 ///
 /// Uses `open_router_owned` (no local-update subscription) so that direct
-/// memory_doc edits remain genuinely unsaved — the ingest thread does not
+/// loro_handle edits remain genuinely unsaved — the ingest thread does not
 /// auto-flush them. The external edit is delivered via `apply_external_bytes`
 /// (which bypasses conflict policy) after first verifying that
 /// `has_unsaved_edits()` correctly returns `true`.
@@ -705,120 +705,84 @@ fn e2e_stale_base_external_lww_under_auto_merge() {
 /// thread's attachment queue.
 #[test]
 fn e2e_stale_base_external_surfaces_conflict_under_reject_and_notify() {
+    // Single-doc + RejectAndNotify semantics:
+    // - doc retains agent's pending CRDT edits past last_saved_frontier
+    // - external bytes arriving with pending edits fire ConflictDetected
+    // - conflict_pending blocks subsequent write_local from overwriting disk
+    // - reload() clears the flag and replaces doc with disk content
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("stale_base_reject.txt");
     std::fs::write(&path, "line1\nline2\nline3\n").unwrap();
 
-    // Use open_router_owned so local updates do NOT auto-flush to disk_doc.
     let bridge = Arc::new(TextBridge::new("txt".into()));
-    let memory_doc = Arc::new(LoroDoc::new());
+    let loro_handle = LoroDoc::new();
     let doc = SyncedDoc::open_router_owned(SyncedDocConfig {
         path: path.clone(),
-        memory_doc: Arc::clone(&memory_doc),
+        doc: loro_handle.clone(),
         bridge,
         event_channel_bound: 256,
         conflict_policy: ConflictPolicy::RejectAndNotify,
     })
     .expect("open should succeed");
 
-    // Agent write through SyncedDoc sets last_saved_frontier.
-    doc.write("line1-EDITED\nline2\nline3\n".as_bytes())
+    let rx = doc.subscribe_external_changes();
+
+    // Agent write through write_bytes sets last_saved_frontier and disk.
+    doc.write_bytes("line1-EDITED\nline2\nline3\n".as_bytes())
         .expect("agent write should succeed");
+    assert!(!doc.has_unsaved_edits(), "no unsaved edits right after write_bytes");
 
-    // Capture the frontier after the agent's write.
-    let frontier_after_write = doc
-        .last_saved_frontier()
-        .expect("frontier should be Some after a write");
-
-    // No unsaved edits right after a SyncedDoc::write.
-    assert!(
-        !doc.has_unsaved_edits(),
-        "memory_doc should NOT have unsaved edits right after SyncedDoc::write"
-    );
-
-    // Create unsaved edits in memory_doc by writing directly to the CRDT.
-    // Because we used open_router_owned, there is no local_update
-    // subscription, so these ops do NOT auto-flush to disk_doc.
+    // Direct CRDT mutation creates unsaved edits past last_saved_frontier.
     {
-        let text = memory_doc.get_text("content");
+        let text = loro_handle.get_text("content");
         text.insert(0, "PENDING: ").unwrap();
-        memory_doc.commit();
+        loro_handle.commit();
     }
+    assert!(doc.has_unsaved_edits(), "unsaved edits after direct CRDT write");
+
+    // Single-doc: doc reflects the pending edit (one identity).
+    let mem_content = String::from_utf8(doc.read().unwrap()).unwrap();
+    assert!(mem_content.contains("PENDING"), "doc should reflect pending edit; got: {mem_content:?}");
+
+    // Disk file does NOT yet have the pending edit (the direct
+    // loro_handle commit was never flushed via write_local).
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(on_disk, "line1-EDITED\nline2\nline3\n", "disk reflects last write_bytes only");
+
+    // External "editor" attempts to apply different content. Under
+    // RejectAndNotify with unsaved edits, this fires ConflictDetected
+    // and does NOT merge into doc.
+    doc.apply_external_bytes(b"external content\n")
+        .expect("apply_external_bytes returns Ok even when conflict is detected");
+
+    let ev = rx.recv_timeout(Duration::from_secs(1))
+        .expect("ConflictDetected event should arrive within 1s");
     assert!(
-        doc.has_unsaved_edits(),
-        "memory_doc should have unsaved edits after direct CRDT write (no auto-flush)"
+        matches!(ev, ExternalChangeEvent::ConflictDetected { .. }),
+        "event must be ConflictDetected under RejectAndNotify with unsaved edits; got: {ev:?}"
     );
 
-    // Verify that the pending edits are visible in memory_doc.
-    let mem_content_bytes = doc.read().expect("read should succeed");
-    let mem_content = String::from_utf8(mem_content_bytes).unwrap();
+    // doc must still have the agent's pending edit (external NOT merged in).
+    let post_conflict = String::from_utf8(doc.read().unwrap()).unwrap();
+    assert!(post_conflict.contains("PENDING"), "doc preserves agent edit after conflict; got: {post_conflict:?}");
+
+    // write_local must refuse — overwriting disk here would silently
+    // lose the external editor's bytes.
+    let write_result = doc.write_local();
     assert!(
-        mem_content.contains("PENDING"),
-        "memory_doc should contain the pending edit; got: {mem_content:?}"
+        matches!(write_result, Err(LoroSyncError::ConflictPending { .. })),
+        "write_local must refuse with ConflictPending; got: {write_result:?}"
     );
 
-    // disk_doc must NOT have the pending edit.
-    let disk_doc_content = doc.disk_doc().get_text("content").to_string();
-    assert_eq!(
-        disk_doc_content, "line1-EDITED\nline2\nline3\n",
-        "disk_doc should NOT have the pending edit; got: {disk_doc_content:?}"
-    );
-
-    // last_saved_frontier must match the pre-pending-edit state.
-    let frontier_before_external = doc.last_saved_frontier();
-    assert_eq!(
-        frontier_before_external.as_ref(),
-        Some(&frontier_after_write),
-        "last_saved_frontier should not have changed from direct memory_doc edits"
-    );
-
-    // Now simulate reload: apply disk content to memory_doc, discarding pending edits.
+    // Reload (take disk version) resolves the conflict.
     let reloaded = doc.reload().expect("reload should succeed");
     let reloaded_str = String::from_utf8(reloaded).unwrap();
+    assert_eq!(reloaded_str, "line1-EDITED\nline2\nline3\n", "reload returns current disk content");
+    assert!(!doc.has_unsaved_edits(), "no unsaved edits after reload");
 
-    // After reload, memory_doc should reflect disk content (what was written by std::fs::write).
-    // But wait — we wrote "line1-EDITED..." to disk via SyncedDoc::write, so disk has that.
-    // Let's write something different to disk first to simulate an external editor.
-    // Actually, the reload reads the current disk file which has "line1-EDITED\nline2\nline3\n"
-    // (from the SyncedDoc::write above). That's fine — it confirms reload reads from disk.
-    assert_eq!(
-        reloaded_str, "line1-EDITED\nline2\nline3\n",
-        "reload should return current disk content"
-    );
-
-    // After reload, no unsaved edits should remain.
-    assert!(
-        !doc.has_unsaved_edits(),
-        "no unsaved edits should remain after reload"
-    );
-
-    // memory_doc should no longer contain the pending edit.
-    let post_reload_content = doc.read().expect("read should succeed");
-    let post_reload_str = String::from_utf8(post_reload_content).unwrap();
-    assert!(
-        !post_reload_str.contains("PENDING"),
-        "memory_doc should NOT contain the pending edit after reload; got: {post_reload_str}"
-    );
+    // After reload, write_local works again.
+    doc.write_local().expect("write_local should succeed after reload clears conflict");
 }
-
-// ---------------------------------------------------------------------------
-// AC1.8 (e2e) — full pipeline: overlapping edits, ordered
-// ---------------------------------------------------------------------------
-
-/// AC1.8 end-to-end (agent first): Overlapping edits where the agent writes
-/// first, then the external write arrives. The final merged state is
-/// snapshotted to lock the per-order pipeline behaviour.
-///
-/// `TextBridge::apply_external` calls `update_by_line` (Myers diff), which
-/// computes a diff relative to `disk_doc`'s current state at the time the
-/// external event arrives. When the agent write has already been flushed to
-/// `disk_doc` before the external event, `update_by_line` sees `"aXcdef"` as
-/// the base and computes a diff from it to `"abcdYf"`. The result is
-/// order-sensitive by design; see module-level doc comment.
-///
-/// Snapshot locks the per-order outcome. The two AC1.8 tests (agent-first vs
-/// external-first) may produce different snapshots — this is expected and
-/// documents the order-sensitive behaviour of `update_by_line`.
 #[test]
 fn e2e_overlapping_edits_agent_first_then_external() {
     let dir = tempfile::tempdir().unwrap();
@@ -831,10 +795,10 @@ fn e2e_overlapping_edits_agent_first_then_external() {
     // so LoroSyncedFile's RejectAndNotify default would surface a conflict
     // rather than merge.
     let bridge = Arc::new(TextBridge::new("txt".into()));
-    let memory_doc = Arc::new(LoroDoc::new());
+    let loro_handle = LoroDoc::new();
     let file = SyncedDoc::open_standalone(SyncedDocConfig {
         path: path.clone(),
-        memory_doc,
+        doc: loro_handle.clone(),
         bridge,
         event_channel_bound: 256,
         conflict_policy: ConflictPolicy::AutoMerge,
@@ -846,7 +810,7 @@ fn e2e_overlapping_edits_agent_first_then_external() {
     std::thread::sleep(Duration::from_millis(100));
 
     // Agent write — blocks until disk is flushed and echo state is recorded.
-    file.write(b"aXcdef").expect("agent write should succeed");
+    file.write_bytes(b"aXcdef").expect("agent write should succeed");
 
     // Wait for the post-write echo window to settle (~200ms debounce + margin).
     // We confirm no spurious external event arrived.
@@ -866,7 +830,7 @@ fn e2e_overlapping_edits_agent_first_then_external() {
         "external edit should produce an ExternalChangeEvent within 5s"
     );
 
-    // Give the ingest thread a moment to finish applying to memory_doc.
+    // Give the ingest thread a moment to finish applying to loro_handle.
     std::thread::sleep(Duration::from_millis(50));
 
     let content_bytes = file
@@ -901,10 +865,10 @@ fn e2e_overlapping_edits_external_first_then_agent() {
     // Open with AutoMerge explicitly — this test documents CRDT order-sensitive
     // merge behaviour. LoroSyncedFile::open now defaults to RejectAndNotify.
     let bridge = Arc::new(TextBridge::new("txt".into()));
-    let memory_doc = Arc::new(LoroDoc::new());
+    let loro_handle = LoroDoc::new();
     let file = SyncedDoc::open_standalone(SyncedDocConfig {
         path: path.clone(),
-        memory_doc,
+        doc: loro_handle.clone(),
         bridge,
         event_channel_bound: 256,
         conflict_policy: ConflictPolicy::AutoMerge,
@@ -931,7 +895,7 @@ fn e2e_overlapping_edits_external_first_then_agent() {
     std::thread::sleep(Duration::from_millis(50));
 
     // Agent write — blocks until disk is flushed.
-    file.write(b"aXcdef").expect("agent write should succeed");
+    file.write_bytes(b"aXcdef").expect("agent write should succeed");
 
     // Wait for the post-write echo window to settle.
     std::thread::sleep(Duration::from_millis(300));
@@ -954,7 +918,7 @@ fn e2e_overlapping_edits_external_first_then_agent() {
 /// `false`, causing Loro to auto-unsubscribe after the first update. The fix
 /// changes the return value to `true` (keep subscription alive).
 ///
-/// This test verifies that TWO sequential mutations via `memory_doc.get_text`
+/// This test verifies that TWO sequential mutations via `loro_handle.get_text`
 /// both land on disk. With the old `false` return the second write would be
 /// silently dropped because the local-update subscription was unsubscribed
 /// after the first callback.
@@ -965,53 +929,48 @@ fn regression_c1_two_writes_both_land_on_disk() {
     std::fs::write(&path, "initial").unwrap();
 
     let bridge = Arc::new(TextBridge::new("txt".into()));
-    let memory_doc = Arc::new(loro::LoroDoc::new());
+    let loro_handle = loro::LoroDoc::new();
     let doc = SyncedDoc::open_standalone(SyncedDocConfig {
         path: path.clone(),
-        memory_doc: Arc::clone(&memory_doc),
+        doc: loro_handle.clone(),
         bridge,
         event_channel_bound: 256,
         conflict_policy: crate::loro_sync::ConflictPolicy::AutoMerge,
     })
     .expect("open_standalone should succeed");
 
-    // First mutation.
-    memory_doc
+    // First mutation. Single-doc + explicit-flush model: caller must call
+    // write_local after committing CRDT ops on the doc handle. There is no
+    // auto-subscribe path; agents go through cache.persist (for blocks) or
+    // file.write/synced.write_bytes (for files), both of which call
+    // write_local internally.
+    loro_handle
         .get_text("content")
         .update("first write", Default::default())
         .expect("first update should succeed");
-    memory_doc.commit();
+    loro_handle.commit();
+    doc.write_local().expect("first write_local should succeed");
 
-    // Second mutation. With the old `false` return, the subscription is
-    // dropped after the first callback, so this write would never trigger
-    // a disk update.
-    memory_doc
+    // Second mutation.
+    loro_handle
         .get_text("content")
         .update("second write", Default::default())
         .expect("second update should succeed");
-    memory_doc.commit();
+    loro_handle.commit();
+    doc.write_local().expect("second write_local should succeed");
 
-    // Both writes arrive via the local-update subscription; the ingest thread
-    // debounces and coalesces them. Wait up to 5s for the final state (the
-    // second write) to appear on disk.
-    let second_write_landed = wait_for(Duration::from_secs(5), || {
-        std::fs::read_to_string(&path)
-            .ok()
-            .map(|s| s == "second write")
-            .unwrap_or(false)
-    });
-
-    assert!(
-        second_write_landed,
-        "second write should land on disk within 5s (regression: C1 subscribe_local_update \
-         returned false, causing auto-unsubscribe after first write)"
+    // Disk should now reflect the second write.
+    let on_disk = std::fs::read_to_string(&path).expect("read disk");
+    assert_eq!(
+        on_disk, "second write",
+        "second write should be on disk after explicit write_local"
     );
 
-    // Also verify memory_doc read() reflects the second write.
+    // Also verify loro_handle read() reflects the second write.
     let mem_content = String::from_utf8(doc.read().expect("read should succeed")).unwrap();
     assert_eq!(
         mem_content, "second write",
-        "memory_doc should reflect the second write; got: {mem_content:?}"
+        "loro_handle should reflect the second write; got: {mem_content:?}"
     );
 }
 
@@ -1033,10 +992,10 @@ fn regression_c2_slow_subscriber_kept_alive_after_full() {
     std::fs::write(&path, "base content").unwrap();
 
     let bridge = Arc::new(TextBridge::new("txt".into()));
-    let memory_doc = Arc::new(loro::LoroDoc::new());
+    let loro_handle = loro::LoroDoc::new();
     let doc = SyncedDoc::open_standalone(SyncedDocConfig {
         path: path.clone(),
-        memory_doc: Arc::clone(&memory_doc),
+        doc: loro_handle.clone(),
         bridge,
         event_channel_bound: 256,
         conflict_policy: crate::loro_sync::ConflictPolicy::AutoMerge,

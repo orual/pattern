@@ -3,7 +3,6 @@
 //! Provides structured web search (Brave → DuckDuckGo cascade) and
 //! URL content fetching with readable-text extraction.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};

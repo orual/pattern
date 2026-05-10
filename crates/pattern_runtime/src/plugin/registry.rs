@@ -8,12 +8,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use smol_str::SmolStr;
 
+use pattern_core::CapabilitySet;
+use pattern_core::plugin::PluginId;
 use pattern_core::plugin::manifest::PluginManifest;
 use pattern_core::plugin::scope::PluginScope;
-use pattern_core::plugin::PluginId;
-use pattern_core::CapabilitySet;
 
 use pattern_core::plugin::RegistryError;
 
@@ -173,20 +172,14 @@ impl PluginRegistry {
     pub fn insert(&self, plugin: LoadedPlugin) {
         let id = plugin.id.clone();
         self.inner.write().insert(id.clone(), plugin);
-        (self.hook_emit)(
-            "plugin.registered",
-            serde_json::json!({ "id": id }),
-        );
+        (self.hook_emit)("plugin.registered", serde_json::json!({ "id": id }));
     }
 
     /// Remove a plugin from the in-memory registry.
     pub fn remove(&self, id: &str) -> Option<LoadedPlugin> {
         let removed = self.inner.write().remove(id);
         if removed.is_some() {
-            (self.hook_emit)(
-                "plugin.unregistered",
-                serde_json::json!({ "id": id }),
-            );
+            (self.hook_emit)("plugin.unregistered", serde_json::json!({ "id": id }));
         }
         removed
     }
@@ -257,9 +250,8 @@ impl PluginRegistry {
                         };
                         if let Ok(manifest) = load_manifest_from_dir(&plugin_dir) {
                             let scope = PluginScope::Project { private };
-                            let lp = build_loaded_from_installation(
-                                inst, manifest, scope, &plugin_dir,
-                            );
+                            let lp =
+                                build_loaded_from_installation(inst, manifest, scope, &plugin_dir);
                             if let Some(prev) = combined.insert(lp.id.clone(), lp) {
                                 tracing::warn!(
                                     plugin_id = %prev.id,
@@ -291,11 +283,10 @@ impl PluginRegistry {
         let dest = match &source {
             InstallSource::LocalPath(path) => {
                 // Read the manifest from the source path directly.
-                let manifest = load_manifest_from_dir(path)
-                    .map_err(|e| RegistryError::Io {
-                        path: path.to_path_buf(),
-                        source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-                    })?;
+                let manifest = load_manifest_from_dir(path).map_err(|e| RegistryError::Io {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                })?;
                 let cache_dir = self.paths.plugin_cache_dir(&manifest.name);
                 if !cache_dir.exists() {
                     // Copy the plugin directory to the cache.
@@ -323,21 +314,17 @@ impl PluginRegistry {
                 if !status.success() {
                     return Err(RegistryError::Io {
                         path: cache_dir.clone(),
-                        source: std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "git clone failed",
-                        ),
+                        source: std::io::Error::new(std::io::ErrorKind::Other, "git clone failed"),
                     });
                 }
                 cache_dir
             }
         };
 
-        let manifest = load_manifest_from_dir(&dest)
-            .map_err(|e| RegistryError::Io {
-                path: dest.clone(),
-                source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-            })?;
+        let manifest = load_manifest_from_dir(&dest).map_err(|e| RegistryError::Io {
+            path: dest.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+        })?;
 
         let lp = LoadedPlugin {
             id: manifest.name.clone(),
@@ -401,9 +388,9 @@ impl PluginRegistry {
     /// Uninstall a plugin by id. Removes from registry, removes from
     /// persisted KDL, and optionally cleans the cache directory.
     pub fn uninstall(&self, id: &str, clean_cache: bool) -> Result<(), RegistryError> {
-        let removed = self.remove(id).ok_or_else(|| RegistryError::NotFound {
-            id: id.into(),
-        })?;
+        let removed = self
+            .remove(id)
+            .ok_or_else(|| RegistryError::NotFound { id: id.into() })?;
         // Remove from persisted registry KDL.
         self.remove_from_persisted_registry(id, removed.scope)?;
         if clean_cache && removed.source_path.exists() {
@@ -511,12 +498,13 @@ fn scan_plugin_dirs(root: &Path) -> Result<Vec<PathBuf>, RegistryError> {
 
 /// Check if a directory contains a plugin manifest.
 fn has_manifest(dir: &Path) -> bool {
-    dir.join("manifest.kdl").exists()
-        || dir.join(".claude-plugin").join("plugin.json").exists()
+    dir.join("manifest.kdl").exists() || dir.join(".claude-plugin").join("plugin.json").exists()
 }
 
 /// Load a manifest from a plugin directory.
-fn load_manifest_from_dir(dir: &Path) -> Result<PluginManifest, pattern_core::plugin::ManifestError> {
+fn load_manifest_from_dir(
+    dir: &Path,
+) -> Result<PluginManifest, pattern_core::plugin::ManifestError> {
     let kdl_path = dir.join("manifest.kdl");
     if kdl_path.exists() {
         return super::manifest::from_kdl_file(&kdl_path);
@@ -548,7 +536,12 @@ fn build_loaded_from_installation(
             let map: serde_json::Map<String, serde_json::Value> = uc
                 .entries
                 .into_iter()
-                .map(|e| (e.key.to_string(), serde_json::Value::String(e.value.to_string())))
+                .map(|e| {
+                    (
+                        e.key.to_string(),
+                        serde_json::Value::String(e.value.to_string()),
+                    )
+                })
                 .collect();
             serde_json::Value::Object(map)
         })

@@ -738,6 +738,7 @@ pub fn handle_create(
     }
 
     let sdoc = fetch_task_list(store, scope, block)?;
+    sdoc.auto_attribution("tasks:create");
     let doc = sdoc.inner();
 
     let mut ids: Vec<TaskItemId> = Vec::with_capacity(request.items.len());
@@ -746,7 +747,7 @@ pub fn handle_create(
         ids.push(id);
     }
 
-    doc.commit();
+    sdoc.commit();
 
     store
         .mark_dirty(scope, block)
@@ -781,6 +782,7 @@ pub fn handle_update(
         })?;
     let (block, item_id) = parse_item_ref(edge_ref)?;
     let sdoc = fetch_task_list(store, scope, &block)?;
+    sdoc.auto_attribution("tasks:update");
 
     let doc = sdoc.inner();
     let index = find_item_index(doc, &item_id).ok_or_else(|| {
@@ -802,7 +804,7 @@ pub fn handle_update(
         .insert("updated_at", jiff::Timestamp::now().to_string().as_str())
         .map_err(|e| TaskHandlerError::Loro(format!("insert updated_at: {e}")))?;
 
-    doc.commit();
+    sdoc.commit();
 
     store
         .mark_dirty(scope, &block)
@@ -834,6 +836,7 @@ pub fn handle_transition(
         })?;
     let (block, item_id) = parse_item_ref(edge_ref)?;
     let sdoc = fetch_task_list(store, scope, &block)?;
+    sdoc.auto_attribution("tasks:transition");
 
     let doc = sdoc.inner();
     let index = find_item_index(doc, &item_id).ok_or_else(|| {
@@ -868,7 +871,7 @@ pub fn handle_transition(
             .map_err(|e| TaskHandlerError::Loro(format!("delete completed_at: {e}")))?;
     }
 
-    doc.commit();
+    sdoc.commit();
 
     store
         .mark_dirty(scope, &block)
@@ -896,6 +899,7 @@ pub fn handle_add_comment(
 ) -> Result<(), TaskHandlerError> {
     let (block, item_id) = parse_item_ref(edge_ref)?;
     let sdoc = fetch_task_list(store, scope, &block)?;
+    sdoc.auto_attribution("tasks:add_comment");
 
     let doc = sdoc.inner();
     let index = find_item_index(doc, &item_id).ok_or_else(|| {
@@ -925,7 +929,7 @@ pub fn handle_add_comment(
         .insert("updated_at", now.to_string().as_str())
         .map_err(|e| TaskHandlerError::Loro(format!("insert updated_at: {e}")))?;
 
-    doc.commit();
+    sdoc.commit();
 
     store
         .mark_dirty(scope, &block)
@@ -954,6 +958,7 @@ pub fn handle_link(
     let (tgt_block, tgt_item) = parse_edge_ref_any(target_ref)?;
 
     let sdoc = fetch_task_list(store, scope, &src_block)?;
+    sdoc.auto_attribution("tasks:link");
     let doc = sdoc.inner();
     let index = find_item_index(doc, &src_item).ok_or_else(|| {
         TaskHandlerError::Memory(MemoryError::TaskNotFound {
@@ -988,7 +993,7 @@ pub fn handle_link(
         .insert("updated_at", jiff::Timestamp::now().to_string().as_str())
         .map_err(|e| TaskHandlerError::Loro(format!("insert updated_at: {e}")))?;
 
-    doc.commit();
+    sdoc.commit();
 
     store
         .mark_dirty(scope, &src_block)
@@ -1013,6 +1018,7 @@ pub fn handle_unlink(
     let (tgt_block, tgt_item) = parse_edge_ref_any(target_ref)?;
 
     let sdoc = fetch_task_list(store, scope, &src_block)?;
+    sdoc.auto_attribution("tasks:unlink");
     let doc = sdoc.inner();
     // Idempotent: if the source item doesn't exist, there's no edge to remove.
     // Matches the "no-op if edge doesn't exist" contract — generalized to the
@@ -1058,7 +1064,7 @@ pub fn handle_unlink(
         .insert("updated_at", jiff::Timestamp::now().to_string().as_str())
         .map_err(|e| TaskHandlerError::Loro(format!("insert updated_at: {e}")))?;
 
-    doc.commit();
+    sdoc.commit();
 
     store
         .mark_dirty(scope, &src_block)

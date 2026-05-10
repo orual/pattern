@@ -73,7 +73,7 @@ pub struct SyncedDocConfig<B: LoroDocBridge> {
     /// Path to the file on disk.
     pub path: PathBuf,
     /// The caller-supplied memory doc (lives in MemoryCache or equivalent).
-    pub memory_doc: Arc<LoroDoc>,
+    pub doc: LoroDoc,
     /// Schema/format adapter.
     pub bridge: Arc<B>,
     /// Bound on the internal ingest event channel.
@@ -90,7 +90,7 @@ pub struct SyncedDocConfig<B: LoroDocBridge> {
 /// ConflictPolicy::default()`.
 pub struct SyncedDocConfigBuilder<B: LoroDocBridge> {
     path: PathBuf,
-    memory_doc: Arc<LoroDoc>,
+    doc: LoroDoc,
     bridge: Arc<B>,
     event_channel_bound: usize,
     conflict_policy: ConflictPolicy,
@@ -104,12 +104,12 @@ impl<B: LoroDocBridge> SyncedDocConfig<B> {
     #[allow(clippy::new_ret_no_self)] // Intentional builder: returns SyncedDocConfigBuilder<B>.
     pub fn new(
         path: impl Into<PathBuf>,
-        memory_doc: Arc<LoroDoc>,
+        doc: LoroDoc,
         bridge: Arc<B>,
     ) -> SyncedDocConfigBuilder<B> {
         SyncedDocConfigBuilder {
             path: path.into(),
-            memory_doc,
+            doc,
             bridge,
             event_channel_bound: 256,
             conflict_policy: ConflictPolicy::default(),
@@ -134,7 +134,7 @@ impl<B: LoroDocBridge> SyncedDocConfigBuilder<B> {
     pub fn build(self) -> SyncedDocConfig<B> {
         SyncedDocConfig {
             path: self.path,
-            memory_doc: self.memory_doc,
+            doc: self.doc,
             bridge: self.bridge,
             event_channel_bound: self.event_channel_bound,
             conflict_policy: self.conflict_policy,
@@ -185,19 +185,6 @@ pub enum ExternalChangeEvent {
     },
 }
 
-/// Ingest events sent to the per-doc ingest thread.
-enum IngestEvent {
-    /// Local update bytes from `memory_doc.subscribe_local_update`.
-    LocalUpdate(Vec<u8>),
-    /// External filesystem event delivered from a watcher subscription.
-    External(DebouncedEvent),
-    /// Synchronous write request — `reply.send(result)` when done.
-    SyncWrite {
-        bytes: Vec<u8>,
-        reply: Sender<Result<(), SyncedDocError>>,
-    },
-}
-
 /// Notification emitted after any disk write (local update, sync write, or
 /// external edit application). Subscribers receive the blake3 hash of the
 /// rendered bytes that were written. Used by the block subscriber worker to
@@ -209,7 +196,7 @@ pub struct WriteNotification {
     pub content_hash: [u8; 32],
 }
 
-/// Shared mutable state between `SyncedDoc` and the ingest thread.
+/// Shared mutable state on `SyncedDoc`.
 struct SharedState {
     last_written_mtime: Mutex<Option<SystemTime>>,
     last_written_hash: Mutex<Option<[u8; 32]>>,
@@ -217,9 +204,8 @@ struct SharedState {
     /// Subscribers notified after every successful disk write (local or
     /// external). Used by the block subscriber worker for FTS5/reembed.
     write_subscribers: Mutex<Vec<Sender<WriteNotification>>>,
-    /// The oplog version vector of `disk_doc` after the most recent
-    /// successful local write (SyncWrite or LocalUpdate that resulted in a
-    /// successful `atomic_write`). `None` until the first successful write.
+    /// The oplog version vector of `doc` after the most recent successful
+    /// local write. `None` until the first successful write.
     ///
     /// Used by `has_unsaved_edits()` to answer
     /// "does the current in-memory state differ from what is on disk?". Also
@@ -227,13 +213,22 @@ struct SharedState {
     last_saved_frontier: Mutex<Option<VersionVector>>,
     /// The conflict-handling policy for inbound external edits.
     conflict_policy: ConflictPolicy,
+    /// Held across rebase-import + render + atomic_write to serialize
+    /// concurrent local writes and external edits against the single doc.
+    write_lock: Mutex<()>,
+    /// Set when apply_external_bytes detects a conflict under
+    /// `RejectAndNotify` policy. Blocks `write_local` until the agent
+    /// resolves via `reload()` or `force_apply_external()`. Without this,
+    /// the agent's next op would write_local → overwrite the external
+    /// content on disk, silently losing it.
+    conflict_pending: Mutex<bool>,
 }
 
-/// Per-file two-doc CRDT sync state.
+/// Per-file single-doc CRDT sync state.
 ///
-/// Owns `memory_doc` (caller-supplied) + `disk_doc` (internal) + echo
-/// suppression state + an ingest thread that applies both local updates and
-/// external filesystem events.
+/// Owns the single `LoroDoc`, echo-suppression state, and a watcher
+/// subscription that feeds external file changes into the doc via
+/// `apply_external_bytes`.
 pub struct SyncedDoc<B: LoroDocBridge> {
     inner: Arc<SyncedDocInner<B>>,
 }
@@ -248,26 +243,19 @@ impl<B: LoroDocBridge> std::fmt::Debug for SyncedDoc<B> {
 
 struct SyncedDocInner<B: LoroDocBridge> {
     path: PathBuf,
-    memory_doc: Arc<LoroDoc>,
-    disk_doc: Arc<LoroDoc>,
+    /// THE doc. Source of truth. Both agent ops and CRDT-merged external
+    /// edits land here. Loro is internally Arc'd; no second wrapper needed.
+    doc: LoroDoc,
     bridge: Arc<B>,
     shared: Arc<SharedState>,
     cancel: CancellationToken,
-    /// `Option` + `Mutex` so `close()` can take and drop the sender (causing
-    /// the thread's `rx.recv()` to unblock) even though `inner` is Arc-shared.
-    ingest_tx: Mutex<Option<Sender<IngestEvent>>>,
-    /// `Option` so `close()` can `take()` and join the thread even though the
-    /// inner is Arc-shared. `Mutex` for interior mutability required by Arc.
-    ingest_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// The loro local-update subscription guard. The callback holds a clone of
-    /// `ingest_tx`; dropping this subscription before joining the ingest thread
-    /// is required so the callback's sender clone is released and the channel's
-    /// send side is fully closed before the join.
-    _local_update_sub: Mutex<Option<loro::Subscription>>,
     /// Keeps the standalone watcher alive (for `open_standalone`).
     _standalone_watcher: Option<DirWatcher>,
     /// Keeps the fanout subscription alive (for `open_with_subscription`).
     _fanout_guard: Option<PathFanoutSubscription>,
+    /// Watcher feeder thread handle. Reads external events from a channel
+    /// and calls `apply_external_bytes`. Joined on `close()`.
+    watcher_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl<B: LoroDocBridge> SyncedDoc<B> {
@@ -311,84 +299,12 @@ impl<B: LoroDocBridge> SyncedDoc<B> {
         open_impl(cfg, OpenMode::RouterOwned)
     }
 
-    /// Write bytes to the file via the ingest thread.
-    ///
-    /// Blocks until the write has been applied to disk. The return value
-    /// guarantees disk has been updated before this returns.
-    pub fn write(&self, bytes: &[u8]) -> Result<(), SyncedDocError> {
-        let (reply_tx, reply_rx) = bounded::<Result<(), SyncedDocError>>(1);
-        let guard = self.inner.ingest_tx.lock().unwrap();
-        let tx = guard.as_ref().ok_or(SyncedDocError::Closed)?;
-        tx.send(IngestEvent::SyncWrite {
-            bytes: bytes.to_vec(),
-            reply: reply_tx,
-        })
-        .map_err(|_| SyncedDocError::Closed)?;
-        drop(guard);
-        reply_rx.recv().map_err(|_| SyncedDocError::Closed)?
-    }
-
-    /// Write pre-rendered bytes to disk, bypassing the bridge.
-    ///
-    /// For use by the block subscriber worker, which imports Loro update bytes
-    /// into `disk_doc` and renders canonical bytes itself (via
-    /// `render_canonical_from_disk_doc`), then delegates only the disk-write
-    /// and bookkeeping to `SyncedDoc`. This preserves the worker's 50ms
-    /// debounce coalescing while moving echo suppression state
-    /// (`last_written_mtime`, `last_written_hash`, `last_saved_frontier`) into
-    /// `SyncedDoc`.
-    ///
-    /// Contrast with `write(&[u8])` which goes through the bridge's
-    /// `apply_external` path (appropriate for callers that have file-content
-    /// bytes but no pre-loaded disk_doc state). Use `write_rendered` when
-    /// disk_doc is already up to date and `rendered_bytes` are the output of
-    /// `bridge.render(&disk_doc)`.
-    pub fn write_rendered(&self, rendered_bytes: &[u8]) -> Result<(), SyncedDocError> {
-        let path = &self.inner.path;
-
-        crate::fs::atomic_write(path, rendered_bytes)?;
-
-        // Update echo-suppression state so the watcher doesn't re-apply our
-        // own write as an external edit.
-        if let Ok(meta) = std::fs::metadata(path)
-            && let Ok(mtime) = meta.modified()
-        {
-            *self.inner.shared.last_written_mtime.lock().unwrap() = Some(mtime);
-        }
-        let hash: [u8; 32] = *blake3::hash(rendered_bytes).as_bytes();
-        *self.inner.shared.last_written_hash.lock().unwrap() = Some(hash);
-
-        // Record the frontier so Phase 2's `FileHandler` can check for
-        // unsaved edits.
-        *self.inner.shared.last_saved_frontier.lock().unwrap() =
-            Some(self.inner.disk_doc.oplog_vv());
-
-        // Notify write subscribers (block subscriber worker uses this for
-        // FTS5 and re-embed triggers). A `Full` channel means the subscriber
-        // is briefly busy — drop the event but keep the subscriber alive.
-        // Only a `Disconnected` error means the receiver was dropped for real.
-        let notification = WriteNotification { content_hash: hash };
-        let mut subs = self.inner.shared.write_subscribers.lock().unwrap();
-        subs.retain(|tx| {
-            !matches!(
-                tx.try_send(notification.clone()),
-                Err(crossbeam_channel::TrySendError::Disconnected(_))
-            )
-        });
-
-        Ok(())
-    }
-
-    /// Read the current content as rendered bytes.
-    ///
-    /// Renders from `memory_doc` — the live view that includes both agent
-    /// writes and CRDT-merged external edits. `disk_doc` is the backing store
-    /// for disk I/O; `memory_doc` is the source of truth for callers.
+    /// Read the current content as rendered bytes from `doc`.
     pub fn read(&self) -> Result<Vec<u8>, SyncedDocError> {
         let (_ext, bytes) = self
             .inner
             .bridge
-            .render(&self.inner.memory_doc)
+            .render(&self.inner.doc)
             .map_err(SyncedDocError::Bridge)?;
         Ok(bytes)
     }
@@ -444,14 +360,9 @@ impl<B: LoroDocBridge> SyncedDoc<B> {
         *self.inner.shared.last_written_mtime.lock().unwrap()
     }
 
-    /// Reference to the caller-supplied memory doc.
-    pub fn memory_doc(&self) -> &Arc<LoroDoc> {
-        &self.inner.memory_doc
-    }
-
-    /// Reference to the internal disk doc.
-    pub fn disk_doc(&self) -> &Arc<LoroDoc> {
-        &self.inner.disk_doc
+    /// Reference to THE doc.
+    pub fn doc(&self) -> &LoroDoc {
+        &self.inner.doc
     }
 
     /// Return the oplog version vector of `disk_doc` after the last successful
@@ -466,31 +377,6 @@ impl<B: LoroDocBridge> SyncedDoc<B> {
             .clone()
     }
 
-    /// Read the file from disk and compare its bytes against the bridge's
-    /// render of `disk_doc`. Returns `Ok(true)` if they match (no external
-    /// drift), `Ok(false)` if they differ (stale base — external writer
-    /// wrote the file without seeing our last write), or an error if the
-    /// read or render fails.
-    ///
-    /// This is a point-in-time check. The result can become stale immediately
-    /// after it returns if an external writer modifies the file concurrently.
-    pub fn disk_doc_matches_disk(&self) -> Result<bool, SyncedDocError> {
-        let path = &self.inner.path;
-
-        let on_disk = std::fs::read(path).map_err(|e| SyncedDocError::Io {
-            path: path.clone(),
-            source: e,
-        })?;
-
-        let (_ext, rendered) = self
-            .inner
-            .bridge
-            .render(&self.inner.disk_doc)
-            .map_err(SyncedDocError::Bridge)?;
-
-        Ok(on_disk == rendered)
-    }
-
     /// Returns `true` if `memory_doc` has edits beyond the last successful
     /// local save (i.e., the agent has pending writes not yet rendered to disk).
     ///
@@ -498,7 +384,11 @@ impl<B: LoroDocBridge> SyncedDoc<B> {
     /// opened) and `memory_doc` is non-empty — the initial seed counts as
     /// "unsaved" because nothing has been written by the agent yet.
     pub fn has_unsaved_edits(&self) -> bool {
-        has_unsaved_edits_internal(&self.inner.memory_doc, &self.inner.shared)
+        let cur = self.inner.doc.oplog_vv();
+        match &*self.inner.shared.last_saved_frontier.lock().unwrap() {
+            Some(saved) => cur != *saved,
+            None => !cur.is_empty(),
+        }
     }
 
     /// Force `has_unsaved_edits()` to return `true` by clearing the saved
@@ -515,59 +405,28 @@ impl<B: LoroDocBridge> SyncedDoc<B> {
         *self.inner.shared.last_saved_frontier.lock().unwrap() = None;
     }
 
-    /// Discard uncommitted memory_doc edits and replace with current disk content.
+    /// Discard uncommitted edits and replace with current disk content.
     ///
     /// Recovery path from `FileConflict` when the agent decides to take
-    /// the disk version. Applies disk content directly to memory_doc via
-    /// the bridge (Myers-diff to target state), then syncs disk_doc to
-    /// match. After reload, `has_unsaved_edits()` returns `false`.
-    ///
-    /// Also updates `last_saved_frontier`, `last_written_mtime`, and
-    /// `last_written_hash` to reflect the current file state.
-    ///
-    /// **Note on op-log retention:** the agent's pre-reload ops are not
-    /// deleted from memory_doc's op log — Myers-diff produces new ops that
-    /// transform the current text to disk content. The discarded edits
-    /// remain in history and could potentially be resurrected via Loro's
-    /// `checkout`/`travel`-style APIs in a future "undo reload" path.
-    /// Op-log growth from repeated reloads will be addressed by snapshot/
-    /// trim policy at session restart.
+    /// the disk version. The bridge's `apply_external` uses Myers-diff to
+    /// transform `doc`'s text to match disk content, effectively discarding
+    /// pending agent ops as new ops on top.
     pub fn reload(&self) -> Result<Vec<u8>, SyncedDocError> {
+        let _g = self.inner.shared.write_lock.lock().unwrap();
+        // Reload resolves any pending conflict by taking the disk version.
+        *self.inner.shared.conflict_pending.lock().unwrap() = false;
         let path = &self.inner.path;
         let disk_bytes = std::fs::read(path).map_err(|e| SyncedDocError::Io {
             path: path.clone(),
             source: e,
         })?;
 
-        // Apply disk content to memory_doc. The bridge's `apply_external`
-        // uses Myers-diff (`text.update_by_line`) which transforms
-        // memory_doc's text to match disk_bytes, regardless of what
-        // memory_doc currently contains. This effectively discards all
-        // pending agent edits.
         self.inner
             .bridge
-            .apply_external(&self.inner.memory_doc, &disk_bytes, path)
+            .apply_external(&self.inner.doc, &disk_bytes, path)
             .map_err(SyncedDocError::Bridge)?;
-        self.inner.memory_doc.commit();
+        self.inner.doc.commit();
 
-        // Capture memory_doc's version vector before exporting ops.
-        let mem_vv_before_export = self.inner.disk_doc.oplog_vv();
-
-        // Export memory_doc's new ops and import into disk_doc to keep
-        // them in sync.
-        let update = self
-            .inner
-            .memory_doc
-            .export(loro::ExportMode::updates(&mem_vv_before_export))
-            .map_err(|e| SyncedDocError::Watcher {
-                path: path.to_owned(),
-                message: format!("reload export failed: {e}"),
-            })?;
-        if let Err(e) = self.inner.disk_doc.import(&update) {
-            tracing::debug!(path = ?path, error = %e, "failed to import reload update into disk_doc");
-        }
-
-        // Update echo-suppression and frontier state.
         if let Ok(meta) = std::fs::metadata(path)
             && let Ok(mtime) = meta.modified()
         {
@@ -575,10 +434,8 @@ impl<B: LoroDocBridge> SyncedDoc<B> {
         }
         let hash: [u8; 32] = *blake3::hash(&disk_bytes).as_bytes();
         *self.inner.shared.last_written_hash.lock().unwrap() = Some(hash);
-
-        // Set last_saved_frontier to memory_doc's current vv — no unsaved edits remain.
         *self.inner.shared.last_saved_frontier.lock().unwrap() =
-            Some(self.inner.memory_doc.oplog_vv());
+            Some(self.inner.doc.oplog_vv());
 
         Ok(disk_bytes)
     }
@@ -605,45 +462,358 @@ impl<B: LoroDocBridge> SyncedDoc<B> {
     /// tier from provenance and re-emits corrected bytes before calling this
     /// method. See `crate::subscriber::bridge::apply_block_external_edit` for
     /// the full enforcement contract.
-    pub fn apply_external_bytes(&self, content: &[u8]) -> Result<(), SyncedDocError> {
-        apply_external(
-            content,
-            &self.inner.path,
-            &self.inner.disk_doc,
-            &self.inner.memory_doc,
-            &self.inner.bridge,
-            &self.inner.shared,
-        )
+    /// Force-apply external content as the authoritative state. Clears
+    /// conflict_pending. Used by the conflict-resolution path
+    /// (`FileManager::force_write`) when the agent has decided to overwrite
+    /// disk with their version. Bypasses echo + conflict policy checks,
+    /// but still does the CRDT merge so doc reflects the new content.
+    pub fn force_apply_external_bytes(&self, content: &[u8]) -> Result<(), SyncedDocError> {
+        let _g = self.inner.shared.write_lock.lock().unwrap();
+        *self.inner.shared.conflict_pending.lock().unwrap() = false;
+
+        let scratch = if let Some(frontier_vv) = self.inner.shared.last_saved_frontier.lock().unwrap().clone() {
+            let frontiers = self.inner.doc.vv_to_frontiers(&frontier_vv);
+            self.inner.doc.fork_at(&frontiers)
+        } else {
+            self.inner.doc.fork()
+        };
+        scratch.set_detached_editing(true);
+        let vv_before = scratch.oplog_vv();
+        self.inner
+            .bridge
+            .apply_external(&scratch, content, &self.inner.path)
+            .map_err(SyncedDocError::Bridge)?;
+        scratch.commit();
+        let updates = scratch
+            .export(loro::ExportMode::updates(&vv_before))
+            .map_err(|e| SyncedDocError::Watcher {
+                path: self.inner.path.clone(),
+                message: format!("scratch export failed: {e}"),
+            })?;
+        if let Err(e) = self.inner.doc.import(&updates) {
+            tracing::debug!(path = ?self.inner.path, error = %e, "force_apply: import failed");
+        }
+
+        // Atomic-write the forced content to disk so disk matches what we
+        // just told the doc.
+        crate::fs::atomic_write(&self.inner.path, content)?;
+        let hash = *blake3::hash(content).as_bytes();
+        if let Ok(meta) = std::fs::metadata(&self.inner.path)
+            && let Ok(mtime) = meta.modified()
+        {
+            *self.inner.shared.last_written_mtime.lock().unwrap() = Some(mtime);
+        }
+        *self.inner.shared.last_written_hash.lock().unwrap() = Some(hash);
+        *self.inner.shared.last_saved_frontier.lock().unwrap() = Some(self.inner.doc.oplog_vv());
+
+        let ev = ExternalChangeEvent::Applied {
+            path: self.inner.path.clone(),
+        };
+        let mut subs = self.inner.shared.external_subscribers.lock().unwrap();
+        subs.retain(|tx| {
+            !matches!(
+                tx.try_send(ev.clone()),
+                Err(crossbeam_channel::TrySendError::Disconnected(_))
+            )
+        });
+        Ok(())
     }
 
-    /// Cancel the ingest thread and wait for it to stop.
+    /// Reconcile doc with current disk content. Reads disk INSIDE the
+    /// write_lock so there's no ordering race with concurrent agent writes:
+    /// if the agent's write_local interleaves between event arrival and our
+    /// lock acquisition, we read the agent's NEW content (not the stale pre-
+    /// write state) and the hash check echo-skips.
     ///
-    /// Signals cancellation, drops the ingest sender (causing the thread's
-    /// blocking `rx.recv()` to unblock with `RecvError`), then joins the thread.
-    /// After this returns, all resources owned by the ingest thread have been
-    /// released (AC1.5).
+    /// This is the path the watcher feeder thread uses. Test/forced callers
+    /// continue to use `apply_external_bytes(&[u8])` directly.
+    pub fn reconcile_from_disk(&self) -> Result<(), SyncedDocError> {
+        let _g = self.inner.shared.write_lock.lock().unwrap();
+        let path = &self.inner.path;
+        let content = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(SyncedDocError::Io {
+                    path: path.clone(),
+                    source: e,
+                });
+            }
+        };
+        let hash = *blake3::hash(&content).as_bytes();
+        if Some(hash) == *self.inner.shared.last_written_hash.lock().unwrap() {
+            return Ok(());  // disk matches our last write — echo or already-reconciled
+        }
+
+        if matches!(self.inner.shared.conflict_policy, ConflictPolicy::RejectAndNotify)
+            && self.has_unsaved_edits_unlocked()
+        {
+            *self.inner.shared.conflict_pending.lock().unwrap() = true;
+            let last_saved = self.inner.shared.last_saved_frontier.lock().unwrap().clone();
+            let ev = ExternalChangeEvent::ConflictDetected {
+                path: path.clone(),
+                disk_content: Arc::new(content),
+                last_saved_frontier: last_saved,
+            };
+            let mut subs = self.inner.shared.external_subscribers.lock().unwrap();
+            subs.retain(|tx| {
+                !matches!(
+                    tx.try_send(ev.clone()),
+                    Err(crossbeam_channel::TrySendError::Disconnected(_))
+                )
+            });
+            return Ok(());
+        }
+
+        self.do_external_merge(&content, hash, path)
+    }
+
+    /// Same has_unsaved_edits logic but without re-locking write_lock
+    /// (caller already holds it).
+    fn has_unsaved_edits_unlocked(&self) -> bool {
+        let cur = self.inner.doc.oplog_vv();
+        match &*self.inner.shared.last_saved_frontier.lock().unwrap() {
+            Some(saved) => cur != *saved,
+            None => !cur.is_empty(),
+        }
+    }
+
+    /// Shared merge logic: fork_at(last_saved_frontier), apply bridge,
+    /// export+import, update bookkeeping, fire Applied event.
+    /// Caller must hold write_lock.
+    fn do_external_merge(&self, content: &[u8], hash: [u8; 32], path: &Path) -> Result<(), SyncedDocError> {
+        let scratch = if let Some(frontier_vv) = self.inner.shared.last_saved_frontier.lock().unwrap().clone() {
+            let frontiers = self.inner.doc.vv_to_frontiers(&frontier_vv);
+            self.inner.doc.fork_at(&frontiers)
+        } else {
+            self.inner.doc.fork()
+        };
+        scratch.set_detached_editing(true);
+        let vv_before = scratch.oplog_vv();
+        self.inner
+            .bridge
+            .apply_external(&scratch, content, path)
+            .map_err(SyncedDocError::Bridge)?;
+        scratch.commit();
+        let updates = scratch
+            .export(loro::ExportMode::updates(&vv_before))
+            .map_err(|e| SyncedDocError::Watcher {
+                path: path.to_owned(),
+                message: format!("scratch export failed: {e}"),
+            })?;
+        if let Err(e) = self.inner.doc.import(&updates) {
+            tracing::debug!(path = ?path, error = %e, "import scratch updates into doc failed");
+        }
+
+        *self.inner.shared.last_written_hash.lock().unwrap() = Some(hash);
+        *self.inner.shared.last_saved_frontier.lock().unwrap() = Some(self.inner.doc.oplog_vv());
+
+        let ev = ExternalChangeEvent::Applied {
+            path: path.to_owned(),
+        };
+        let mut subs = self.inner.shared.external_subscribers.lock().unwrap();
+        subs.retain(|tx| {
+            !matches!(
+                tx.try_send(ev.clone()),
+                Err(crossbeam_channel::TrySendError::Disconnected(_))
+            )
+        });
+        Ok(())
+    }
+
+    /// Apply external bytes (e.g. from the watcher) into `doc` as a CRDT merge.
+    /// Skips when content matches `last_written_hash` (echo of our own write).
+    /// Under `ConflictPolicy::RejectAndNotify`, if the agent has unsaved edits,
+    /// fires `ExternalChangeEvent::ConflictDetected` instead of merging.
+    ///
+    /// **Merge strategy:** fork doc, checkout scratch at `last_saved_frontier`
+    /// (= last known disk-side state), apply the bridge to scratch (Myers-diff
+    /// from old disk to new disk), export scratch's new ops, import into doc.
+    /// CRDT merge preserves any agent-local ops that weren't on disk.
+    pub fn apply_external_bytes(&self, content: &[u8]) -> Result<(), SyncedDocError> {
+        let hash = *blake3::hash(content).as_bytes();
+        if Some(hash) == *self.inner.shared.last_written_hash.lock().unwrap() {
+            return Ok(());  // echo of our own write
+        }
+
+        if matches!(self.inner.shared.conflict_policy, ConflictPolicy::RejectAndNotify)
+            && self.has_unsaved_edits()
+        {
+            // Mark conflict pending so subsequent write_local calls refuse
+            // to overwrite the external content on disk. Cleared by reload()
+            // (take disk) or force_apply_external (accept external as base).
+            *self.inner.shared.conflict_pending.lock().unwrap() = true;
+            let last_saved = self.inner.shared.last_saved_frontier.lock().unwrap().clone();
+            let ev = ExternalChangeEvent::ConflictDetected {
+                path: self.inner.path.clone(),
+                disk_content: Arc::new(content.to_vec()),
+                last_saved_frontier: last_saved,
+            };
+            let mut subs = self.inner.shared.external_subscribers.lock().unwrap();
+            subs.retain(|tx| {
+                !matches!(
+                    tx.try_send(ev.clone()),
+                    Err(crossbeam_channel::TrySendError::Disconnected(_))
+                )
+            });
+            return Ok(());
+        }
+
+        let _g = self.inner.shared.write_lock.lock().unwrap();
+
+        // Fork doc at the last-known disk-side state. fork_at gives a fresh
+        // doc with history truncated to that frontier — no local ops above
+        // it. Bridge's Myers-diff then computes "what changed on disk since
+        // we last synced," not "what would make this doc equal to disk"
+        // (which would squash agent-local ops).
+        let scratch = if let Some(frontier_vv) = self.inner.shared.last_saved_frontier.lock().unwrap().clone() {
+            let frontiers = self.inner.doc.vv_to_frontiers(&frontier_vv);
+            self.inner.doc.fork_at(&frontiers)
+        } else {
+            // No prior disk state — fork from current head. The bridge
+            // will produce ops that bring scratch from current state to
+            // the new disk content. With no local ops, this is correct;
+            // with local ops, last_saved_frontier should have been set on
+            // the first write.
+            self.inner.doc.fork()
+        };
+        // Ensure scratch is editable. fork_at can leave the doc in detached
+        // state; set_detached_editing(true) makes it accept ops with a
+        // distinct PeerID per checkout.
+        scratch.set_detached_editing(true);
+
+        let vv_before = scratch.oplog_vv();
+        self.inner
+            .bridge
+            .apply_external(&scratch, content, &self.inner.path)
+            .map_err(SyncedDocError::Bridge)?;
+        scratch.commit();
+
+        let updates = scratch
+            .export(loro::ExportMode::updates(&vv_before))
+            .map_err(|e| SyncedDocError::Watcher {
+                path: self.inner.path.clone(),
+                message: format!("scratch export failed: {e}"),
+            })?;
+        if let Err(e) = self.inner.doc.import(&updates) {
+            tracing::debug!(path = ?self.inner.path, error = %e, "import scratch updates into doc failed");
+        }
+
+        // Update bookkeeping: disk now has `content` (per the external
+        // editor), and scratch's new vv reflects the disk-side state.
+        *self.inner.shared.last_written_hash.lock().unwrap() = Some(hash);
+        *self.inner.shared.last_saved_frontier.lock().unwrap() = Some(scratch.oplog_vv());
+
+        let ev = ExternalChangeEvent::Applied {
+            path: self.inner.path.clone(),
+        };
+        let mut subs = self.inner.shared.external_subscribers.lock().unwrap();
+        subs.retain(|tx| {
+            !matches!(
+                tx.try_send(ev.clone()),
+                Err(crossbeam_channel::TrySendError::Disconnected(_))
+            )
+        });
+        Ok(())
+    }
+
+    /// Apply incoming bytes as content (Myers-diff via bridge) AND persist
+    /// to disk synchronously. Convenience for the agent-initiated
+    /// "set whole-content" path. Does NOT fire ExternalChangeEvent — these
+    /// are local writes, not external edits.
+    pub fn write_bytes(&self, bytes: &[u8]) -> Result<(), SyncedDocError> {
+        let _g = self.inner.shared.write_lock.lock().unwrap();
+        self.inner
+            .bridge
+            .apply_external(&self.inner.doc, bytes, &self.inner.path)
+            .map_err(SyncedDocError::Bridge)?;
+        self.inner.doc.commit();
+        drop(_g);
+        self.write_local()
+    }
+
+    /// Synchronous local write: render `doc`, rebase against any disk drift,
+    /// atomic-write, update bookkeeping. Caller has already mutated `doc`.
+    pub fn write_local(&self) -> Result<(), SyncedDocError> {
+        let _g = self.inner.shared.write_lock.lock().unwrap();
+        if *self.inner.shared.conflict_pending.lock().unwrap() {
+            return Err(SyncedDocError::ConflictPending {
+                path: self.inner.path.clone(),
+            });
+        }
+        self.rebase_against_disk_if_needed()?;
+        let path = &self.inner.path;
+        let (_ext, bytes) = self
+            .inner
+            .bridge
+            .render(&self.inner.doc)
+            .map_err(SyncedDocError::Bridge)?;
+        crate::fs::atomic_write(path, &bytes).map_err(|e| {
+            tracing::error!(path = ?path, error = ?e, "write_local: atomic_write failed");
+            e
+        })?;
+
+        if let Ok(meta) = std::fs::metadata(path)
+            && let Ok(mtime) = meta.modified()
+        {
+            *self.inner.shared.last_written_mtime.lock().unwrap() = Some(mtime);
+        }
+        let hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
+        *self.inner.shared.last_written_hash.lock().unwrap() = Some(hash);
+        *self.inner.shared.last_saved_frontier.lock().unwrap() = Some(self.inner.doc.oplog_vv());
+
+        // Notify write subscribers (FTS5/reembed).
+        let notification = WriteNotification { content_hash: hash };
+        let mut subs = self.inner.shared.write_subscribers.lock().unwrap();
+        subs.retain(|tx| {
+            !matches!(
+                tx.try_send(notification.clone()),
+                Err(crossbeam_channel::TrySendError::Disconnected(_))
+            )
+        });
+        Ok(())
+    }
+
+    /// If disk content differs from what we last wrote, import it as a CRDT
+    /// update into `doc`. Loro merges; local ops are preserved by CRDT semantics.
+    /// Caller must hold `write_lock`.
+    fn rebase_against_disk_if_needed(&self) -> Result<(), SyncedDocError> {
+        let path = &self.inner.path;
+        let disk_bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(SyncedDocError::Io {
+                    path: path.clone(),
+                    source: e,
+                });
+            }
+        };
+        let disk_hash = *blake3::hash(&disk_bytes).as_bytes();
+        if Some(disk_hash) == *self.inner.shared.last_written_hash.lock().unwrap() {
+            return Ok(());
+        }
+        self.inner
+            .bridge
+            .apply_external(&self.inner.doc, &disk_bytes, path)
+            .map_err(SyncedDocError::Bridge)?;
+        self.inner.doc.commit();
+        Ok(())
+    }
+
+    /// Cancel the watcher feeder thread. Does NOT join — the feeder is
+    /// blocked on `rx.recv()` and won't unblock until its channel disconnects,
+    /// which happens when the last `Arc<SyncedDocInner>` drops. Joining here
+    /// would deadlock (close holds the last handle but the feeder needs that
+    /// handle gone before exiting). Cancel is set so when the thread does
+    /// wake, it exits cleanly. The thread is short-lived after that.
     pub fn close(self) {
         self.inner.cancel.cancel();
-        // Drop the loro local-update subscription FIRST. Its callback holds a
-        // clone of `ingest_tx`; keeping it alive would prevent the channel from
-        // closing fully and cause the join below to deadlock.
-        if let Ok(mut guard) = self.inner._local_update_sub.lock() {
-            guard.take();
-        }
-        // Drop the main ingest sender so the ingest thread's `rx.recv()`
-        // unblocks once the forwarder thread (50ms loop) also drops its clone.
-        if let Ok(mut guard) = self.inner.ingest_tx.lock() {
-            guard.take();
-        }
-        // Join the thread. The ingest thread exits when all senders are gone
-        // (channel closed) or when the cancel token fires and the thread
-        // processes one more event. The forwarder thread (which holds another
-        // sender clone) exits within 50ms of cancel. After both senders drop,
-        // the ingest thread unblocks from `rx.recv()` and exits cleanly.
-        if let Ok(mut guard) = self.inner.ingest_thread.lock()
-            && let Some(handle) = guard.take()
-        {
-            let _ = handle.join();
+        // Take the watcher_thread handle so it isn't joined again on Drop.
+        // Detach: when this SyncedDoc + any other refs drop, the rx
+        // disconnects and the feeder thread exits naturally.
+        if let Ok(mut guard) = self.inner.watcher_thread.lock() {
+            let _ = guard.take();
         }
     }
 }
@@ -655,9 +825,8 @@ impl<B: LoroDocBridge> SyncedDoc<B> {
 enum OpenMode<'a> {
     Pooled(&'a PathFanoutRouter),
     Standalone,
-    /// No watcher, no internal local-update subscription. Used by the block
-    /// subscriber, which drives local-update coalescing externally via
-    /// `write_rendered` and routes external edits via `apply_external_bytes`.
+    /// No watcher subscription. The caller routes external edits via
+    /// `apply_external_bytes` (used by `BlockFanoutRouter`).
     RouterOwned,
 }
 
@@ -667,10 +836,8 @@ fn open_impl<B: LoroDocBridge>(
 ) -> Result<SyncedDoc<B>, SyncedDocError> {
     let path = cfg.path;
 
-    // For watcher-backed modes, the file must exist to seed the initial state.
-    // For `RouterOwned` mode, the file may not yet exist (the worker creates
-    // it on the first write_rendered call). In that case, start from an
-    // empty initial state.
+    // For watcher-backed modes, the file must exist to seed initial state.
+    // For `RouterOwned`, the file may not yet exist (caller creates it on first write).
     let (bytes, initial_mtime, initial_hash) = if path.exists() {
         let b = std::fs::read(&path).map_err(|e| SyncedDocError::Io {
             path: path.clone(),
@@ -680,42 +847,36 @@ fn open_impl<B: LoroDocBridge>(
         let hash: [u8; 32] = *blake3::hash(&b).as_bytes();
         (b, mtime, Some(hash))
     } else if matches!(mode, OpenMode::RouterOwned) {
-        // File does not exist yet; disk_doc + memory_doc start empty.
-        // The worker will create the file on the first write_rendered call.
         (Vec::new(), None, None)
     } else {
         return Err(SyncedDocError::NotFound(path));
     };
 
-    let memory_doc = cfg.memory_doc;
+    let doc = cfg.doc;
     let bridge = cfg.bridge;
 
-    // Seed memory_doc from the initial file content (only when non-empty;
-    // empty bytes on a fresh-start RouterOwned doc are a no-op seed).
-    if !bytes.is_empty() {
+    // Seed `doc` from initial file content ONLY if doc is empty.
+    //
+    // For LoroSyncedFile (file API): doc is `LoroDoc::new()` — empty.
+    //   Seeding from disk is the cold-start "adopt the file's content" path.
+    //
+    // For block subscribers (lazy-spawn): doc is the cache-hydrated
+    //   StructuredDocument's inner LoroDoc, already populated from
+    //   DB snapshot+deltas. The disk file (from a previous daemon run) is
+    //   stale relative to in-memory state. Seeding from disk would Myers-
+    //   diff stale-disk over the live doc, REVERTING any not-yet-flushed
+    //   ops the agent just applied. The block path expects doc to be
+    //   canonical and disk to be downstream — write_local will catch
+    //   disk up on first flush.
+    let doc_already_populated = !doc.oplog_vv().is_empty();
+    if !bytes.is_empty() && !doc_already_populated {
         bridge
-            .apply_external(&memory_doc, &bytes, &path)
+            .apply_external(&doc, &bytes, &path)
             .map_err(SyncedDocError::Bridge)?;
-        memory_doc.commit();
+        doc.commit();
     }
 
-    // Fork memory_doc to create disk_doc. `fork()` creates a new document with
-    // the same oplog history as memory_doc but assigns a fresh peer ID — the
-    // two docs diverge independently from this point forward. This is how the
-    // existing block subscriber creates disk_doc via `doc.inner().fork()` in
-    // cache.rs.
-    let disk_doc = Arc::new(memory_doc.fork());
-
-    // Initialize last_saved_frontier to the current oplog vv. At open time,
-    // memory_doc and disk_doc are in sync (both seeded from disk content).
-    // Setting the frontier means `has_unsaved_edits()` returns `false` for
-    // a freshly opened file with no agent edits — so external writes apply
-    // cleanly under RejectAndNotify instead of being treated as conflicts.
-    let initial_frontier = if bytes.is_empty() {
-        None
-    } else {
-        Some(memory_doc.oplog_vv())
-    };
+    let initial_frontier = if doc.oplog_vv().is_empty() { None } else { Some(doc.oplog_vv()) };
 
     let shared = Arc::new(SharedState {
         last_written_mtime: Mutex::new(initial_mtime),
@@ -724,520 +885,109 @@ fn open_impl<B: LoroDocBridge>(
         write_subscribers: Mutex::new(Vec::new()),
         last_saved_frontier: Mutex::new(initial_frontier),
         conflict_policy: cfg.conflict_policy,
+        write_lock: Mutex::new(()),
+        conflict_pending: Mutex::new(false),
     });
 
-    let (ingest_tx, ingest_rx) = bounded::<IngestEvent>(cfg.event_channel_bound);
     let cancel = CancellationToken::new();
 
-    // Wire watcher → ingest thread.
-    let (fanout_guard, standalone_watcher) = wire_watcher(
+    // Wire watcher: receive DebouncedEvent, deliver bytes to apply_external_bytes.
+    let (event_rx, fanout_guard, standalone_watcher) = wire_watcher(
         &path,
         &mode,
         cfg.event_channel_bound,
-        ingest_tx.clone(),
         cancel.clone(),
     )?;
 
-    // Subscribe to local updates — only for modes that own the local-update
-    // path. `RouterOwned` skips this: the caller's worker drives local-update
-    // coalescing externally and calls `write_rendered` directly.
-    let local_update_sub = if matches!(mode, OpenMode::RouterOwned) {
-        // No-op callback that keeps the subscription alive as a guard.
-        // `RouterOwned` mode does not use the local-update path — the caller's
-        // worker drives local-update coalescing externally — but we need a
-        // `Subscription` value to store in the struct. Returning `true` (keep
-        // alive) is required by loro 1.10's API contract: `false` causes
-        // auto-unsubscribe after the first call.
-        memory_doc.subscribe_local_update(Box::new(|_| true))
-    } else {
-        let ingest_tx_local = ingest_tx.clone();
-        memory_doc.subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
-            let _ = ingest_tx_local.try_send(IngestEvent::LocalUpdate(bytes.clone()));
-            // Return `true` to keep the subscription alive per loro 1.10's
-            // API contract. Returning `false` causes auto-unsubscribe after
-            // the first callback, which would silently drop all subsequent
-            // local-update events (bug C1).
-            true
-        }))
-    };
-
-    // Spawn the ingest thread.
-    let path_thread = path.clone();
-    let disk_doc_thread = Arc::clone(&disk_doc);
-    let memory_doc_thread = Arc::clone(&memory_doc);
-    let bridge_thread = Arc::clone(&bridge);
-    let shared_thread = Arc::clone(&shared);
-    let cancel_thread = cancel.clone();
-
-    let ingest_thread = std::thread::Builder::new()
-        .name(format!(
-            "synced-doc:{}",
-            path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-        ))
-        .spawn(move || {
-            run_ingest_thread(
-                ingest_rx,
-                cancel_thread,
-                path_thread,
-                disk_doc_thread,
-                memory_doc_thread,
-                bridge_thread,
-                shared_thread,
-            );
-        })
-        .map_err(|e| SyncedDocError::Io {
-            path: path.clone(),
-            source: e,
-        })?;
-
-    let inner = SyncedDocInner {
-        path,
-        memory_doc,
-        disk_doc,
+    // Construct the inner first; then, if we have a watcher, spawn a feeder thread
+    // that owns a weak ref and calls apply_external_bytes via SyncedDoc.
+    let inner = Arc::new(SyncedDocInner {
+        path: path.clone(),
+        doc,
         bridge,
         shared,
-        cancel,
-        ingest_tx: Mutex::new(Some(ingest_tx)),
-        ingest_thread: Mutex::new(Some(ingest_thread)),
-        _local_update_sub: Mutex::new(Some(local_update_sub)),
+        cancel: cancel.clone(),
         _standalone_watcher: standalone_watcher,
         _fanout_guard: fanout_guard,
-    };
+        watcher_thread: Mutex::new(None),
+    });
 
-    Ok(SyncedDoc {
-        inner: Arc::new(inner),
-    })
+    if let Some(rx) = event_rx {
+        let weak = Arc::downgrade(&inner);
+        let path_thread = path.clone();
+        let cancel_thread = cancel.clone();
+        let handle = std::thread::Builder::new()
+            .name(format!(
+                "synced-doc-watcher:{}",
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
+            ))
+            .spawn(move || run_watcher_feeder::<B>(rx, weak, path_thread, cancel_thread))
+            .map_err(|e| SyncedDocError::Io {
+                path: path.clone(),
+                source: e,
+            })?;
+        *inner.watcher_thread.lock().unwrap() = Some(handle);
+    }
+
+    Ok(SyncedDoc { inner })
 }
 
-/// Wire the watcher subscription for pool or standalone mode.
-///
-/// Returns `(fanout_guard, standalone_watcher)`.
-///
-/// For `Pooled` and `Standalone` modes, exactly one of the two is `Some`.
-/// For `RouterOwned` mode, both are `None` — no filesystem subscription.
+/// Wire the watcher subscription. Returns the receiver for raw debounced
+/// events plus the appropriate guard for the open mode. `RouterOwned`
+/// returns `(None, None, None)` — caller routes external edits manually.
 fn wire_watcher(
     path: &Path,
     mode: &OpenMode<'_>,
     channel_bound: usize,
-    ingest_tx: Sender<IngestEvent>,
-    cancel: CancellationToken,
-) -> Result<(Option<PathFanoutSubscription>, Option<DirWatcher>), SyncedDocError> {
+    _cancel: CancellationToken,
+) -> Result<(Option<Receiver<DebouncedEvent>>, Option<PathFanoutSubscription>, Option<DirWatcher>), SyncedDocError> {
     match mode {
-        OpenMode::RouterOwned => {
-            // External edits arrive via `apply_external_bytes`; no watcher needed.
-            Ok((None, None))
-        }
+        OpenMode::RouterOwned => Ok((None, None, None)),
         OpenMode::Pooled(router) => {
-            let (ext_tx, ext_rx) = bounded::<DebouncedEvent>(channel_bound);
-            let guard = router.subscribe(path.to_path_buf(), ext_tx);
-
-            let cancel2 = cancel.clone();
-            let path2 = path.to_path_buf();
-            std::thread::Builder::new()
-                .name("synced-doc-ext-fwd".into())
-                .spawn(move || {
-                    // Use recv_timeout so the thread checks cancellation
-                    // periodically and exits promptly on close().
-                    loop {
-                        if cancel2.is_cancelled() {
-                            break;
-                        }
-                        match ext_rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                            Ok(ev) => {
-                                let _ = ingest_tx.try_send(IngestEvent::External(ev));
-                            }
-                            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                                // No event; loop back to check cancellation.
-                            }
-                            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                                break;
-                            }
-                        }
-                    }
-                })
-                .map_err(|e| SyncedDocError::Io {
-                    path: path2,
-                    source: e,
-                })?;
-
-            Ok((Some(guard), None))
+            let (tx, rx) = bounded::<DebouncedEvent>(channel_bound);
+            let sub = router.subscribe(path.to_owned(), tx);
+            Ok((Some(rx), Some(sub), None))
         }
         OpenMode::Standalone => {
-            let parent = path
-                .parent()
-                .ok_or_else(|| SyncedDocError::Watcher {
-                    path: path.to_path_buf(),
-                    message: "file has no parent directory".into(),
-                })?
-                .to_path_buf();
-
-            let standalone_router = PathFanoutRouter::new();
-            let (ext_tx, ext_rx) = bounded::<DebouncedEvent>(channel_bound);
-            // Keep the guard alive via the forwarder thread closure.
-            let guard = standalone_router.subscribe(path.to_path_buf(), ext_tx);
-
-            let watcher_cfg = DirWatcherConfig {
-                root: parent,
-                recursive: notify::RecursiveMode::NonRecursive,
-                debounce: std::time::Duration::from_millis(200),
-            };
-            let watcher = DirWatcher::start(watcher_cfg, standalone_router).map_err(|e| {
-                SyncedDocError::Watcher {
-                    path: path.to_path_buf(),
-                    message: e.to_string(),
-                }
-            })?;
-
-            let cancel2 = cancel.clone();
-            let path2 = path.to_path_buf();
-            std::thread::Builder::new()
-                .name("synced-doc-ext-fwd".into())
-                .spawn(move || {
-                    // Keep guard alive so the subscription persists until this
-                    // thread exits. Use recv_timeout so the thread checks
-                    // cancellation periodically and exits promptly on close().
-                    let _guard = guard;
-                    loop {
-                        if cancel2.is_cancelled() {
-                            break;
-                        }
-                        match ext_rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                            Ok(ev) => {
-                                let _ = ingest_tx.try_send(IngestEvent::External(ev));
-                            }
-                            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                                // No event; loop back to check cancellation.
-                            }
-                            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                                break;
-                            }
-                        }
-                    }
-                })
-                .map_err(|e| SyncedDocError::Io {
-                    path: path2,
-                    source: e,
-                })?;
-
-            Ok((None, Some(watcher)))
+            let parent = path.parent().ok_or_else(|| SyncedDocError::Watcher {
+                path: path.to_owned(),
+                message: "path has no parent directory".into(),
+            })?.to_owned();
+            // Build a private fanout router, subscribe our path, hand the
+            // router off to DirWatcher (which owns and runs it). The
+            // PathFanoutSubscription holds an Arc<PathFanoutInner> so it
+            // stays valid after the router handle is moved.
+            let private_router = PathFanoutRouter::new();
+            let (tx, rx) = bounded::<DebouncedEvent>(channel_bound);
+            let _sub = private_router.subscribe(path.to_owned(), tx);
+            let cfg = DirWatcherConfig::new(parent);
+            let watcher = DirWatcher::start(cfg, private_router)?;
+            // Both _sub (subscription guard) and watcher need to live. Box
+            // _sub into the standalone slot so it tags along; we encode this
+            // by returning Some(_sub) in the fanout-guard slot too.
+            Ok((Some(rx), Some(_sub), Some(watcher)))
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Ingest thread
-// ---------------------------------------------------------------------------
-
-fn run_ingest_thread<B: LoroDocBridge>(
-    rx: crossbeam_channel::Receiver<IngestEvent>,
-    cancel: CancellationToken,
+/// Feeder thread: receive watcher events, read disk, call apply_external_bytes.
+fn run_watcher_feeder<B: LoroDocBridge>(
+    rx: Receiver<DebouncedEvent>,
+    weak: std::sync::Weak<SyncedDocInner<B>>,
     path: PathBuf,
-    disk_doc: Arc<LoroDoc>,
-    memory_doc: Arc<LoroDoc>,
-    bridge: Arc<B>,
-    shared: Arc<SharedState>,
+    cancel: CancellationToken,
 ) {
-    while let Ok(event) = rx.recv() {
-        if cancel.is_cancelled() {
-            break;
-        }
-        match event {
-            IngestEvent::LocalUpdate(bytes) => {
-                handle_local_update(&bytes, &path, &disk_doc, &bridge, &shared);
-            }
-            IngestEvent::External(ev) => {
-                handle_external_event(ev, &path, &disk_doc, &memory_doc, &bridge, &shared);
-            }
-            IngestEvent::SyncWrite { bytes, reply } => {
-                // Apply the write to disk_doc via bridge, then write to disk.
-                // Update memory_doc via local-update export/import.
-                let result =
-                    handle_sync_write(&bytes, &path, &disk_doc, &memory_doc, &bridge, &shared);
-                let _ = reply.send(result);
-            }
+    while let Ok(_ev) = rx.recv() {
+        if cancel.is_cancelled() { break; }
+        let Some(inner) = weak.upgrade() else { break; };
+        // Read-under-lock via reconcile_from_disk: avoids the
+        // ordering race where the feeder reads disk BEFORE the
+        // agent's write_local advances state, then applies stale
+        // content as if authoritative — which would compute Myers-
+        // diff ops that revert the agent's write.
+        let handle = SyncedDoc { inner };
+        if let Err(e) = handle.reconcile_from_disk() {
+            tracing::debug!(path = ?path, error = %e, "reconcile_from_disk failed in watcher feeder");
         }
     }
-}
-
-/// Handle a local update (memory_doc → disk_doc → disk file).
-fn handle_local_update<B: LoroDocBridge>(
-    bytes: &[u8],
-    path: &Path,
-    disk_doc: &Arc<LoroDoc>,
-    bridge: &Arc<B>,
-    shared: &Arc<SharedState>,
-) {
-    eprintln!("writing local to: {}", path.display());
-    // Import the update into the disk doc.
-    if let Err(e) = disk_doc.import(bytes) {
-        tracing::debug!(path = ?path, error = %e, "failed to import local update into disk_doc");
-        return;
-    }
-
-    write_disk_doc_to_file(path, disk_doc, bridge, shared);
-}
-
-/// Handle a sync write request (direct bytes → disk_doc → disk file → memory_doc).
-fn handle_sync_write<B: LoroDocBridge>(
-    bytes: &[u8],
-    path: &Path,
-    disk_doc: &Arc<LoroDoc>,
-    memory_doc: &Arc<LoroDoc>,
-    bridge: &Arc<B>,
-    shared: &Arc<SharedState>,
-) -> Result<(), SyncedDocError> {
-    // Capture the version vector BEFORE applying the external bytes so that
-    // the subsequent export only contains the new ops introduced by this write.
-    let oplog_vv_before = disk_doc.oplog_vv();
-
-    // Apply the bytes to disk_doc via the bridge.
-    bridge
-        .apply_external(disk_doc, bytes, path)
-        .map_err(SyncedDocError::Bridge)?;
-    disk_doc.commit();
-    eprintln!(
-        "applied external bytes to disk_doc: {}",
-        String::from_utf8_lossy(bytes)
-    );
-
-    // Export only the new ops and merge into memory_doc.
-    let update = disk_doc
-        .export(loro::ExportMode::updates(&oplog_vv_before))
-        .map_err(|e| SyncedDocError::Watcher {
-            path: path.to_owned(),
-            message: format!("export failed: {e}"),
-        })?;
-    if let Err(e) = memory_doc.import(&update) {
-        tracing::debug!(path = ?path, error = %e, "failed to import sync-write update into memory_doc");
-    }
-
-    write_disk_doc_to_file(path, disk_doc, bridge, shared);
-    Ok(())
-}
-
-/// Render disk_doc and atomically write to `path`. Update echo suppression state
-/// and `last_saved_frontier`.
-fn write_disk_doc_to_file<B: LoroDocBridge>(
-    path: &Path,
-    disk_doc: &Arc<LoroDoc>,
-    bridge: &Arc<B>,
-    shared: &Arc<SharedState>,
-) {
-    let (_ext, rendered) = match bridge.render(disk_doc) {
-        Ok(pair) => pair,
-        Err(e) => {
-            tracing::warn!(path = ?path, error = %e, "bridge render failed; skipping disk write");
-            return;
-        }
-    };
-
-    if let Err(e) = crate::fs::atomic_write(path, &rendered) {
-        tracing::warn!(path = ?path, error = %e, "atomic_write failed");
-        return;
-    }
-
-    // Record mtime and hash for self-echo suppression.
-    if let Ok(meta) = std::fs::metadata(path)
-        && let Ok(mtime) = meta.modified()
-    {
-        *shared.last_written_mtime.lock().unwrap() = Some(mtime);
-    }
-    let hash: [u8; 32] = *blake3::hash(&rendered).as_bytes();
-    *shared.last_written_hash.lock().unwrap() = Some(hash);
-
-    // Record the frontier so `has_unsaved_edits()` and Phase 2's conflict
-    // detection can compare against the last known-good disk state.
-    *shared.last_saved_frontier.lock().unwrap() = Some(disk_doc.oplog_vv());
-
-    // Notify write subscribers (block subscriber worker uses this for
-    // FTS5/reembed triggers). A `Full` channel means the subscriber is briefly
-    // busy — drop the event but keep the subscriber alive. Only a
-    // `Disconnected` error means the receiver was dropped for real.
-    let notification = WriteNotification { content_hash: hash };
-    let mut subs = shared.write_subscribers.lock().unwrap();
-    subs.retain(|tx| {
-        !matches!(
-            tx.try_send(notification.clone()),
-            Err(crossbeam_channel::TrySendError::Disconnected(_))
-        )
-    });
-}
-
-/// Handle an external filesystem event. Applies conflict-policy gating.
-fn handle_external_event<B: LoroDocBridge>(
-    ev: DebouncedEvent,
-    path: &Path,
-    disk_doc: &Arc<LoroDoc>,
-    memory_doc: &Arc<LoroDoc>,
-    bridge: &Arc<B>,
-    shared: &Arc<SharedState>,
-) {
-    use notify::EventKind;
-
-    // Only process create/modify.
-    match ev.event.kind {
-        EventKind::Create(_) | EventKind::Modify(_) => {}
-        _ => return,
-    }
-
-    // Only process if this event involves our file.
-    if !ev.event.paths.contains(&path.to_path_buf()) {
-        return;
-    }
-
-    // mtime echo check.
-    if let Ok(meta) = std::fs::metadata(path)
-        && let Ok(file_mtime) = meta.modified()
-    {
-        let last = shared.last_written_mtime.lock().unwrap();
-        if Some(file_mtime) == *last {
-            return; // Self-echo: we wrote this.
-        }
-    }
-
-    // Read the file.
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::debug!(path = ?path, error = %e, "failed to read changed file");
-            return;
-        }
-    };
-
-    // Content hash echo check.
-    let hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
-    {
-        let last = shared.last_written_hash.lock().unwrap();
-        if Some(hash) == *last {
-            return; // Same bytes we wrote (handles `touch`).
-        }
-    }
-
-    // Conflict-policy gating.
-    match shared.conflict_policy {
-        ConflictPolicy::AutoMerge => {
-            // Always apply, regardless of whether the external content is
-            // based on a stale view of the file.
-            if let Err(e) = apply_external(&bytes, path, disk_doc, memory_doc, bridge, shared) {
-                tracing::warn!(path = ?path, error = %e, "apply_external failed in AutoMerge path");
-            }
-        }
-        ConflictPolicy::RejectAndNotify => {
-            // Only emit ConflictDetected if the agent has uncommitted
-            // memory_doc edits beyond last_saved_frontier. If memory_doc is
-            // in sync with disk (no pending edits), the external write is a
-            // clean external sync — apply normally and emit Applied.
-            if has_unsaved_edits_internal(memory_doc, shared) {
-                // Agent has pending edits. External write conflicts.
-                // Do NOT apply. Emit ConflictDetected so the caller can decide.
-                let frontier = shared.last_saved_frontier.lock().unwrap().clone();
-                let ev = ExternalChangeEvent::ConflictDetected {
-                    path: path.to_owned(),
-                    disk_content: Arc::new(bytes),
-                    last_saved_frontier: frontier,
-                };
-                let mut subs = shared.external_subscribers.lock().unwrap();
-                // A `Full` channel means the subscriber is briefly busy — drop
-                // the event but keep the subscriber alive. Only `Disconnected`
-                // means the receiver was dropped for real.
-                subs.retain(|tx| {
-                    !matches!(
-                        tx.try_send(ev.clone()),
-                        Err(crossbeam_channel::TrySendError::Disconnected(_))
-                    )
-                });
-            } else {
-                // No pending agent edits. Clean external edit — apply normally.
-                if let Err(e) = apply_external(&bytes, path, disk_doc, memory_doc, bridge, shared) {
-                    tracing::warn!(
-                        path = ?path, error = %e,
-                        "apply_external failed in RejectAndNotify clean-edit path"
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// Free helper: returns `true` iff `memory_doc.oplog_vv()` is strictly ahead
-/// of `last_saved_frontier`. Reusable by the ingest thread without going
-/// through `SyncedDoc::has_unsaved_edits(&self)`.
-fn has_unsaved_edits_internal(memory_doc: &LoroDoc, shared: &SharedState) -> bool {
-    let frontier = shared.last_saved_frontier.lock().unwrap().clone();
-    match frontier {
-        None => {
-            // No local write has ever succeeded. Treat as unsaved.
-            true
-        }
-        Some(saved_vv) => {
-            let current_vv = memory_doc.oplog_vv();
-            current_vv != saved_vv
-        }
-    }
-}
-
-/// Core external-edit application logic. Shared by the ingest thread's
-/// `AutoMerge` path and `RejectAndNotify`'s clean-edit path, as well as
-/// `SyncedDoc::apply_external_bytes`.
-///
-/// Returns `Err` if the bridge fails or the disk_doc export fails. These are
-/// hard failures: the caller should log and propagate rather than silently
-/// swallowing them. `memory_doc` import failure is logged at debug level and
-/// treated as non-fatal (the CRDT merge is best-effort; the disk write
-/// succeeded and the subscriber can reconcile on the next cycle).
-fn apply_external<B: LoroDocBridge>(
-    content: &[u8],
-    path: &Path,
-    disk_doc: &Arc<LoroDoc>,
-    memory_doc: &Arc<LoroDoc>,
-    bridge: &Arc<B>,
-    shared: &Arc<SharedState>,
-) -> Result<(), SyncedDocError> {
-    let oplog_vv_before = disk_doc.oplog_vv();
-
-    bridge
-        .apply_external(disk_doc, content, path)
-        .map_err(SyncedDocError::Bridge)?;
-    disk_doc.commit();
-
-    let update = disk_doc
-        .export(loro::ExportMode::updates(&oplog_vv_before))
-        .map_err(|e| SyncedDocError::Watcher {
-            path: path.to_owned(),
-            message: format!("disk_doc export failed: {e}"),
-        })?;
-
-    if let Err(e) = memory_doc.import(&update) {
-        tracing::debug!(path = ?path, error = %e, "failed to import external update into memory_doc");
-    }
-
-    // Advance `last_saved_frontier` to disk_doc's new oplog version vector.
-    // Frontier means "we are synced with disk through this version" — both
-    // local writes and external apply-bytes leave disk_doc in sync with the
-    // file on disk, so both should advance the frontier. This is what
-    // `has_unsaved_edits()` compares against to detect agent-side pending
-    // edits in memory_doc that haven't reached disk. Echo-suppression state
-    // (`last_written_mtime`/`last_written_hash`) is intentionally NOT updated
-    // here — those track *our own* writes for self-echo detection; touching
-    // them on external apply would suppress legitimate subsequent external
-    // edits that race within the debounce window.
-    *shared.last_saved_frontier.lock().unwrap() = Some(disk_doc.oplog_vv());
-
-    // Fan out to external subscribers. A `Full` channel means the subscriber
-    // is briefly busy — drop the event but keep the subscriber alive. Only
-    // `Disconnected` means the receiver was dropped for real.
-    let ev = ExternalChangeEvent::Applied {
-        path: path.to_owned(),
-    };
-    let mut subs = shared.external_subscribers.lock().unwrap();
-    subs.retain(|tx| {
-        !matches!(
-            tx.try_send(ev.clone()),
-            Err(crossbeam_channel::TrySendError::Disconnected(_))
-        )
-    });
-
-    Ok(())
 }

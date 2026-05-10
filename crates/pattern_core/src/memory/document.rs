@@ -25,6 +25,17 @@ pub struct StructuredDocument {
 
     /// Block metadata including schema, permissions, and identity.
     metadata: BlockMetadata,
+
+    /// Pending attribution to attach to the next commit. Set via
+    /// `set_attribution` / `auto_attribution`. Mutators (set_text,
+    /// append_text, etc.) read this BEFORE their internal commit:
+    /// if Some, they attach the message to the commit; either way,
+    /// the field is cleared after the commit fires.
+    ///
+    /// Wrapped in Arc<Mutex> so derived Clone gives shared state
+    /// across StructuredDocument clones (consistent with LoroDoc's
+    /// reference-clone semantics).
+    pending_attribution: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl StructuredDocument {
@@ -36,6 +47,7 @@ impl StructuredDocument {
             doc: LoroDoc::new(),
             accessor_agent_id,
             metadata,
+            pending_attribution: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -54,6 +66,7 @@ impl StructuredDocument {
             doc,
             accessor_agent_id,
             metadata,
+            pending_attribution: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -71,6 +84,7 @@ impl StructuredDocument {
             doc,
             accessor_agent_id: None,
             metadata,
+            pending_attribution: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -176,6 +190,7 @@ impl StructuredDocument {
             doc,
             accessor_agent_id: None,
             metadata,
+            pending_attribution: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -351,13 +366,13 @@ impl StructuredDocument {
         let text = self.doc.get_text("content");
         let current_len = text.len_unicode();
 
-        // Delete all current content, then insert new
         if current_len > 0 {
             text.delete(0, current_len)
                 .map_err(|e| DocumentError::Other(e.to_string()))?;
         }
         text.insert(0, content)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
 
         Ok(())
     }
@@ -371,6 +386,13 @@ impl StructuredDocument {
         let pos = text.len_unicode();
         text.insert(pos, content)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        // Loro `text.insert` adds ops to a pending buffer; until `commit` is
+        // called, they don't enter the oplog. Without this, the immediately-
+        // following `persist_block` would call `export_updates_since(last
+        // _persisted_frontier)` on a frontier that doesn't include these ops,
+        // produce an empty blob, skip storage, and silently advance the
+        // frontier — losing this append entirely.
+        self.commit();
         Ok(())
     }
 
@@ -439,6 +461,7 @@ impl StructuredDocument {
             // Surgical splice: delete unicode_len chars and insert replace
             text.splice(unicode_pos, unicode_len, replace)
                 .map_err(|e| DocumentError::Other(format!("Splice failed: {}", e)))?;
+            self.commit();
             Ok(true)
         } else {
             Ok(false)
@@ -476,6 +499,7 @@ impl StructuredDocument {
         let loro_value = json_to_loro(&value);
         map.insert(field, loro_value)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(())
     }
 
@@ -524,6 +548,7 @@ impl StructuredDocument {
         let loro_value = json_to_loro(&item);
         list.push(loro_value)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(())
     }
 
@@ -550,6 +575,7 @@ impl StructuredDocument {
         }
         list.delete(index, 1)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(())
     }
 
@@ -578,6 +604,7 @@ impl StructuredDocument {
         counter
             .increment(delta as f64)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(counter.get_value() as i64)
     }
 
@@ -615,7 +642,7 @@ impl StructuredDocument {
         let loro_value = json_to_loro(&value.into());
         map.insert(field, loro_value)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
-
+        self.commit();
         Ok(())
     }
 
@@ -651,7 +678,7 @@ impl StructuredDocument {
         }
         text.insert(0, content)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
-
+        self.commit();
         Ok(())
     }
 
@@ -695,6 +722,7 @@ impl StructuredDocument {
         let loro_value = json_to_loro(&item);
         list.push(loro_value)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(())
     }
 
@@ -719,6 +747,7 @@ impl StructuredDocument {
         let loro_value = json_to_loro(&item);
         list.insert(index, loro_value)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(())
     }
 
@@ -737,6 +766,7 @@ impl StructuredDocument {
         }
         list.delete(index, 1)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(())
     }
 
@@ -784,6 +814,7 @@ impl StructuredDocument {
         let loro_value = json_to_loro(&entry);
         list.push(loro_value)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(())
     }
 
@@ -1037,6 +1068,7 @@ impl StructuredDocument {
                     .map_err(|e| DocumentError::Other(e.to_string()))?;
             }
         }
+        self.commit();
         Ok(())
     }
 
@@ -1103,16 +1135,28 @@ impl StructuredDocument {
     ///
     /// Changes made to containers (text, map, list, counter) are batched until
     /// commit is called. This triggers all subscriptions with the accumulated changes.
+    /// If `pending_attribution` is set, attaches it as the commit message and
+    /// clears the pending field. Mutators call this internally so the
+    /// attribution flows through to the change record.
     pub fn commit(&self) {
+        if let Some(msg) = self.pending_attribution.lock().unwrap().take() {
+            self.doc.set_next_commit_message(&msg);
+        }
         self.doc.commit();
     }
 
     /// Set attribution for the next commit.
     ///
-    /// The attribution message will be included in the change metadata,
-    /// allowing tracking of who or what made the change.
+    /// The attribution message is staged on the StructuredDocument and
+    /// attached to the next commit (whether triggered explicitly via
+    /// `commit()` or implicitly via a mutator like `set_text` / `append_text`).
+    /// Cleared after the commit fires.
+    ///
+    /// Order matters: call this BEFORE the mutation you want attributed.
+    /// Mutators commit internally, so a post-mutation set_attribution would
+    /// attach to a no-op subsequent commit.
     pub fn set_attribution(&self, attribution: &str) {
-        self.doc.set_next_commit_message(attribution);
+        *self.pending_attribution.lock().unwrap() = Some(attribution.to_string());
     }
 
     /// Commit with an attribution message.
@@ -1122,6 +1166,9 @@ impl StructuredDocument {
     pub fn commit_with_attribution(&self, attribution: &str) {
         self.doc.set_next_commit_message(attribution);
         self.doc.commit();
+        // Clear any unrelated pending attribution (we just committed with
+        // the explicit message).
+        *self.pending_attribution.lock().unwrap() = None;
     }
 
     // ========== Rendering ==========

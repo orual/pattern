@@ -214,6 +214,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                 let doc = adapter
                     .create_block(&scope, create)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Create: {e}")))?;
+                doc.auto_attribution("create");
                 write_text_into(&doc, &initial)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Create: {e}")))?;
                 adapter
@@ -266,6 +267,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     }
                 };
 
+                doc.auto_attribution("append");
                 doc.append(&content, false)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Append: {e}")))?;
 
@@ -313,6 +315,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                         ))
                     })?;
 
+                doc.auto_attribution("replace");
                 let found = doc
                     .replace_text(&old, &new, false)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?;
@@ -463,6 +466,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     .ok_or_else(|| {
                         EffectError::Handler(format!("Pattern.Memory.SetField: no block {label:?}"))
                     })?;
+                doc.auto_attribution(&format!("set_field:{field}"));
                 doc.set_field(&field, json_val, false)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.SetField: {e}")))?;
                 adapter
@@ -533,6 +537,11 @@ fn upsert_block_content(
             (doc, true)
         }
     };
+    if is_new {
+        doc.auto_attribution("create");
+    } else {
+        doc.auto_attribution("put");
+    }
     write_text_into(&doc, content)?;
     if let (false, Some(desc)) = (is_new, description) {
         store.update_block_metadata(
@@ -553,6 +562,8 @@ fn write_text_into(
     doc: &StructuredDocument,
     content: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Attribution is set by the caller (handle_put / handle_create /
+    // upsert_block_content). The mutator's internal commit will pick it up.
     doc.set_text(content, false)?;
     Ok(())
 }

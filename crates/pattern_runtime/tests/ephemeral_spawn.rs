@@ -180,8 +180,12 @@ async fn parent_cancel_propagates_through_three_level_chain() {
     // installs the parent-cancel watcher task.
     let cfg = pattern_core::spawn::EphemeralConfig::new("");
     let child_caps = pattern_runtime::spawn::compute_child_caps(&parent, &cfg).unwrap();
-    let child = parent.fork_for_ephemeral(&cfg, child_caps.clone(), parent.include_paths().clone());
-    let grandchild = child.fork_for_ephemeral(&cfg, child_caps, child.include_paths().clone());
+    let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
+    let child_log: smol_str::SmolStr = format!("spawn-log-{child_id}").into();
+    let child = parent.fork_for_ephemeral(&cfg, child_caps.clone(), parent.include_paths().clone(), child_id, child_log);
+    let grandchild_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
+    let grandchild_log: smol_str::SmolStr = format!("spawn-log-{grandchild_id}").into();
+    let grandchild = child.fork_for_ephemeral(&cfg, child_caps, child.include_paths().clone(), grandchild_id, grandchild_log);
 
     // Register a scripted handle on each of child + grandchild
     // registries so cancel_all has something to flip.
@@ -244,9 +248,9 @@ async fn eval_worker_count_returns_to_baseline_after_ephemeral() {
         .with_timeout(jiff::Span::new().seconds(10));
     let caps = pattern_runtime::spawn::compute_child_caps(&parent, &cfg).unwrap();
     let includes = pattern_runtime::spawn::child_include_paths(&parent, None);
-    let child = parent.fork_for_ephemeral(&cfg, caps, Arc::new(includes.clone()));
     let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
     let log_label: smol_str::SmolStr = format!("spawn-log-{child_id}").into();
+    let child = parent.fork_for_ephemeral(&cfg, caps, Arc::new(includes.clone()), child_id.clone(), log_label.clone());
     let log_scope = pattern_runtime::spawn::progress_log_scope(&parent);
     pattern_runtime::spawn::create_progress_log_block(parent.adapter(), log_label.as_str(), &log_scope)
         .unwrap();
@@ -316,13 +320,19 @@ async fn costume_overrides_system_prompt_and_preserves_persona_identity() {
 
     let cfg = EphemeralConfig::new("").with_costume("be terse");
     let caps = pattern_runtime::spawn::compute_child_caps(&parent, &cfg).unwrap();
-    let child = parent.fork_for_ephemeral(&cfg, caps, parent.include_paths().clone());
+    let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
+    let log_label: smol_str::SmolStr = format!("spawn-log-{child_id}").into();
+    let child = parent.fork_for_ephemeral(&cfg, caps, parent.include_paths().clone(), child_id, log_label);
 
-    // Persona identity preserved (AC3.3 second clause).
-    assert_eq!(
-        child.agent_id(),
-        parent_agent_id,
-        "child must share parent's agent_id so logs attribute to the parent persona"
+    // Spawn agent_id refactor: child gets a NAMESPACED execution agent_id
+    // (`<parent>:spawn:<hash>`) for routing/storage, but the persona identity
+    // (display name, persona_id) inherits from the parent. AC3.3's
+    // "persona identity stays in logs" is now enforced via persona_id, not
+    // agent_id. Verify the namespacing structure here.
+    let child_agent_id = child.agent_id();
+    assert!(
+        child_agent_id.starts_with(&format!("{parent_agent_id}:spawn:")),
+        "child agent_id must be namespaced under parent for routing/storage; got: {child_agent_id}"
     );
     // Costume installed on the system_prompt slot. SessionContext
     // doesn't expose system_prompt directly, but the child is
@@ -364,10 +374,9 @@ async fn ephemeral_success_returns_final_text_and_logs_progress() {
         .with_timeout(jiff::Span::new().seconds(10));
     let child_caps = pattern_runtime::spawn::compute_child_caps(&parent, &cfg).unwrap();
     let child_includes = pattern_runtime::spawn::child_include_paths(&parent, None);
-    let child = parent.fork_for_ephemeral(&cfg, child_caps, Arc::new(child_includes.clone()));
-
     let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
     let log_label: smol_str::SmolStr = format!("spawn-log-{child_id}").into();
+    let child = parent.fork_for_ephemeral(&cfg, child_caps, Arc::new(child_includes.clone()), child_id.clone(), log_label.clone());
     let log_scope = pattern_runtime::spawn::progress_log_scope(&parent);
 
     pattern_runtime::spawn::create_progress_log_block(parent.adapter(), log_label.as_str(), &log_scope)
@@ -462,7 +471,9 @@ async fn watcher_tasks_are_aborted_on_child_registry_drop() {
     let children: Vec<_> = (0..N)
         .map(|_| {
             let caps = pattern_runtime::spawn::compute_child_caps(&parent, &cfg).unwrap();
-            parent.fork_for_ephemeral(&cfg, caps, parent.include_paths().clone())
+            let cid: smol_str::SmolStr = pattern_core::types::ids::new_id();
+            let lbl: smol_str::SmolStr = format!("spawn-log-{cid}").into();
+            parent.fork_for_ephemeral(&cfg, caps, parent.include_paths().clone(), cid, lbl)
         })
         .collect();
 
@@ -511,10 +522,14 @@ async fn watcher_tasks_are_aborted_on_child_registry_drop() {
     let grandchild_cfg = pattern_core::spawn::EphemeralConfig::new("");
     let grandchild_caps =
         pattern_runtime::spawn::compute_child_caps(&parent, &grandchild_cfg).unwrap();
+    let live_child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
+    let live_child_log: smol_str::SmolStr = format!("spawn-log-{live_child_id}").into();
     let live_child = parent.fork_for_ephemeral(
         &grandchild_cfg,
         grandchild_caps,
         parent.include_paths().clone(),
+        live_child_id,
+        live_child_log,
     );
     let deep_cancel = Arc::new(pattern_runtime::timeout::CancelState::new());
     register_scripted_handle(live_child.spawn_registry(), deep_cancel.clone());
@@ -567,11 +582,10 @@ async fn ac3_4_timeout_fires_cancel_and_returns_timeout_error() {
         .with_timeout(jiff::Span::new().milliseconds(50));
     let child_caps = pattern_runtime::spawn::compute_child_caps(&parent, &cfg).unwrap();
     let child_includes = pattern_runtime::spawn::child_include_paths(&parent, None);
-    let child = parent.fork_for_ephemeral(&cfg, child_caps, Arc::new(child_includes.clone()));
-    let child_cancel = child.cancel_state();
-
     let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
     let log_label: smol_str::SmolStr = format!("spawn-log-{child_id}").into();
+    let child = parent.fork_for_ephemeral(&cfg, child_caps, Arc::new(child_includes.clone()), child_id.clone(), log_label.clone());
+    let child_cancel = child.cancel_state();
     let log_scope = pattern_runtime::spawn::progress_log_scope(&parent);
     pattern_runtime::spawn::create_progress_log_block(parent.adapter(), log_label.as_str(), &log_scope)
         .unwrap();
@@ -712,6 +726,7 @@ async fn ac3_5_handler_side_concurrency_limit_returns_handler_error() {
             timeout_ms: None,
             prompt: None,
             model: None,
+            name: None,
         };
 
         let r1 = handler.handle(SpawnReq::Ephemeral(mk()), &cx);

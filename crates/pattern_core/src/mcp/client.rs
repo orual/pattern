@@ -6,7 +6,7 @@ use rmcp::{
 };
 use tokio::process::Command;
 
-use super::config::{AuthConfig, McpServerConfig, TransportConfig};
+use super::config::{McpServerConfig, TransportConfig};
 
 /// Metadata about a tool discovered from an MCP server.
 #[derive(Debug, Clone)]

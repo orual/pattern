@@ -1593,8 +1593,8 @@ impl App {
         // the panel — and the parent's main conversation transcript is left
         // alone (no merge into the parent agent's batches). When Visible,
         // we auto-switch to SpawnFeed so the activity is visible.
-        use pattern_server::protocol::SpawnSource;
         use super::panel::SpawnEntryKind;
+        use pattern_server::protocol::SpawnSource;
         let routing_info: Option<(String, String, SpawnEntryKind)> = match &tagged.source {
             SpawnSource::Main => None,
             SpawnSource::Ephemeral {
@@ -1650,12 +1650,9 @@ impl App {
             // (which is namespaced for spawns, e.g. `pattern:spawn:foo`),
             // so the user sees spawn output inline regardless of panel
             // visibility. The panel stays as an opt-in focused view.
-            let was_first = self.panel_state.push_spawn_event(
-                &key,
-                &label,
-                kind,
-                &tagged.event,
-            );
+            let was_first = self
+                .panel_state
+                .push_spawn_event(&key, &label, kind, &tagged.event);
             // Auto-switch panel content to SpawnFeed on first event for any
             // spawn IF the panel is already visible. Don't force-show a
             // hidden panel — events still appear inline in main conversation.
@@ -1663,8 +1660,7 @@ impl App {
                 && self.panel_visibility != PanelVisibility::Hidden
                 && self.panel_state.content != PanelContent::SpawnFeed
             {
-                self.panel_state.prev_content_before_spawn_feed =
-                    Some(self.panel_state.content);
+                self.panel_state.prev_content_before_spawn_feed = Some(self.panel_state.content);
                 self.panel_state.content = PanelContent::SpawnFeed;
             }
             // FALL THROUGH to conversation rendering — do not early-return.
@@ -1884,22 +1880,6 @@ fn replace_trailing_mention(text: &str, value: &str) -> String {
 // ---------------------------------------------------------------------------
 // Rendering helpers
 // ---------------------------------------------------------------------------
-
-/// Render the input area with the InputHandler's textarea.
-/// Truncate a string to at most `max` characters, replacing the tail with
-/// an ellipsis. Used by the spawn-feed routing path so panel entries
-/// don't explode with full ToolCall payloads.
-fn truncate_for_panel(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max).collect();
-        out.push('\u{2026}');
-        out
-    }
-}
-
-
 
 fn render_input_area(area: Rect, buf: &mut Buffer, focus: Focus, input: &InputHandler) {
     let prompt_colour = if focus == Focus::Input {

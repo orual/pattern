@@ -506,7 +506,76 @@ impl MemoryCache {
             doc.apply_updates(&update.update_blob)?;
         }
 
-        let last_seq = updates.last().map(|u| u.seq).unwrap_or(block.last_seq);
+        let mut last_seq = updates.last().map(|u| u.seq).unwrap_or(block.last_seq);
+
+        // Disk-precedence at startup: if the block's canonical file exists
+        // and its content differs from the freshly-hydrated doc render,
+        // the human likely edited the file while the daemon was off.
+        // Merge the disk content into the doc via the schema bridge, then
+        // persist the resulting ops as a new DB update so the merge is
+        // durable. Only runs when mount_path is configured (production).
+        if let Some(mount_path) = &self.mount_path {
+            let scope = Scope::from_db_key(&block.agent_id)
+                .unwrap_or_else(|| Scope::Global(block.agent_id.clone().into()));
+            let ext = block_schema_extension(&doc.schema());
+            let file_path = block_file_path(
+                mount_path.as_path(),
+                self.persona_state_dir.as_deref().map(|p| p.as_path()),
+                &scope,
+                doc.block_type(),
+                doc.label(),
+                ext,
+            );
+            if let Ok(disk_bytes) = std::fs::read(&file_path) {
+                let rendered = doc.render();
+                if rendered.as_bytes() != disk_bytes.as_slice() {
+                    // Disk diverged — apply via bridge to merge the human's edit.
+                    let vv_before = doc.inner().oplog_vv();
+                    if let Err(e) = crate::subscriber::bridge::apply_block_external_edit(doc.inner(), &doc.schema().clone(), &disk_bytes, &file_path) {
+                        tracing::warn!(
+                            block_id = %block.id,
+                            path = ?file_path,
+                            error = %e,
+                            "hydrate disk-merge: bridge.apply_external failed; using DB state only"
+                        );
+                    } else {
+                        doc.inner().commit();
+                        // Persist the merge as a new DB update so it's
+                        // durable and visible to subsequent loads.
+                        if let Ok(blob) = doc.inner().export(loro::ExportMode::updates(&vv_before))
+                            && !blob.is_empty()
+                        {
+                            let new_frontier = doc.current_version();
+                            let frontier_bytes = new_frontier.encode();
+                            match pattern_db::queries::store_update(
+                                &mut *self.db.get().mem()?,
+                                &block.id,
+                                &blob,
+                                Some(&frontier_bytes),
+                                Some("disk-merge-on-hydrate"),
+                            ) {
+                                Ok(seq) => {
+                                    last_seq = seq;
+                                    tracing::info!(
+                                        block_id = %block.id,
+                                        path = ?file_path,
+                                        "hydrate: merged disk edit into doc + persisted to DB"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        block_id = %block.id,
+                                        error = %e,
+                                        "hydrate disk-merge: store_update failed; merge in-memory only"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let frontier = doc.current_version();
 
         Ok(CachedBlock {
@@ -632,6 +701,20 @@ impl MemoryCache {
         // A freshly created block with no content doesn't need a subscriber
         // until it has real data to emit — this is that moment.
         self.maybe_spawn_subscriber_for_block(&block_id);
+
+        // Single-doc world: synchronously flush the doc to disk via
+        // the subscriber's SyncedDoc. The doc the subscriber holds IS the
+        // same loro doc this cache entry just persisted to DB; write_local
+        // renders that doc and atomic-writes the canonical bytes.
+        if let Some(sub) = self.subscribers.get(&block_id) {
+            if let Err(e) = sub.synced_doc.write_local() {
+                tracing::warn!(
+                    block_id = %block_id,
+                    error = %e,
+                    "synced_doc.write_local failed during persist; disk file may be stale"
+                );
+            }
+        }
 
         Ok(())
     }
@@ -1046,8 +1129,9 @@ impl MemoryCache {
         // subscriber worker to receive a CommitEvent (which does not fire for
         // CRDT updates imported via `subscribe_local_update`).
         let preview = doc.render();
-        // disk_doc is needed for TaskList reconcile; get Arc ref via synced_doc.
-        let disk_doc = Arc::clone(synced_doc.disk_doc());
+        // Single-doc world: synced_doc.doc() IS the doc the agent mutated and
+        // that the bridge reconciles external edits into.
+        let reconcile_doc = synced_doc.doc();
 
         match self.db.get() {
             Ok(mut conn) => {
@@ -1078,7 +1162,7 @@ impl MemoryCache {
                                 );
                                 // tx drops without commit → implicit rollback.
                             } else if let Err(e) = crate::subscriber::task::reconcile_task_list(
-                                &tx, block_id, &disk_doc,
+                                &tx, block_id, reconcile_doc,
                             ) {
                                 metrics::counter!("memory.external_edit.reconcile_failed")
                                     .increment(1);
@@ -1666,14 +1750,17 @@ pub(crate) fn spawn_subscriber_for_block(
     // state as doc.inner(). This means SyncedDoc's memory_doc IS the same
     // Loro state as the StructuredDocument's doc, so apply_external_bytes
     // correctly propagates external edits into the live memory_doc.
-    let memory_doc_arc = Arc::new(doc.inner().clone());
+    // Single-doc world: SyncedDoc takes the LoroDoc directly (Loro is
+    // internally Arc'd). The block subscriber holds an `Arc<SyncedDoc>` and
+    // can call write_local for synchronous disk persistence.
+    let synced_doc_loro = doc.inner().clone();
     let bridge = Arc::new(crate::subscriber::bridge::BlockSchemaBridge::new(
         schema.clone(),
     ));
     let synced_doc =
         match crate::loro_sync::SyncedDoc::open_router_owned(crate::loro_sync::SyncedDocConfig {
             path: file_path,
-            memory_doc: memory_doc_arc,
+            doc: synced_doc_loro,
             bridge,
             event_channel_bound: 64,
             // Block-subscriber path: external edits arrive via
@@ -4535,7 +4622,7 @@ mod tests {
         // Verify the disk_doc (accessed via the subscriber's synced_doc) reflects
         // the edit.
         let sub = cache.subscribers.get(block_id).unwrap();
-        let disk_doc = Arc::clone(sub.synced_doc.disk_doc());
+        let disk_doc = sub.synced_doc.doc().clone();
         drop(sub);
 
         let deep = disk_doc.get_movable_list("items").get_deep_value();
@@ -4663,7 +4750,7 @@ mod tests {
         use crate::fs::markdown_skill::loro_bridge::project_metadata_from_loro;
 
         let sub = cache.subscribers.get(block_id).unwrap();
-        let disk_doc = Arc::clone(sub.synced_doc.disk_doc());
+        let disk_doc = sub.synced_doc.doc().clone();
         drop(sub);
 
         let deep = disk_doc.get_deep_value();
@@ -4977,4 +5064,151 @@ mod tests {
     }
 
     // endregion: fork_for_child
+
+    // region: hydrate disk-merge regression tests
+
+    /// Regression for the Memory.append-eats-first-write bug.
+    ///
+    /// Scenario: human edits the canonical block .md file while the daemon
+    /// is stopped. On startup, cache.load_from_db must merge the disk diff
+    /// into the doc and persist that merge as a new DB update.
+    #[test]
+    fn hydrate_disk_merge_picks_up_offline_edit() {
+        use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mount = dir.path().to_path_buf();
+        let dbs = Arc::new(pattern_db::ConstellationDb::open_in_memory().unwrap());
+        create_test_agent(&dbs, "agent_1");
+
+        // 1. Create+persist via a setup cache so DB has the block + a snapshot.
+        let cache_setup = MemoryCache::new(Arc::clone(&dbs));
+        let create = pattern_core::types::block::BlockCreate::new(
+            "merge-test".to_string(),
+            MemoryBlockType::Working,
+            BlockSchema::text(),
+        )
+        .with_description("hydrate-merge regression")
+        .with_char_limit(5000);
+        let scope = Scope::Global("agent_1".into());
+        let doc0 = MemoryStore::create_block(&cache_setup, &scope, create).unwrap();
+        doc0.set_text("db side\n", true).unwrap();
+        MemoryStore::mark_dirty(&cache_setup, &scope, "merge-test").unwrap();
+        MemoryStore::persist_block(&cache_setup, &scope, "merge-test").unwrap();
+        drop(doc0);
+        drop(cache_setup);
+
+        // 2. Write a divergent disk file (simulates human editing while daemon was off).
+        let block_dir = mount.join("blocks").join("@agent_1").join("working");
+        std::fs::create_dir_all(&block_dir).unwrap();
+        std::fs::write(block_dir.join("merge-test.md"), "human edited content\n").unwrap();
+
+        // 3. Fresh cache with mount_path (simulates daemon restart).
+        let (reembed_tx, _reembed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (hb_tx, hb_rx) = crossbeam_channel::bounded::<crate::subscriber::event::Heartbeat>(64);
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = rt.enter();
+        let cache = MemoryCache::new(Arc::clone(&dbs))
+            .with_mount_path(mount.clone(), reembed_tx, hb_tx, hb_rx);
+
+        // 4. Hydrate — should run disk-merge.
+        let _doc = MemoryStore::get_block(&cache, &scope, "merge-test")
+            .unwrap()
+            .expect("block hydrated");
+
+        // 5. Doc reflects the merged state (human's edit adopted).
+        let rendered = MemoryStore::get_rendered_content(&cache, &scope, "merge-test")
+            .unwrap()
+            .expect("rendered content");
+        assert!(
+            rendered.contains("human edited content"),
+            "hydrate-disk-merge must adopt offline disk edit; got: {rendered:?}"
+        );
+
+        // 6. New DB update with author="disk-merge-on-hydrate" was persisted.
+        let block_db =
+            pattern_db::queries::get_block_by_label(&dbs.get().unwrap(), &scope.to_db_key(), "merge-test")
+                .unwrap()
+                .expect("block exists");
+        let (_chk, all_updates) =
+            pattern_db::queries::get_checkpoint_and_updates(&dbs.get().unwrap(), &block_db.id)
+                .unwrap();
+        let merge_update = all_updates
+            .iter()
+            .find(|u| u.source.as_deref() == Some("disk-merge-on-hydrate"));
+        assert!(
+            merge_update.is_some(),
+            "a 'disk-merge-on-hydrate' update must be persisted; updates: {:?}",
+            all_updates.iter().map(|u| (u.seq, u.source.clone())).collect::<Vec<_>>()
+        );
+    }
+
+    /// Regression for multi-append-loses-first-write.
+    ///
+    /// Two sequential appends should both survive on a hydrated block where
+    /// the disk file matches the DB rendering. Pre-fix, the lazy SyncedDoc
+    /// spawn's seed step Myers-diffed stale disk over cache-hydrated doc,
+    /// reverting the first append's ops.
+    #[test]
+    fn multi_append_after_hydrate_preserves_all_writes() {
+        use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mount = dir.path().to_path_buf();
+        let dbs = Arc::new(pattern_db::ConstellationDb::open_in_memory().unwrap());
+        create_test_agent(&dbs, "agent_1");
+
+        let cache_setup = MemoryCache::new(Arc::clone(&dbs));
+        let create = pattern_core::types::block::BlockCreate::new(
+            "multi-append".to_string(),
+            MemoryBlockType::Working,
+            BlockSchema::text(),
+        )
+        .with_description("multi-append regression")
+        .with_char_limit(5000);
+        let scope = Scope::Global("agent_1".into());
+        let doc0 = MemoryStore::create_block(&cache_setup, &scope, create).unwrap();
+        doc0.set_text("baseline\n", true).unwrap();
+        MemoryStore::mark_dirty(&cache_setup, &scope, "multi-append").unwrap();
+        MemoryStore::persist_block(&cache_setup, &scope, "multi-append").unwrap();
+        drop(doc0);
+        drop(cache_setup);
+
+        // Disk matches DB so the disk-merge step does NOT fire.
+        let block_dir = mount.join("blocks").join("@agent_1").join("working");
+        std::fs::create_dir_all(&block_dir).unwrap();
+        std::fs::write(block_dir.join("multi-append.md"), "baseline\n").unwrap();
+
+        let (reembed_tx, _reembed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (hb_tx, hb_rx) = crossbeam_channel::bounded::<crate::subscriber::event::Heartbeat>(64);
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = rt.enter();
+        let cache = MemoryCache::new(Arc::clone(&dbs))
+            .with_mount_path(mount.clone(), reembed_tx, hb_tx, hb_rx);
+
+        // Two sequential appends mimicking Memory.append handler flow.
+        let doc1 = MemoryStore::get_block(&cache, &scope, "multi-append").unwrap().unwrap();
+        doc1.append("first append\n", false).unwrap();
+        MemoryStore::mark_dirty(&cache, &scope, "multi-append").unwrap();
+        MemoryStore::persist_block(&cache, &scope, "multi-append").unwrap();
+
+        let doc2 = MemoryStore::get_block(&cache, &scope, "multi-append").unwrap().unwrap();
+        doc2.append("second append\n", false).unwrap();
+        MemoryStore::mark_dirty(&cache, &scope, "multi-append").unwrap();
+        MemoryStore::persist_block(&cache, &scope, "multi-append").unwrap();
+
+        let rendered = MemoryStore::get_rendered_content(&cache, &scope, "multi-append")
+            .unwrap()
+            .expect("rendered");
+        assert!(
+            rendered.contains("first append"),
+            "first append must survive lazy SyncedDoc spawn; rendered: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("second append"),
+            "second append must survive; rendered: {rendered:?}"
+        );
+    }
+
+    // endregion: hydrate disk-merge regression tests
 }

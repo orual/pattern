@@ -230,12 +230,14 @@ fn test_auto_attribution_sets_commit_message() {
         Some("agent_42".to_string()),
     );
 
-    // Make a change
-    doc.set_text("hello world", true).unwrap();
-
-    // Set attribution and commit
+    // Set attribution BEFORE the mutation so the internal commit fires
+    // with the attribution attached. (StructuredDocument mutators commit
+    // internally now to ensure ops enter the oplog before any subsequent
+    // export — required for write-flush correctness across cache reloads.
+    // Pre-fix, agent code could call auto_attribution after the mutation
+    // and a separate commit() would attach the message to a no-op commit.)
     doc.auto_attribution("append");
-    doc.commit();
+    doc.set_text("hello world", true).unwrap();
 
     // Verify the commit message was set correctly by checking change history
     let loro_doc = doc.inner();

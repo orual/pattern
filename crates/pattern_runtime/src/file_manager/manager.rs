@@ -225,10 +225,10 @@ impl FileManager {
         self.check_capability()?;
         self.policy.check_access(path)?;
         let canonical = canonicalize_best(path);
-        eprintln!("get_or_open: canonical = `{}`", canonical.display());
+        tracing::debug!("get_or_open: canonical = `{}`", canonical.display());
         // Return existing if open.
         if let Some(sf) = self.open_files.get(&canonical) {
-            eprintln!("get_or_open: found existing open file");
+            tracing::debug!("get_or_open: found existing open file");
             return Ok(sf.value().clone());
         }
         // Not open yet — open it (which creates the LoroSyncedFile, watcher, etc.).
@@ -277,7 +277,7 @@ impl FileManager {
                 self.ensure_dir_watcher(parent)?;
                 let sf = LoroSyncedFile::open_with_router(&canonical, &self.router)?;
                 let content = sf.read()?.into_bytes();
-                eprintln!("read content: {}", String::from_utf8_lossy(&content));
+                tracing::debug!("read content: {}", String::from_utf8_lossy(&content));
 
                 // Per-file cancel token for the listener. Signalled in close()
                 // BEFORE dropping the SyncedDoc's senders, preventing the
@@ -547,9 +547,10 @@ impl FileManager {
         let Some(sf) = self.open_files.get(&canonical) else {
             return Err(FileError::NotOpen(canonical));
         };
-        sf.apply_external_bytes(content)?;
+        sf.force_apply_external_bytes(content)?;
         // Clear the conflict flag — force_write resolves the conflict by
-        // overwriting with the agent's content.
+        // overwriting with the agent's content. (force_apply also clears
+        // SyncedDoc's internal conflict_pending flag.)
         self.conflict_flags.remove(&canonical);
         Ok(())
     }

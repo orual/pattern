@@ -6,14 +6,12 @@
 //! dispatches to the appropriate hook handler (command or http).
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
+use std::path::Path;
 use tokio::task::JoinHandle;
-use tracing::{debug, warn, info};
+use tracing::{debug, info, warn};
 
-use pattern_core::hooks::{HookEvent, HookFilter};
 use pattern_core::hooks::cc_aliases;
+use pattern_core::hooks::{HookEvent, HookFilter};
 use pattern_core::plugin::manifest::{ComponentSpec, PluginManifest};
 use pattern_core::traits::plugin::{PluginContext, PluginError};
 
@@ -39,10 +37,7 @@ enum HookHandler {
         env: BTreeMap<String, String>,
     },
     /// POST to an HTTP endpoint.
-    Http {
-        url: String,
-        method: Option<String>,
-    },
+    Http { url: String, method: Option<String> },
     /// Recognized but not yet supported hook type.
     Skipped {
         original_type: String,
@@ -117,7 +112,10 @@ pub async fn wire_hook_subscriptions(
                             "http hooks not yet implemented"
                         );
                     }
-                    HookHandler::Skipped { original_type, reason } => {
+                    HookHandler::Skipped {
+                        original_type,
+                        reason,
+                    } => {
                         debug!(
                             plugin = %plugin_id,
                             hook_type = %original_type,
@@ -219,28 +217,38 @@ fn parse_cc_hook_declarations(
                     if let Ok(raw) = std::fs::read_to_string(&hooks_json_path) {
                         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
                             // CC hooks.json: { "hooks": { "EventName": [{ matcher, hooks: [...] }] } }
-                            if let Some(hooks_obj) = value.get("hooks").and_then(|v| v.as_object()) {
+                            if let Some(hooks_obj) = value.get("hooks").and_then(|v| v.as_object())
+                            {
                                 for (event_name, entries) in hooks_obj {
                                     if let Some(entries_arr) = entries.as_array() {
                                         for entry in entries_arr {
-                                            let matcher = entry.get("matcher")
+                                            let matcher = entry
+                                                .get("matcher")
                                                 .and_then(|v| v.as_str())
                                                 .map(|s| s.to_string());
-                                            if let Some(inner_hooks) = entry.get("hooks").and_then(|v| v.as_array()) {
+                                            if let Some(inner_hooks) =
+                                                entry.get("hooks").and_then(|v| v.as_array())
+                                            {
                                                 for hook in inner_hooks {
-                                                    let hook_type = hook.get("type")
+                                                    let hook_type = hook
+                                                        .get("type")
                                                         .and_then(|v| v.as_str())
                                                         .unwrap_or("command");
                                                     let handler = match hook_type {
                                                         "command" => {
-                                                            let command = hook.get("command")
+                                                            let command = hook
+                                                                .get("command")
                                                                 .and_then(|v| v.as_str())
                                                                 .unwrap_or("")
                                                                 .to_string();
-                                                            HookHandler::Command { command, env: BTreeMap::new() }
+                                                            HookHandler::Command {
+                                                                command,
+                                                                env: BTreeMap::new(),
+                                                            }
                                                         }
                                                         "http" => {
-                                                            let url = hook.get("url")
+                                                            let url = hook
+                                                                .get("url")
                                                                 .and_then(|v| v.as_str())
                                                                 .unwrap_or("")
                                                                 .to_string();
@@ -248,7 +256,8 @@ fn parse_cc_hook_declarations(
                                                         }
                                                         other => HookHandler::Skipped {
                                                             original_type: other.to_string(),
-                                                            reason: "not yet implemented".to_string(),
+                                                            reason: "not yet implemented"
+                                                                .to_string(),
                                                         },
                                                     };
                                                     decls.push(CcHookDecl {
@@ -282,25 +291,33 @@ fn parse_cc_hook_declarations(
                         for (event_name, entries) in hooks_obj {
                             if let Some(entries_arr) = entries.as_array() {
                                 for entry in entries_arr {
-                                    let matcher = entry.get("matcher")
+                                    let matcher = entry
+                                        .get("matcher")
                                         .and_then(|v| v.as_str())
                                         .map(|s| s.to_string());
-                                    if let Some(inner_hooks) = entry.get("hooks").and_then(|v| v.as_array()) {
+                                    if let Some(inner_hooks) =
+                                        entry.get("hooks").and_then(|v| v.as_array())
+                                    {
                                         for hook in inner_hooks {
-                                            let hook_type = hook.get("type")
+                                            let hook_type = hook
+                                                .get("type")
                                                 .and_then(|v| v.as_str())
                                                 .unwrap_or("command");
                                             let handler = match hook_type {
                                                 "command" => HookHandler::Command {
-                                                    command: hook.get("command")
+                                                    command: hook
+                                                        .get("command")
                                                         .and_then(|v| v.as_str())
-                                                        .unwrap_or("").to_string(),
+                                                        .unwrap_or("")
+                                                        .to_string(),
                                                     env: BTreeMap::new(),
                                                 },
                                                 "http" => HookHandler::Http {
-                                                    url: hook.get("url")
+                                                    url: hook
+                                                        .get("url")
                                                         .and_then(|v| v.as_str())
-                                                        .unwrap_or("").to_string(),
+                                                        .unwrap_or("")
+                                                        .to_string(),
                                                     method: None,
                                                 },
                                                 other => HookHandler::Skipped {

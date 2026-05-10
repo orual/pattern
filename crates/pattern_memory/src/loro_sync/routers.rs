@@ -58,10 +58,18 @@ impl EventRouter for PathFanoutRouter {
         for debounced in events {
             for path in &debounced.event.paths {
                 if let Some(sender) = self.inner.subscribers.get(path) {
+                    // Build a per-subscriber event with paths filtered to
+                    // only this subscription's path. notify-debouncer can
+                    // coalesce multiple close-in-time writes (or a file-
+                    // modify + parent-dir-modify pair) into one DebouncedEvent
+                    // whose `paths` includes multiple files; if we sent the
+                    // unfiltered clone, subscriber A would receive events
+                    // whose paths include B's file, which is wrong.
+                    let mut tailored = debounced.clone();
+                    tailored.event.paths = vec![path.clone()];
                     // try_send: if a subscriber is slow, drop the event
-                    // rather than block the whole router. Subscribers should
-                    // size their channel for a typical edit burst.
-                    let _ = sender.try_send(debounced.clone());
+                    // rather than block the whole router.
+                    let _ = sender.try_send(tailored);
                 }
             }
         }

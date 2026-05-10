@@ -144,7 +144,7 @@ impl TurnSink for TurnSinkBridge {
             SpawnSource::Sibling { .. } => "Sibling",
             SpawnSource::Fork { .. } => "Fork",
         };
-        tracing::info!(
+        tracing::trace!(
             batch_id = %self.batch_id,
             agent_id = %self.agent_id,
             source = %source_kind,

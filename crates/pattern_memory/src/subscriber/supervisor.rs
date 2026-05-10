@@ -228,12 +228,12 @@ mod tests {
                     let doc = StructuredDocument::new_text();
                     // open_router_owned works even if the file does not exist.
                     let path = std::path::PathBuf::from("/tmp/stale-block-dummy.md");
-                    let memory_doc = Arc::new(doc.inner().clone());
+                    let loro_handle = doc.inner().clone();
                     let bridge = Arc::new(BlockSchemaBridge::new(BlockSchema::text()));
                     Arc::new(
                         SyncedDoc::open_router_owned(SyncedDocConfig {
                             path,
-                            memory_doc,
+                            doc: loro_handle,
                             bridge,
                             event_channel_bound: 1,
                             conflict_policy: ConflictPolicy::AutoMerge,

@@ -2,19 +2,19 @@
 source: crates/pattern_cli/src/tui/app.rs
 expression: output
 ---
-[you] Hello                                                                         agent processing query...
-                                                                                     panel ─────────────────────────────
-World
-Stop: EndTurn
-
-
-
-
-
-
-
-
-
+[you] Hello                                                                        │agent processing query...
+                                                                                   │ panel ─────────────────────────────
+World                                                                              │
+Stop: EndTurn                                                                      │
+                                                                                   │
+                                                                                   │
+                                                                                   │
+                                                                                   │
+                                                                                   │
+                                                                                   │
+                                                                                   │
+                                                                                   │
+                                                                                   │
 ❯
 
  no fronting configured │ 0 agents │ 0 ctx │ ● connected │ panel: visible
