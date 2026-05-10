@@ -26,6 +26,8 @@
 
 use std::sync::Arc;
 
+use pattern_core::spawn::SpawnSource;
+use pattern_core::traits::SpawnSinkFactory;
 use pattern_core::traits::turn_sink::{TurnEvent, TurnSink};
 use smol_str::SmolStr;
 
@@ -62,16 +64,50 @@ pub struct TurnSinkBridge {
     batch_id: SmolStr,
     agent_id: SmolStr,
     tx: EventTx,
+    /// Origin tag stamped on every emitted event. Defaults to
+    /// [`SpawnSource::Main`]; set to an Ephemeral / Sibling / Fork
+    /// variant when the bridge is constructed for a sub-spawn.
+    source: SpawnSource,
 }
 
 impl TurnSinkBridge {
-    /// Create a new bridge for a single batch.
+    /// Create a new main-batch bridge. Source defaults to
+    /// [`SpawnSource::Main`]. For sub-spawns use [`Self::with_source`].
     pub fn new(batch_id: SmolStr, agent_id: SmolStr, tx: EventTx) -> Self {
         Self {
             batch_id,
             agent_id,
             tx,
+            source: SpawnSource::Main,
         }
+    }
+
+    /// Create a bridge for a sub-spawn that shares the parent's event
+    /// channel but tags emitted events with a different origin (and
+    /// usually a different batch_id and agent_id).
+    ///
+    /// Used by `run_ephemeral` and the future sibling/fork wiring to
+    /// route child output to a sidebar surface in the TUI without
+    /// dropping it into the main conversation transcript.
+    pub fn with_source(
+        batch_id: SmolStr,
+        agent_id: SmolStr,
+        tx: EventTx,
+        source: SpawnSource,
+    ) -> Self {
+        Self {
+            batch_id,
+            agent_id,
+            tx,
+            source,
+        }
+    }
+
+    /// Clone of the underlying event channel sender. Lets a parent
+    /// bridge fork off child bridges that share the same actor
+    /// destination.
+    pub fn event_tx(&self) -> EventTx {
+        self.tx.clone()
     }
 }
 
@@ -94,14 +130,26 @@ impl TurnSink for TurnSinkBridge {
             // Per-agent emitters leave mount_path None; the actor's
             // fan_out resolves agent → mount via `agent_to_mount`.
             mount_path: None,
+            source: self.source.clone(),
         };
         // Lock-free, unbounded, never blocks.
         // Failure means the daemon actor has been dropped — discard silently.
-        tracing::trace!(
+        //
+        // Diagnostic info-level log naming the source variant so we can
+        // verify SpawnSource tagging end-to-end without TUI plumbing.
+        // Drop back to trace once issue 1 is fully wired.
+        let source_kind = match &self.source {
+            SpawnSource::Main => "Main",
+            SpawnSource::Ephemeral { .. } => "Ephemeral",
+            SpawnSource::Sibling { .. } => "Sibling",
+            SpawnSource::Fork { .. } => "Fork",
+        };
+        tracing::info!(
             batch_id = %self.batch_id,
             agent_id = %self.agent_id,
+            source = %source_kind,
             event = ?tagged.event,
-            "TurnSinkBridge::emit sending to event_tx"
+            "TurnSinkBridge::emit"
         );
         let _ = self.tx.send(tagged);
     }
@@ -147,6 +195,42 @@ impl TurnSink for MultiplexSink {
     fn emit(&self, event: TurnEvent) {
         let guard = self.inner.read().expect("multiplex sink lock poisoned");
         guard.emit(event);
+    }
+}
+
+/// [`SpawnSinkFactory`] implementation that mints fresh
+/// [`TurnSinkBridge`]s sharing a single durable [`EventTx`] channel.
+///
+/// The daemon constructs one of these per session and installs it on
+/// the [`SessionContext`] so that
+/// `fork_for_ephemeral` (and the future sibling/fork wirings) can
+/// mint child sinks with the right [`SpawnSource`] tag. Decoupling
+/// the factory from the per-batch [`MultiplexSink`] keeps the
+/// factory durable across the daemon's batch-by-batch sink swaps.
+#[derive(Debug, Clone)]
+pub struct BridgeFactory {
+    event_tx: EventTx,
+}
+
+impl BridgeFactory {
+    pub fn new(event_tx: EventTx) -> Self {
+        Self { event_tx }
+    }
+}
+
+impl SpawnSinkFactory for BridgeFactory {
+    fn fork_for_spawn(
+        &self,
+        batch_id: SmolStr,
+        agent_id: SmolStr,
+        source: SpawnSource,
+    ) -> Arc<dyn TurnSink> {
+        Arc::new(TurnSinkBridge::with_source(
+            batch_id,
+            agent_id,
+            self.event_tx.clone(),
+            source,
+        ))
     }
 }
 

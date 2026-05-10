@@ -428,6 +428,17 @@ impl MemoryCache {
 
     /// Load a block from database, reconstructing StructuredDocument from snapshot + deltas.
     /// The permission parameter is the effective permission for this access (already calculated).
+    /// Returns true if two block schemas are compatible enough to share a
+    /// loro doc — i.e. their top-level container kinds match. Two `Text`
+    /// schemas are compatible; `Text` and `Map` are not.
+    ///
+    /// Used by the soft-delete reactivation path: reusing the same loro
+    /// doc state with a different container layout would produce a block
+    /// whose stored shape disagrees with its declared schema.
+    fn schema_compatible_static(a: &BlockSchema, b: &BlockSchema) -> bool {
+        std::mem::discriminant(a) == std::mem::discriminant(b)
+    }
+
     fn load_from_db(
         &self,
         agent_id: &str,
@@ -447,10 +458,33 @@ impl MemoryCache {
             _ => return Ok(None),
         };
 
+        Ok(Some(self.hydrate_doc_from_db(&block, effective_permission)?))
+    }
+
+    /// Rebuild a `CachedBlock` from a DB `MemoryBlock` row by replaying its
+    /// snapshot + outstanding updates. Does NOT consult `is_active` — the
+    /// caller is responsible for deciding whether reading a soft-deleted
+    /// block makes sense in their context.
+    ///
+    /// Used by:
+    /// - `load_from_db` (read path, after filtering is_active = true)
+    /// - `create_block`'s soft-delete reactivation branch (rebuilds the
+    ///   prior incarnation's doc so that the new BlockCreate's content is
+    ///   applied as a CRDT edit on top, preserving update history and
+    ///   continuing the seq sequence — rather than starting from seq 0
+    ///   and colliding with the prior incarnation's update rows on the
+    ///   `(block_id, seq)` UNIQUE constraint).
+    fn hydrate_doc_from_db(
+        &self,
+        block: &pattern_db::models::MemoryBlock,
+        effective_permission: MemoryPermission,
+    ) -> MemoryResult<CachedBlock> {
         // Build BlockMetadata from DB block.
-        let mut metadata = db_block_to_metadata(&block);
+        let mut metadata = db_block_to_metadata(block);
         // Override with effective permission (may differ for shared blocks).
         metadata.permission = effective_permission;
+
+        let agent_id = block.agent_id.clone();
 
         // Get and apply any updates since the snapshot.
         let (_checkpoint, updates) =
@@ -459,12 +493,12 @@ impl MemoryCache {
 
         // Create StructuredDocument from snapshot with metadata.
         let doc = if block.loro_snapshot.is_empty() {
-            StructuredDocument::new_with_metadata(metadata.clone(), Some(agent_id.to_string()))
+            StructuredDocument::new_with_metadata(metadata.clone(), Some(agent_id.clone()))
         } else {
             StructuredDocument::from_snapshot_with_metadata(
                 &block.loro_snapshot,
                 metadata.clone(),
-                Some(agent_id.to_string()),
+                Some(agent_id.clone()),
             )?
         };
 
@@ -475,13 +509,13 @@ impl MemoryCache {
         let last_seq = updates.last().map(|u| u.seq).unwrap_or(block.last_seq);
         let frontier = doc.current_version();
 
-        Ok(Some(CachedBlock {
+        Ok(CachedBlock {
             doc,
             last_seq,
             last_persisted_frontier: Some(frontier),
             dirty: false,
             last_accessed: Utc::now(),
-        }))
+        })
     }
 
     /// Persist changes for a block (export delta, write to DB).
@@ -2031,7 +2065,9 @@ impl MemoryStore for MemoryCache {
             updated_at: now,
         };
 
-        // Create new StructuredDocument with metadata.
+        // Create new StructuredDocument with metadata. Mutable because the
+        // soft-delete-undelete path may need to swap the id later (after we
+        // discover an existing inactive row to reactivate).
         let doc =
             StructuredDocument::new_with_metadata(block_metadata.clone(), Some(agent_id.clone()));
 
@@ -2104,11 +2140,11 @@ impl MemoryStore for MemoryCache {
         let frontier = doc.current_version().get_frontiers();
 
         // Create MemoryBlock for DB.
-        let db_block = pattern_db::models::MemoryBlock {
+        let mut db_block = pattern_db::models::MemoryBlock {
             id: block_id.clone(),
             agent_id: agent_id.clone(),
             label,
-            description,
+            description: description.clone(),
             block_type,
             char_limit: effective_char_limit as i64,
             permission,
@@ -2124,29 +2160,134 @@ impl MemoryStore for MemoryCache {
             updated_at: now,
         };
 
-        // Store in DB.
-        pattern_db::queries::create_block(&*self.db.get().mem()?, &db_block).mem()?;
-
-        // Add to cache (metadata is embedded in doc).
+        // Soft-delete + Memory.create idempotency: if a block with the same
+        // (agent_id, label) exists but is_active = false, reuse its row
+        // rather than failing on the UNIQUE(agent_id, label) constraint.
         //
-        // `last_persisted_frontier` is set to `None` rather than `Some(vv)`
-        // so that the first `persist()` call always performs a full snapshot
-        // export instead of attempting a delta. This is a defensive choice:
-        // callers typically mutate the returned doc (e.g. `import_from_json`)
-        // before calling `persist_block`, and the full-snapshot path
-        // guarantees the content reaches the DB regardless of version-vector
-        // comparison subtleties with the empty initial doc.
-        let cached_block = CachedBlock {
-            doc: doc.clone(),
-            last_seq: 0,
-            last_persisted_frontier: None,
-            dirty: false,
-            last_accessed: now,
+        // CRDT semantic: the reactivation is treated as another edit on the
+        // existing loro doc, NOT a fresh start. We hydrate the soft-deleted
+        // block's doc from snapshot + outstanding updates, then apply any
+        // metadata changes from the new BlockCreate (description, char_limit,
+        // permission). Subsequent content writes from the caller (typically
+        // `write_text_into` + `persist_block` in the SDK Memory.Create handler)
+        // become CRDT operations that advance the doc's version vector,
+        // generating new `memory_block_updates` rows at `last_seq + 1`,
+        // `last_seq + 2`, ... — no collision on the `(block_id, seq)` UNIQUE
+        // constraint with the prior incarnation's update history.
+        //
+        // Schema mismatch errors. The loro doc structure is schema-bound
+        // (Text vs Map vs List vs Log); reusing a Text doc with a Map schema
+        // would produce a doc whose container layout disagrees with its
+        // metadata. The loro library itself can technically handle mixed
+        // containers, but the resulting block would be silently broken from
+        // the agent's perspective. Surface the mismatch as a typed error.
+        //
+        // If the existing row IS active, fall through to `create_block` which
+        // surfaces the UNIQUE(agent_id, label) conflict as a typed error.
+        let existing = pattern_db::queries::get_block_by_label(
+            &*self.db.get().mem()?,
+            &agent_id,
+            &db_block.label,
+        )
+        .mem()?;
+
+        let (mut final_doc, cached) = if let Some(prev) = existing {
+            if !prev.is_active {
+                // ---- Reactivation path: hydrate prev doc, apply metadata diffs ----
+
+                // Schema must match. db_block_to_metadata extracts the schema
+                // from the stored metadata JSON; compare against the new
+                // BlockCreate's schema (carried on `block_metadata`).
+                let prev_metadata = db_block_to_metadata(&prev);
+                if !Self::schema_compatible_static(&prev_metadata.schema, &block_metadata.schema) {
+                    return Err(MemoryError::Other(format!(
+                        "create_block: cannot reactivate soft-deleted block {label:?} \
+                         with a different schema (was {prev_schema:?}, requested {new_schema:?}). \
+                         Use a different label, or restore the prior schema.",
+                        label = db_block.label,
+                        prev_schema = prev_metadata.schema,
+                        new_schema = block_metadata.schema,
+                    )));
+                }
+
+                // Rebuild the prior incarnation's doc + cached state.
+                let mut hydrated = self.hydrate_doc_from_db(&prev, permission)?;
+
+                // Apply metadata diffs from the new BlockCreate. The doc's
+                // BlockMetadata is mutated in place; loro state (snapshot,
+                // frontier, last_seq) is preserved.
+                {
+                    let meta = hydrated.doc.metadata_mut();
+                    meta.description = description.clone();
+                    meta.char_limit = effective_char_limit;
+                    meta.permission = permission;
+                    meta.block_type = block_type;
+                    meta.updated_at = now;
+                }
+                hydrated.dirty = true;
+                hydrated.last_accessed = now;
+
+                // Build a MemoryBlock for reactivate_block that carries the
+                // new metadata fields BUT preserves prev's loro state
+                // (snapshot, frontier, last_seq). This way the row's metadata
+                // is overwritten with caller-supplied values while the CRDT
+                // history continues from where it was.
+                db_block.id = prev.id.clone();
+                db_block.loro_snapshot = prev.loro_snapshot.clone();
+                db_block.frontier = prev.frontier.clone();
+                db_block.last_seq = prev.last_seq;
+                db_block.created_at = prev.created_at;
+
+                let updated = pattern_db::queries::reactivate_block(
+                    &*self.db.get().mem()?,
+                    &prev.id,
+                    &db_block,
+                )
+                .mem()?;
+                if updated == 0 {
+                    return Err(MemoryError::Other(format!(
+                        "reactivate_block: row vanished between get and update for id {}",
+                        prev.id
+                    )));
+                }
+
+                let returned_doc = hydrated.doc.clone();
+                (returned_doc, hydrated)
+            } else {
+                // Active row exists — surface the UNIQUE conflict.
+                pattern_db::queries::create_block(&*self.db.get().mem()?, &db_block).mem()?;
+                let cached = CachedBlock {
+                    doc: doc.clone(),
+                    last_seq: 0,
+                    last_persisted_frontier: None,
+                    dirty: false,
+                    last_accessed: now,
+                };
+                (doc, cached)
+            }
+        } else {
+            // ---- Fresh-create path: no prior row ----
+            pattern_db::queries::create_block(&*self.db.get().mem()?, &db_block).mem()?;
+            let cached = CachedBlock {
+                doc: doc.clone(),
+                last_seq: 0,
+                last_persisted_frontier: None,
+                dirty: false,
+                last_accessed: now,
+            };
+            (doc, cached)
         };
 
-        self.blocks.insert(block_id, cached_block);
+        let block_id = db_block.id.clone();
+        // Ensure the doc's metadata.id matches the canonical id (matters on
+        // the reactivation path where we adopt prev.id).
+        if final_doc.metadata().id != block_id {
+            final_doc.metadata_mut().id = block_id.clone();
+        }
 
-        Ok(doc)
+        self.blocks.insert(block_id, cached);
+
+        Ok(final_doc)
     }
 
     fn get_block(&self, scope: &Scope, label: &str) -> MemoryResult<Option<StructuredDocument>> {
@@ -3012,6 +3153,202 @@ mod tests {
             .list_blocks(BlockFilter::by_agent(Scope::global("agent_1").to_db_key()))
             .unwrap();
         assert_eq!(blocks.len(), 0);
+    }
+
+    #[test]
+    fn test_create_block_undeletes_soft_deleted() {
+        let (_dir, dbs) = test_dbs_with_agent();
+        let cache = MemoryCache::new(dbs);
+
+        // Create, delete, then recreate with the same label. Without the
+        // undelete-on-create logic this would fail with a UNIQUE conflict
+        // (the soft-deleted row keeps the label reserved).
+        let scope = Scope::global("agent_1");
+        cache
+            .create_block(
+                &scope,
+                BlockCreate::new("reusable", MemoryBlockType::Working, BlockSchema::text())
+                    .with_description("first incarnation")
+                    .with_char_limit(1000),
+            )
+            .unwrap();
+
+        // Capture the id so we can verify reactivation reuses it.
+        let first = cache.get_block(&scope, "reusable").unwrap().unwrap();
+        let first_id = first.metadata().id.clone();
+
+        cache.delete_block(&scope, "reusable").unwrap();
+        // Confirm read path treats it as gone.
+        assert!(cache.get_block(&scope, "reusable").unwrap().is_none());
+
+        // Recreate — must succeed, must reuse the same id, must apply
+        // the new description rather than the old one.
+        cache
+            .create_block(
+                &scope,
+                BlockCreate::new("reusable", MemoryBlockType::Working, BlockSchema::text())
+                    .with_description("second incarnation")
+                    .with_char_limit(1000),
+            )
+            .unwrap();
+
+        let second = cache.get_block(&scope, "reusable").unwrap().unwrap();
+        let second_id = second.metadata().id.clone();
+        assert_eq!(
+            first_id, second_id,
+            "reactivation must reuse the soft-deleted block's id"
+        );
+        assert_eq!(
+            second.metadata().description,
+            "second incarnation",
+            "new BlockCreate's description must overwrite the old one"
+        );
+
+        // List blocks: exactly one (the reactivated row), not two.
+        let blocks = cache
+            .list_blocks(BlockFilter::by_agent(scope.to_db_key()))
+            .unwrap();
+        assert_eq!(blocks.len(), 1, "reactivation must not produce a duplicate row");
+    }
+
+    #[test]
+    fn test_create_block_active_duplicate_still_errors() {
+        // The undelete logic only fires when the existing row is
+        // is_active = false. If the row is active, the original UNIQUE
+        // conflict behaviour must still surface — agents that genuinely
+        // collide on a label deserve to learn about it.
+        let (_dir, dbs) = test_dbs_with_agent();
+        let cache = MemoryCache::new(dbs);
+        let scope = Scope::global("agent_1");
+
+        cache
+            .create_block(
+                &scope,
+                BlockCreate::new("taken", MemoryBlockType::Working, BlockSchema::text())
+                    .with_description("first")
+                    .with_char_limit(1000),
+            )
+            .unwrap();
+
+        // Second create with the same label while the first is still
+        // active must error.
+        let result = cache.create_block(
+            &scope,
+            BlockCreate::new("taken", MemoryBlockType::Working, BlockSchema::text())
+                .with_description("second")
+                .with_char_limit(1000),
+        );
+        assert!(
+            result.is_err(),
+            "create_block must fail when the label is already in use by an active block"
+        );
+    }
+
+    #[test]
+    fn test_reactivation_continues_seq_after_content_writes() {
+        // Regression test for the soft-delete + recreate flow when the
+        // prior incarnation had persisted content (memory_block_updates
+        // rows at seq >= 1). Without seq-continuation, the second
+        // create's persist would collide on the (block_id, seq) UNIQUE
+        // constraint.
+        let (_dir, dbs) = test_dbs_with_agent();
+        let cache = MemoryCache::new(dbs);
+        let scope = Scope::global("agent_1");
+
+        // First incarnation: create + write + persist (advances last_seq).
+        let doc1 = cache
+            .create_block(
+                &scope,
+                BlockCreate::new("reusable", MemoryBlockType::Working, BlockSchema::text())
+                    .with_description("first incarnation")
+                    .with_char_limit(1000),
+            )
+            .unwrap();
+        doc1.set_text("first body", true).unwrap();
+        cache.mark_dirty(&scope.to_db_key(), "reusable");
+        cache.persist_block(&scope, "reusable").unwrap();
+
+        let id1 = doc1.metadata().id.clone();
+
+        // Soft-delete.
+        cache.delete_block(&scope, "reusable").unwrap();
+
+        // Second incarnation: create with new description, then write
+        // new content. This is what the SDK Memory.Create handler does.
+        let doc2 = cache
+            .create_block(
+                &scope,
+                BlockCreate::new("reusable", MemoryBlockType::Working, BlockSchema::text())
+                    .with_description("second incarnation")
+                    .with_char_limit(2000),
+            )
+            .unwrap();
+
+        // Reactivation must reuse the prior id.
+        let id2 = doc2.metadata().id.clone();
+        assert_eq!(id1, id2, "reactivation must reuse the soft-deleted block's id");
+
+        // The hydrated doc carries the prior content as the starting
+        // state — the new BlockCreate's content (none yet) hasn't been
+        // applied. The metadata diffs from the new BlockCreate ARE
+        // applied (description, char_limit).
+        assert_eq!(doc2.metadata().description, "second incarnation");
+        assert_eq!(doc2.metadata().char_limit, 2000);
+
+        // Write new content as a CRDT edit on top. This is the moment
+        // that previously collided with the prior incarnation's seq=1
+        // row. With seq-continuation it persists at seq=2+.
+        doc2.set_text("second body", true).unwrap();
+        cache.mark_dirty(&scope.to_db_key(), "reusable");
+        cache.persist_block(&scope, "reusable").unwrap();
+
+        // Verify visible content is the new body.
+        let rendered = cache
+            .get_rendered_content(&scope, "reusable")
+            .unwrap();
+        assert_eq!(rendered, Some("second body".to_string()));
+
+        // List blocks: exactly one row (the reactivated one).
+        let blocks = cache
+            .list_blocks(BlockFilter::by_agent(scope.to_db_key()))
+            .unwrap();
+        assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn test_reactivation_rejects_schema_mismatch() {
+        // Soft-delete a Text block, then try to recreate at the same
+        // label with a Map schema. Should error rather than silently
+        // produce a doc whose loro layout disagrees with its declared
+        // schema.
+        let (_dir, dbs) = test_dbs_with_agent();
+        let cache = MemoryCache::new(dbs);
+        let scope = Scope::global("agent_1");
+
+        cache
+            .create_block(
+                &scope,
+                BlockCreate::new("shapeshifter", MemoryBlockType::Working, BlockSchema::text())
+                    .with_description("text")
+                    .with_char_limit(1000),
+            )
+            .unwrap();
+        cache.delete_block(&scope, "shapeshifter").unwrap();
+
+        let result = cache.create_block(
+            &scope,
+            BlockCreate::new(
+                "shapeshifter",
+                MemoryBlockType::Working,
+                BlockSchema::Map { fields: Vec::new() },
+            )
+            .with_description("map")
+            .with_char_limit(1000),
+        );
+        assert!(
+            result.is_err(),
+            "reactivation with a different schema must error"
+        );
     }
 
     #[test]

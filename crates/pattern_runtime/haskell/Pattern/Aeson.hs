@@ -19,6 +19,8 @@ module Pattern.Aeson
   , emptyArray
     -- * ToJSON class
   , ToJSON(..)
+    -- * JSON serialisation
+  , encode
     -- * Lens accessors (from Pattern.Aeson.Lens)
   , key
   , members

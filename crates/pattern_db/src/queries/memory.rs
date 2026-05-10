@@ -490,6 +490,63 @@ pub fn deactivate_block(conn: &rusqlite::Connection, id: &str) -> DbResult<()> {
     Ok(())
 }
 
+/// Reactivate a soft-deleted memory block in place, replacing all metadata
+/// fields with values from `block` while preserving the row's primary key.
+///
+/// Used by `MemoryCache::create_block` when a `BlockCreate` request targets
+/// a label whose previous block was soft-deleted: rather than failing with
+/// a UNIQUE conflict on `(agent_id, label)`, we reuse the existing row,
+/// flip `is_active` back to true, and overwrite metadata + content. This
+/// makes `Memory.delete` followed by `Memory.create` with the same label
+/// idempotent from the caller's perspective.
+///
+/// Returns the number of rows updated (0 if `id` doesn't exist or was
+/// already active — caller should check via `get_block_by_label` first).
+pub fn reactivate_block(
+    conn: &rusqlite::Connection,
+    id: &str,
+    block: &MemoryBlock,
+) -> DbResult<usize> {
+    let updated = conn.execute(
+        "UPDATE memory_blocks SET
+            agent_id = ?2,
+            label = ?3,
+            description = ?4,
+            block_type = ?5,
+            char_limit = ?6,
+            permission = ?7,
+            pinned = ?8,
+            loro_snapshot = ?9,
+            content_preview = ?10,
+            metadata = ?11,
+            embedding_model = ?12,
+            is_active = 1,
+            frontier = ?13,
+            last_seq = ?14,
+            updated_at = ?15
+         WHERE id = ?1",
+        rusqlite::params![
+            id,
+            block.agent_id,
+            block.label,
+            block.description,
+            block.block_type,
+            block.char_limit,
+            block.permission,
+            block.pinned,
+            block.loro_snapshot,
+            block.content_preview,
+            block.metadata,
+            block.embedding_model,
+            block.frontier,
+            block.last_seq,
+            block.updated_at,
+        ],
+    )?;
+    Ok(updated)
+}
+
+
 /// Create a checkpoint for a memory block.
 pub fn create_checkpoint(
     conn: &rusqlite::Connection,

@@ -296,6 +296,10 @@ pub struct WireEphemeralConfig {
     pub timeout_ms: Option<i64>,
     pub prompt: Option<String>,
     pub model: Option<String>,
+    /// Caller-supplied label for the spawn (used as the suffix of
+    /// `<parent>:spawn:<name>`). `None` falls back to the auto-generated
+    /// spawn_id. See [`pattern_core::spawn::EphemeralConfig::name`].
+    pub name: Option<String>,
 }
 
 impl From<WireEphemeralConfig> for EphemeralConfig {
@@ -316,6 +320,7 @@ impl From<WireEphemeralConfig> for EphemeralConfig {
         if let Some(m) = w.model {
             cfg.model_id = Some(smol_str::SmolStr::from(m));
         }
+        cfg.name = w.name;
         cfg
     }
 }

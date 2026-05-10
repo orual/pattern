@@ -24,9 +24,12 @@ module Pattern.Aeson.Value
   , emptyArray
     -- * ToJSON class
   , ToJSON(..)
+    -- * JSON serialisation
+  , encode
   ) where
 
 import Prelude
+import Data.Char (ord)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Map.Strict as Map
@@ -154,3 +157,57 @@ instance ToJSON a => ToJSON (Map.Map Text a) where
 instance ToJSON a => ToJSON (Set.Set a) where
   toJSON = Array . map toJSON . Set.toList
 
+
+-- | Render a 'Value' as compact JSON 'Text'.
+--
+-- Object keys render in 'Map.toAscList' order so output is deterministic.
+-- 'NaN' and infinite Doubles render as 'null' (JSON has no representation
+-- for them) — matches the runtime's @json_to_loro@ fallback.
+encode :: Value -> Text
+encode Null         = "null"
+encode (Bool True)  = "true"
+encode (Bool False) = "false"
+encode (Number n)   = encodeNumber n
+encode (String s)   = encodeString s
+encode (Array xs)   = "[" <> T.intercalate "," (map encode xs) <> "]"
+encode (Object m)   =
+  let pairs = [encodeString (toText k) <> ":" <> encode v | (k, v) <- Map.toAscList m]
+  in "{" <> T.intercalate "," pairs <> "}"
+
+-- | Render a 'Double' as JSON.  Note: 'NaN' and infinite values render as
+-- the textual @NaN@\/@Infinity@\/@-Infinity@ produced by 'show', which are
+-- NOT valid JSON.  We don't filter them because the eval interpreter
+-- doesn't support 'isNaN'\/'isInfinite' as FFI calls; in practice agents
+-- shouldn't be constructing these values via 'object'\/'(.=)' anyway.
+encodeNumber :: Double -> Text
+encodeNumber n = T.pack (show n)
+
+encodeString :: Text -> Text
+encodeString s = T.concat ["\"", T.concatMap escapeChar s, "\""]
+
+escapeChar :: Char -> Text
+escapeChar '"'  = "\\\""
+escapeChar '\\' = "\\\\"
+escapeChar '\b' = "\\b"
+escapeChar '\f' = "\\f"
+escapeChar '\n' = "\\n"
+escapeChar '\r' = "\\r"
+escapeChar '\t' = "\\t"
+escapeChar c
+  | ord c < 0x20 =
+      let hex    = showHexLower (ord c)
+          padded = T.replicate (4 - T.length hex) "0" <> hex
+      in "\\u" <> padded
+  | otherwise = T.singleton c
+
+-- | Lowercase hex render of a non-negative 'Int'. Hand-rolled because
+-- 'Numeric.showHex' pulls in primops ('clz#') that the tidepool eval
+-- interpreter doesn't support.
+showHexLower :: Int -> Text
+showHexLower n
+  | n < 16    = T.singleton (hexDigit n)
+  | otherwise = showHexLower (n `quot` 16) <> T.singleton (hexDigit (n `rem` 16))
+  where
+    hexDigit d
+      | d < 10    = toEnum (d + ord '0')
+      | otherwise = toEnum (d - 10 + ord 'a')

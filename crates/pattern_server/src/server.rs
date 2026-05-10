@@ -482,7 +482,7 @@ impl DaemonServer {
             sessions: sessions.clone(),
             session_locks: Arc::new(DashMap::new()),
             partner_id: new_id(),
-            embedding_provider,
+            embedding_provider: None,
             available_agents: 0,
             batch_to_agent: batch_to_agent.clone(),
             constellation_registry_override: None,
@@ -632,16 +632,60 @@ impl DaemonServer {
         // Resolve the mount path once (used for mount-scoped fan-out below).
         // Per-agent emitters leave mount_path None — look it up in
         // agent_to_mount. Daemon-level emitters set it explicitly.
-        let mount_key: Option<PathBuf> =
-            event.mount_path.as_deref().map(PathBuf::from).or_else(|| {
+        //
+        // Spawns run under namespaced agent_ids (`<parent>:spawn:<name>`)
+        // which are NOT registered in agent_to_mount. Fall back to the
+        // parent_agent_id from the event's source so spawn events still
+        // resolve to the parent's mount and reach SubscribeAll subscribers.
+        let mount_key: Option<PathBuf> = event
+            .mount_path
+            .as_deref()
+            .map(PathBuf::from)
+            .or_else(|| {
                 self.agent_to_mount
                     .get(&event.agent_id)
                     .map(|p| p.value().clone())
+            })
+            .or_else(|| {
+                use crate::protocol::SpawnSource;
+                let parent = match &event.source {
+                    SpawnSource::Main => None,
+                    SpawnSource::Ephemeral { parent_agent_id, .. }
+                    | SpawnSource::Sibling { parent_agent_id, .. }
+                    | SpawnSource::Fork { parent_agent_id, .. } => {
+                        Some(SmolStr::from(parent_agent_id.as_str()))
+                    }
+                }?;
+                self.agent_to_mount.get(&parent).map(|p| p.value().clone())
             });
 
         // Per-agent subscribers.
-        if let Some(senders) = self.subscribers.get_mut(&event.agent_id) {
-            Self::deliver_to(senders, &event).await;
+        //
+        // Spawns (Ephemeral / Sibling / Fork) run under a namespaced agent_id
+        // (e.g. `pattern:spawn:foo`) but TUI clients subscribe to the parent
+        // (`pattern`). Resolve the parent_agent_id from the event's source and
+        // deliver to BOTH buckets — the parent so the user sees activity, the
+        // namespaced id for any client that explicitly subscribed to the spawn.
+        // Use a HashSet to avoid double-delivery if both ids resolve to the
+        // same string (shouldn't happen but cheap to be safe).
+        use crate::protocol::SpawnSource;
+        let mut delivered_keys: std::collections::HashSet<AgentId> =
+            std::collections::HashSet::new();
+        let parent_id: Option<AgentId> = match &event.source {
+            SpawnSource::Main => None,
+            SpawnSource::Ephemeral { parent_agent_id, .. }
+            | SpawnSource::Sibling { parent_agent_id, .. }
+            | SpawnSource::Fork { parent_agent_id, .. } => {
+                Some(SmolStr::from(parent_agent_id.as_str()))
+            }
+        };
+        for key in [Some(event.agent_id.clone()), parent_id].into_iter().flatten() {
+            if !delivered_keys.insert(key.clone()) {
+                continue;
+            }
+            if let Some(senders) = self.subscribers.get_mut(&key) {
+                Self::deliver_to(senders, &event).await;
+            }
         }
 
         // Per-mount subscribers.
@@ -1462,59 +1506,65 @@ impl DaemonServer {
         let first_party_skill_dir =
             std::path::PathBuf::from(pattern_runtime::sdk::FIRST_PARTY_SKILL_DIR);
 
-        let (cache_key, mounted) =
-            match pattern_memory::mount::attach(&canonical, Some(first_party_skill_dir.clone()), self.embedding_provider.clone()) {
-                Ok(m) => (canonical.clone(), m),
-                Err(pattern_memory::mount::MountError::NotFound { .. }) => {
-                    let paths = pattern_memory::PatternPaths::default_paths()
-                        .map_err(|e| format!("failed to resolve pattern paths: {e}"))?;
-                    let global_path = paths.standalone_mount_path(GLOBAL_PROJECT_ID);
+        let (cache_key, mounted) = match pattern_memory::mount::attach(
+            &canonical,
+            Some(first_party_skill_dir.clone()),
+            self.embedding_provider.clone(),
+        ) {
+            Ok(m) => (canonical.clone(), m),
+            Err(pattern_memory::mount::MountError::NotFound { .. }) => {
+                let paths = pattern_memory::PatternPaths::default_paths()
+                    .map_err(|e| format!("failed to resolve pattern paths: {e}"))?;
+                let global_path = paths.standalone_mount_path(GLOBAL_PROJECT_ID);
 
-                    // Cache hit on the shared global mount? Stash under the
-                    // calling canonical so future calls from the same path
-                    // skip straight to fast-path.
-                    if let Some(entry) = self.project_mounts.get(&global_path) {
-                        self.project_mounts.insert(canonical, entry.clone());
-                        return Ok(entry.clone());
-                    }
+                // Cache hit on the shared global mount? Stash under the
+                // calling canonical so future calls from the same path
+                // skip straight to fast-path.
+                if let Some(entry) = self.project_mounts.get(&global_path) {
+                    self.project_mounts.insert(canonical, entry.clone());
+                    return Ok(entry.clone());
+                }
 
-                    // Lazy-init the global standalone mount if it doesn't
-                    // exist yet. Standalone mode requires jj — surface a
-                    // clear error if jj isn't on PATH.
-                    if !global_path.join(".pattern.kdl").is_file() {
-                        let jj = pattern_memory::jj::JjAdapter::detect()
-                            .map_err(|e| format!("jj detection failed: {e}"))?
-                            .ok_or_else(|| {
-                                "global fallback mount requires jj on PATH \
+                // Lazy-init the global standalone mount if it doesn't
+                // exist yet. Standalone mode requires jj — surface a
+                // clear error if jj isn't on PATH.
+                if !global_path.join(".pattern.kdl").is_file() {
+                    let jj = pattern_memory::jj::JjAdapter::detect()
+                        .map_err(|e| format!("jj detection failed: {e}"))?
+                        .ok_or_else(|| {
+                            "global fallback mount requires jj on PATH \
                              (or run `pattern mount init` in a project directory)"
-                                    .to_owned()
-                            })?;
-                        pattern_memory::modes::standalone::init(GLOBAL_PROJECT_ID, &jj, &paths)
-                            .map_err(|e| format!("global mount init failed: {e}"))?;
-                        tracing::info!(
-                            mount = %global_path.display(),
-                            "lazy-initialized global standalone mount for non-project session"
-                        );
-                    }
-
-                    let mounted =
-                        pattern_memory::mount::attach(&global_path, Some(first_party_skill_dir), self.embedding_provider.clone())
-                            .map_err(|e| {
-                                format!(
-                                    "global mount attach failed at {}: {e}",
-                                    global_path.display()
-                                )
-                            })?;
-
-                    (global_path, mounted)
+                                .to_owned()
+                        })?;
+                    pattern_memory::modes::standalone::init(GLOBAL_PROJECT_ID, &jj, &paths)
+                        .map_err(|e| format!("global mount init failed: {e}"))?;
+                    tracing::info!(
+                        mount = %global_path.display(),
+                        "lazy-initialized global standalone mount for non-project session"
+                    );
                 }
-                Err(other) => {
-                    return Err(format!(
-                        "failed to attach mount at {}: {other}",
-                        canonical.display()
-                    ));
-                }
-            };
+
+                let mounted = pattern_memory::mount::attach(
+                    &global_path,
+                    Some(first_party_skill_dir),
+                    self.embedding_provider.clone(),
+                )
+                .map_err(|e| {
+                    format!(
+                        "global mount attach failed at {}: {e}",
+                        global_path.display()
+                    )
+                })?;
+
+                (global_path, mounted)
+            }
+            Err(other) => {
+                return Err(format!(
+                    "failed to attach mount at {}: {other}",
+                    canonical.display()
+                ));
+            }
+        };
 
         // Load the persisted FrontingSet for this constellation. A missing
         // row is fine (default-empty); a malformed row is logged and treated
@@ -2281,6 +2331,7 @@ fn build_fronting_changed_event(
             rules,
         },
         mount_path,
+        source: SpawnSource::Main,
     }
 }
 
@@ -2300,6 +2351,7 @@ pub(crate) fn build_constellation_changed_event(
             kind: kind.to_string(),
         },
         mount_path,
+        source: SpawnSource::Main,
     }
 }
 
@@ -2779,6 +2831,19 @@ async fn open_session_with_persona(
     )
     .await
     .map_err(|e| format!("failed to open session for {agent_id}: {e}"))?;
+
+    // Install a `BridgeFactory` on the session so that
+    // `fork_for_ephemeral` (and the future sibling/fork wirings) can mint
+    // child turn-sinks tagged with the right `SpawnSource` variant. The
+    // factory shares the daemon's stable `EventTx`, so child events fan
+    // out through the same actor → subscribers path as parent events but
+    // carry a `SpawnSource::Ephemeral { ... }` tag for sidebar routing
+    // in TUI clients.
+    session
+        .context()
+        .install_spawn_sink_factory(Arc::new(crate::bridge::BridgeFactory::new(
+            event_tx.clone(),
+        )));
 
     let agent_session = AgentSession {
         session: Arc::new(session),

@@ -7,8 +7,9 @@
 -- which composes cleanly with Haskell pattern-matching and avoids
 -- introducing a two-field constructor for every method.
 --
--- JSON-encoded payloads ('TaskSpec', 'TaskPatch', 'TaskStatus',
--- 'TaskFilter', 'GraphQuery') are passed as opaque 'Text' blobs.  The
+-- JSON-encoded payloads ('TaskSpec', 'TaskCreateRequest', 'TaskPatch',
+-- 'TaskStatus', 'TaskFilter', 'GraphQuery') are passed as opaque 'Text'
+-- blobs.  The
 -- runtime decodes them on the Rust side; agents that want typed
 -- construction should use the helpers below or build the JSON via
 -- @Pattern.Aeson@.
@@ -16,7 +17,7 @@
 -- This module is always imported qualified:
 --
 -- > import qualified Pattern.Tasks as Tasks
--- > Tasks.create block specJson
+-- > Tasks.create block requestJson  -- requestJson :: TaskCreateRequest
 --
 -- 'List' is named as-is (no underscore suffix needed) because the
 -- qualified import prevents collision with 'Prelude.list' or other
@@ -50,6 +51,25 @@ type TaskEdgeRef = Text
 -- >   "metadata": Value             -- required; use null for none
 -- > }
 type TaskSpec = Text
+
+-- | JSON-encoded request payload for 'Create'. A single 'Create' call can
+-- seed a fresh TaskList block with N items in one shot, optionally setting
+-- the block's description at the same time. Schema:
+--
+-- > {
+-- >   "block_description": Text?,   -- optional; describes the *block*,
+-- >                                 -- applied only when this call auto-
+-- >                                 -- creates the block. Ignored when the
+-- >                                 -- target block already exists.
+-- >   "items": [TaskSpec]           -- required; non-empty list of items
+-- >                                 -- to add. Ids returned in input order.
+-- > }
+--
+-- The Create call returns a JSON-encoded array of 'TaskItemId' strings, in
+-- the same order as @items@. Use @Pattern.Aeson@ to decode if you need to
+-- bind individual ids; for fire-and-forget creates the array text is fine
+-- to log/display as-is.
+type TaskCreateRequest = Text
 
 -- | JSON-encoded task patch. Only provided fields are updated; omitted
 -- fields are left untouched. Schema:
@@ -127,12 +147,16 @@ type GraphSlice = Text
 -- the @#[core(module = \"Pattern.Tasks\", name = \"...\")]@ derive
 -- attributes decode them without manual mapping.
 --
--- 'Create' is the only constructor that returns a non-unit, non-text
--- value: it returns the newly-minted 'TaskItemId'.
+-- 'Create' returns a JSON-encoded array of 'TaskItemId' strings (one
+-- per item in the request).  The other constructors return either unit
+-- or a structured payload as documented per-constructor.
 data Tasks a where
-  Create     :: BlockHandle  -> TaskSpec   -> Tasks TaskItemId
-  -- ^ Create a new task item in the given block.  Returns the
-  -- assigned 'TaskItemId'.
+  Create     :: BlockHandle  -> TaskCreateRequest -> Tasks Text
+  -- ^ Create one or more task items in the given block, optionally
+  -- auto-creating the TaskList block (with 'block_description' from
+  -- the request) if it doesn't exist yet.  Returns a JSON-encoded
+  -- array of 'TaskItemId' strings, in the same order as @items@.
+  -- Decode with @Pattern.Aeson@ if you need to bind individual ids.
   Update     :: TaskEdgeRef  -> TaskPatch  -> Tasks ()
   -- ^ Apply a partial patch to an existing task.  Unspecified fields
   -- are left unchanged.  Returns 'MemoryError::TaskNotFound' if the
@@ -159,11 +183,18 @@ data Tasks a where
   -- ^ Append a comment to a task.  The runtime attaches the current
   -- agent's id and a timestamp automatically.
 
--- | Create a new task item in @block@ with a JSON-encoded spec.
+-- | Create one or more task items in @block@.  @request@ is a
+-- JSON-encoded 'TaskCreateRequest' (@{block_description?, items: [TaskSpec]}@);
+-- the block is auto-created as a TaskList if it doesn't exist, applying
+-- @block_description@ at that point.
 --
--- Returns the assigned 'TaskItemId'.
-create :: Member Tasks effs => BlockHandle -> TaskSpec -> Eff effs TaskItemId
-create block spec = send (Create block spec)
+-- Returns a JSON-encoded array of 'TaskItemId' strings in input order.
+-- Use @Pattern.Aeson@ to decode if you need individual ids:
+--
+-- > ids <- Tasks.create "my-tasks" requestJson
+-- > -- ids :: Text — e.g. \"[\\\"01HXX...\\\",\\\"01HXY...\\\"]\"
+create :: Member Tasks effs => BlockHandle -> TaskCreateRequest -> Eff effs Text
+create block request = send (Create block request)
 
 -- | Apply a partial patch to the task addressed by @ref@.
 --

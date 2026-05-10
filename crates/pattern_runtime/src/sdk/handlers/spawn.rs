@@ -158,14 +158,24 @@ fn handle_ephemeral(
     let lib_dir =
         synthesize_program_lib(&cfg.program).map_err(|e| EffectError::Handler(e.to_string()))?;
 
+    // Mint the child id + progress-log label first, so they can flow
+    // into `fork_for_ephemeral` and tag the child's turn_sink with
+    // `SpawnSource::Ephemeral { spawn_id, progress_log_label }` (when the
+    // parent has a `SpawnSinkFactory` installed — daemon-driven sessions
+    // do, headless/test sessions don't).
+    let child_id: SmolStr = new_id();
+    let progress_log_label: SmolStr = format!("spawn-log-{child_id}").into();
+
     // Build child include paths + child SessionContext via the parent's
     // fork helper (capability set + costume override applied there).
     let child_includes = child_include_paths(parent, lib_dir.as_ref());
-    let child_ctx = parent.fork_for_ephemeral(&cfg, child_caps, Arc::new(child_includes.clone()));
-
-    // Mint the child id + progress-log label.
-    let child_id: SmolStr = new_id();
-    let progress_log_label: SmolStr = format!("spawn-log-{child_id}").into();
+    let child_ctx = parent.fork_for_ephemeral(
+        &cfg,
+        child_caps,
+        Arc::new(child_includes.clone()),
+        child_id.clone(),
+        progress_log_label.clone(),
+    );
 
     // Create the constellation-scoped progress-log block synchronously
     // before the runner is spawned. The parent gets the label back as
@@ -675,6 +685,7 @@ mod tests {
             timeout_ms: None,
             prompt: None,
             model: None,
+            name: None,
         }
     }
 

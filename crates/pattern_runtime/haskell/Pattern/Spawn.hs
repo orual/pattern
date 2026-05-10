@@ -124,6 +124,12 @@ data EphemeralConfig = EphemeralConfig
   , ephemeralTimeoutMs    :: Maybe Int
   , ephemeralPrompt       :: Maybe Text
   , ephemeralModel        :: Maybe Text
+  -- | Optional caller-supplied label. Used as the suffix of the child's
+  -- namespaced execution agent_id (@\"\<parent\>:spawn:\<name\>\"@). When
+  -- @Nothing@ or blank, the suffix falls back to the auto-generated spawn_id.
+  -- Multiple spawns sharing a name share an agent_id by design — name = group,
+  -- spawn_id = instance, batch_ids stay distinct.
+  , ephemeralName         :: Maybe Text
   }
 
 -- | Config for a forked child session.

@@ -325,18 +325,32 @@ mod tests {
         let db = ConstellationDb::open_in_memory().unwrap();
         let conn = db.get().unwrap();
 
-        ensure_embeddings_table(&conn, 384).unwrap();
-        // Should be idempotent.
-        ensure_embeddings_table(&conn, 384).unwrap();
+        // Table is pre-created at 768 dims by ConstellationDb::open_in_memory;
+        // these calls just exercise the IF NOT EXISTS path.
+        ensure_embeddings_table(&conn, 768).unwrap();
+        ensure_embeddings_table(&conn, 768).unwrap();
+    }
+
+    /// Build a 768-dim embedding vector with the first `prefix.len()` components
+    /// taken from `prefix` and the rest zeros. The default schema (set in
+    /// `ConstellationDb::open_in_memory`) creates the embeddings vec0 table at
+    /// 768 dims, so test inserts must match that width.
+    fn pad_to_768(prefix: &[f32]) -> Vec<f32> {
+        let mut v = vec![0.0f32; 768];
+        v[..prefix.len()].copy_from_slice(prefix);
+        v
     }
 
     #[test]
     fn test_embedding_insert_and_search() {
         let db = ConstellationDb::open_in_memory().unwrap();
         let conn = db.get().unwrap();
-        ensure_embeddings_table(&conn, 4).unwrap();
+        // ConstellationDb::open_in_memory already created the vec0 table at
+        // 768 dims, so this call is a no-op (IF NOT EXISTS) — kept for the
+        // documentation value of asserting the dimension.
+        ensure_embeddings_table(&conn, 768).unwrap();
 
-        let embedding = vec![1.0f32, 0.0, 0.0, 0.0];
+        let embedding = pad_to_768(&[1.0, 0.0, 0.0, 0.0]);
         let rowid = insert_embedding(
             &conn,
             ContentType::Message,
@@ -348,7 +362,7 @@ mod tests {
         .unwrap();
         assert!(rowid >= 0);
 
-        let embedding2 = vec![0.9f32, 0.1, 0.0, 0.0];
+        let embedding2 = pad_to_768(&[0.9, 0.1, 0.0, 0.0]);
         insert_embedding(
             &conn,
             ContentType::Message,
@@ -359,7 +373,7 @@ mod tests {
         )
         .unwrap();
 
-        let embedding3 = vec![0.0f32, 0.0, 1.0, 0.0];
+        let embedding3 = pad_to_768(&[0.0, 0.0, 1.0, 0.0]);
         insert_embedding(
             &conn,
             ContentType::MemoryBlock,
@@ -370,7 +384,7 @@ mod tests {
         )
         .unwrap();
 
-        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+        let query = pad_to_768(&[1.0, 0.0, 0.0, 0.0]);
         let results = knn_search(&conn, &query, 3, None).unwrap();
 
         assert_eq!(results.len(), 3);
@@ -392,9 +406,9 @@ mod tests {
     fn test_embedding_delete() {
         let db = ConstellationDb::open_in_memory().unwrap();
         let conn = db.get().unwrap();
-        ensure_embeddings_table(&conn, 4).unwrap();
+        ensure_embeddings_table(&conn, 768).unwrap();
 
-        let embedding = vec![1.0f32, 0.0, 0.0, 0.0];
+        let embedding = pad_to_768(&[1.0, 0.0, 0.0, 0.0]);
         insert_embedding(
             &conn,
             ContentType::Message,
@@ -416,12 +430,12 @@ mod tests {
     fn test_embedding_stats() {
         let db = ConstellationDb::open_in_memory().unwrap();
         let conn = db.get().unwrap();
-        ensure_embeddings_table(&conn, 4).unwrap();
+        ensure_embeddings_table(&conn, 768).unwrap();
 
         let stats = get_embedding_stats(&conn).unwrap();
         assert_eq!(stats.total_embeddings, 0);
 
-        let emb = vec![1.0f32, 0.0, 0.0, 0.0];
+        let emb = pad_to_768(&[1.0, 0.0, 0.0, 0.0]);
         insert_embedding(&conn, ContentType::Message, "m1", &emb, None, None).unwrap();
         insert_embedding(&conn, ContentType::Message, "m2", &emb, None, None).unwrap();
         insert_embedding(&conn, ContentType::MemoryBlock, "b1", &emb, None, None).unwrap();

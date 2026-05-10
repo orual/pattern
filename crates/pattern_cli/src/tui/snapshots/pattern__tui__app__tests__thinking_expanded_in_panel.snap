@@ -1,13 +1,12 @@
 ---
 source: crates/pattern_cli/src/tui/app.rs
-assertion_line: 1927
 expression: output
 ---
 [you] Analyze this                                                                   thinking ──────────────────────────
                                                                                     Let me consider the options
-▸ thinking: Let me consider the options carefully... Option A is good. O...         carefully...
+▸ thinking: Let me consider the options carefully... Option A is good. Option B is bcarefully...
 I recommend option B.                                                               Option A is good.
-                                                                                    Option B is better.
+Stop: EndTurn                                                                       Option B is better.
 
 
 

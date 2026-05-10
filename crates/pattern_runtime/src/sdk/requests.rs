@@ -157,10 +157,10 @@ mod parity {
     fn parity_table_is_populated() {
         assert_eq!(
             EXPECTED.len(),
-            18,
-            "expected 18 SDK namespaces (Sources/Rpc retired in v3-sandbox-io \
-             Phase 4; Port + Wake + Fronting + Constellation added; \
-             14 originals + 4 new = 18); \
+            19,
+            "expected 19 SDK namespaces (Sources/Rpc retired in v3-sandbox-io \
+             Phase 4; Port + Wake + Fronting + Constellation + Web added; \
+             14 originals + 5 new = 19); \
              update this test when adding/removing one"
         );
         for (enum_name, variants) in EXPECTED {
@@ -342,6 +342,7 @@ mod parity {
             timeout_ms: None,
             prompt: None,
             model: None,
+            name: None,
         };
         let fork = WireForkConfig {
             program: String::new(),

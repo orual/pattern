@@ -2,9 +2,9 @@
 source: crates/pattern_cli/src/tui/conversation.rs
 expression: output
 ---
-
-Answer 8.
+Stop: EndTurn
 
 [you] Question 9
 
 Answer 9.
+Stop: EndTurn

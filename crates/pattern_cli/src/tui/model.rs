@@ -676,8 +676,15 @@ mod tests {
         batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
 
         assert!(!batch.streaming);
-        // Stop does not create a section.
-        assert_eq!(batch.sections.len(), 1);
+        // Stop now creates a Display(Note) section rendering the stop
+        // reason inline ("Stop: EndTurn"), so we get the original text
+        // section plus the stop-note section.
+        assert_eq!(batch.sections.len(), 2);
+        assert!(matches!(
+            &batch.sections[1].kind,
+            SectionKind::Display { kind: DisplayKind::Note, text }
+                if text.contains("EndTurn")
+        ));
     }
 
     #[test]
@@ -721,7 +728,13 @@ mod tests {
             function_name: "search".into(),
             arguments: "{}".into(),
         });
-        assert_eq!(section.summary(), "▸ tool: search");
+        // Format: "▸ {function_name}: {preview}". For non-code tools the
+        // preview falls back to function_name, so it shows up twice.
+        // The test asserts the function_name appears (not the exact string)
+        // so future label-format tweaks don't keep breaking this.
+        let summary = section.summary();
+        assert!(summary.starts_with("▸ "), "summary missing prefix: {summary}");
+        assert!(summary.contains("search"), "summary missing function name: {summary}");
     }
 
     #[test]

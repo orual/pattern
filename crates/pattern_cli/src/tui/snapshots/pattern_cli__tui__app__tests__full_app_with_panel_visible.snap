@@ -1,21 +1,20 @@
 ---
 source: crates/pattern_cli/src/tui/app.rs
-assertion_line: 1882
 expression: output
 ---
-[you] Hello agent                                                                   agent started
-                                                                                     panel ─────────────────────────────
-The answer is 42.                                                                   processing query...
-
-
-
-
-
-
-
-
-
-
+[you] Hello agent                                                                  │agent started
+                                                                                   │ panel ─────────────────────────────
+The answer is 42.                                                                  │processing query...
+Stop: EndTurn                                                                      │
+                                                                                   │
+                                                                                   │
+                                                                                   │
+                                                                                   │
+                                                                                   │
+                                                                                   │
+                                                                                   │
+                                                                                   │
+                                                                                   │
 ❯
 
  no fronting configured │ 0 agents │ 0 ctx │ ● connected │ panel: visible

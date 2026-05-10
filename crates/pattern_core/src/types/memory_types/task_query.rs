@@ -105,6 +105,36 @@ pub struct TaskSpec {
 
 // endregion: TaskSpec
 
+// region: TaskCreateRequest
+
+/// Wire format for a `Tasks.create` call: optional block-level metadata
+/// (consulted only when this call auto-creates the target block) plus the
+/// list of task items to add.
+///
+/// A single call may seed a fresh TaskList with N items in one operation.
+/// If the target block already exists, `block_description` is ignored and
+/// the block's existing description is preserved; the items are appended
+/// to the existing list.
+///
+/// `items` must be non-empty — calling `Create` with zero items is a
+/// programming error and surfaces as `TaskHandlerError::EmptyCreate`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TaskCreateRequest {
+    /// Optional human-readable description for the *block* itself.
+    /// Applied only when this Create call auto-creates the underlying
+    /// TaskList block. Use this to label the list as a whole (\"auth
+    /// refactor tasks\", \"v3 release\") — describing individual items
+    /// is the job of each `TaskSpec.subject`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_description: Option<String>,
+    /// Task items to add to the block, in order. Each item gets its own
+    /// minted `TaskItemId`; ids are returned in the same order as the
+    /// input items.
+    pub items: Vec<TaskSpec>,
+}
+
+// endregion: TaskCreateRequest
+
 // region: TaskPatch
 
 /// Partial update to an existing task item.

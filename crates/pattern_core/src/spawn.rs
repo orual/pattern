@@ -55,6 +55,20 @@ pub struct EphemeralConfig {
     /// Model override. When `Some`, the child uses this model instead of
     /// inheriting the parent's. When `None`, inherits.
     pub model_id: Option<smol_str::SmolStr>,
+    /// Optional caller-supplied label for the spawn. Used as the suffix
+    /// of the child's namespaced execution agent_id
+    /// (`<parent>:spawn:<name>`). When `None` or blank, the suffix
+    /// falls back to the auto-generated `spawn_id`.
+    ///
+    /// Multiple spawns sharing a name intentionally share an agent_id —
+    /// name = group, spawn_id = instance. Distinct batch_ids preserve
+    /// per-turn routing on the wire; storage aggregates same-named
+    /// spawns under one history thread.
+    ///
+    /// Tidy values (matching `[a-zA-Z0-9_-]+`, ≤64 chars) recommended for
+    /// readability in TUI sidebars and storage queries; the runtime does
+    /// not currently enforce a regex.
+    pub name: Option<String>,
 }
 
 impl EphemeralConfig {
@@ -66,7 +80,14 @@ impl EphemeralConfig {
             timeout: None,
             prompt: None,
             model_id: None,
+            name: None,
         }
+    }
+
+    /// Set the spawn name (used as suffix of `<parent>:spawn:<name>`).
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 
     /// Override the system prompt with a costume string.
@@ -304,6 +325,7 @@ mod tests {
             timeout: None,
             prompt: Some("hello".to_string()),
             model_id: None,
+            name: Some("retrieval-helper".to_string()),
         };
 
         let json = serde_json::to_string(&original).expect("serialise must succeed");
@@ -507,4 +529,62 @@ mod tests {
             assert_eq!(back, variant);
         }
     }
+}
+
+// ── SpawnSource ──────────────────────────────────────────────────────────────
+
+/// Origin of a turn-event in the spawn graph.
+///
+/// Lives in `pattern_core` (rather than the wire-protocol crate) because
+/// the runtime needs to talk about it: when a child session is spawned,
+/// the parent's [`SpawnSinkFactory`](crate::traits::SpawnSinkFactory) is
+/// consulted to mint the child's tagged turn-sink, and that requires
+/// passing a `SpawnSource` through APIs that are below the wire layer.
+///
+/// The wire-protocol crate (`pattern_server`) re-exports this type so
+/// existing call sites continue to spell it as
+/// `pattern_server::protocol::SpawnSource`.
+///
+/// `Main` is the default for back-compat: any tagged event that doesn't
+/// explicitly carry a source is treated as primary-conversation output.
+/// Bridges for ephemeral / sibling / fork batches set the appropriate
+/// variant at construction time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SpawnSource {
+    /// Top-level agent turn — the primary conversation transcript.
+    #[default]
+    Main,
+    /// Ephemeral worker spawned via `Pattern.Spawn.Ephemeral`. Lives
+    /// for one bounded task and disappears.
+    ///
+    /// The execution agent_id of an ephemeral is namespaced as
+    /// `<parent_agent_id>:spawn:<spawn_id>` so storage and routing
+    /// naturally distinguish spawn batches from parent batches without
+    /// schema migrations or special-cased queries.
+    Ephemeral {
+        /// Stable id of the ephemeral child for this turn.
+        spawn_id: String,
+        /// Agent id of the parent that spawned this child. Used by
+        /// TUI consumers to group spawn entries under the correct
+        /// parent's sidebar.
+        parent_agent_id: String,
+        /// Memory block label where the child's progress log is being
+        /// appended; lets the TUI link the sidebar entry to the
+        /// persistent record after the spawn completes.
+        progress_log_label: String,
+    },
+    /// Sibling persona — a peer agent in the same constellation.
+    Sibling {
+        /// Persona id of the sibling whose turn this event belongs to.
+        persona_id: String,
+        /// Agent id of the parent that spawned this sibling.
+        parent_agent_id: String,
+    },
+    /// Fork — an isolated copy of an agent that runs concurrently.
+    Fork {
+        /// Stable id of the fork.
+        fork_id: String,
+        /// Agent id of the parent the fork was branched from.
+        parent_agent_id: String,
+    },
 }

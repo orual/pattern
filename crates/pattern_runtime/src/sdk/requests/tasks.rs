@@ -12,7 +12,7 @@ pub enum TasksReq {
     #[core(module = "Pattern.Tasks", name = "Create")]
     Create(
         String, /* BlockHandle */
-        String, /* TaskSpec JSON */
+        String, /* TaskCreateRequest JSON: {block_description?:Text, items:[TaskSpec]} */
     ),
 
     #[core(module = "Pattern.Tasks", name = "Update")]

@@ -67,6 +67,11 @@ pub struct TuiLayout {
     pub status_bar: Rect,
     /// Side panel area. `None` when the panel is hidden.
     pub panel: Option<Rect>,
+    /// One-column-wide vertical divider between the conversation and the
+    /// side panel. Only `Some` when `panel_visibility` is `Visible` —
+    /// `Expanded` has no conversation to divide from, and `Hidden` has no
+    /// panel.
+    pub separator: Option<Rect>,
     /// The effective panel visibility after auto-hide logic.
     ///
     /// Callers can read this to detect when the panel was force-hidden by the
@@ -120,12 +125,25 @@ pub fn compute_layout_with_panel(
             input,
             status_bar,
             panel: None,
+            separator: None,
             panel_visibility: PanelVisibility::Hidden,
         },
         PanelVisibility::Visible => {
-            // Horizontal split of the upper region: [conversation | panel].
+            // Horizontal split of the upper region: [conversation | sep | panel].
+            // The 1-column separator carves out of the conversation side so
+            // that the panel keeps its requested percentage width.
             let panel_width = (upper.width as u32 * panel_pct as u32 / 100) as u16;
-            let conv_width = upper.width.saturating_sub(panel_width);
+            // Separator is 1 column wide, but only when there's room for both
+            // sides to remain non-empty after carving it out. On extremely
+            // narrow terminals (auto-hide should already have kicked in by
+            // MIN_PANEL_WIDTH=100, so this is defensive) we skip the
+            // separator and fall back to the original adjacent-column layout.
+            let post_panel_conv = upper.width.saturating_sub(panel_width);
+            let (sep_width, conv_width) = if post_panel_conv >= 2 {
+                (1u16, post_panel_conv - 1)
+            } else {
+                (0u16, post_panel_conv)
+            };
 
             let conv_area = Rect {
                 x: upper.x,
@@ -133,8 +151,18 @@ pub fn compute_layout_with_panel(
                 width: conv_width,
                 height: upper.height,
             };
+            let separator = if sep_width > 0 {
+                Some(Rect {
+                    x: upper.x + conv_width,
+                    y: upper.y,
+                    width: sep_width,
+                    height: upper.height,
+                })
+            } else {
+                None
+            };
             let panel_area = Rect {
-                x: upper.x + conv_width,
+                x: upper.x + conv_width + sep_width,
                 y: upper.y,
                 width: panel_width,
                 height: upper.height,
@@ -145,6 +173,7 @@ pub fn compute_layout_with_panel(
                 input,
                 status_bar,
                 panel: Some(panel_area),
+                separator,
                 panel_visibility: PanelVisibility::Visible,
             }
         }
@@ -155,6 +184,7 @@ pub fn compute_layout_with_panel(
                 input,
                 status_bar,
                 panel: Some(upper),
+                separator: None,
                 panel_visibility: PanelVisibility::Expanded,
             }
         }
@@ -290,11 +320,13 @@ mod tests {
             .expect("conversation should be Some when visible");
         assert!(panel.width > 0, "panel must have non-zero width");
         assert!(conv.width > 0, "conversation must have non-zero width");
+        let sep_width = layout.separator.map(|r| r.width).unwrap_or(0);
         assert_eq!(
-            conv.width + panel.width,
+            conv.width + sep_width + panel.width,
             120,
-            "conversation + panel must fill terminal width"
+            "conversation + separator + panel must fill terminal width"
         );
+        assert_eq!(sep_width, 1, "Visible mode must carve a 1-column separator");
         // Input and status bar are always full width.
         assert_eq!(
             layout.input.width, 120,
@@ -414,9 +446,16 @@ mod tests {
         // 40% of 200 = 80, but the split is on the upper area width which is
         // the full terminal width (input/status are always full width).
         assert_eq!(panel.width, 80, "panel should be 40% of terminal width");
+        // Conversation gets the rest of the upper area minus the 1-col
+        // separator: 200 - 80 - 1 = 119.
         assert_eq!(
-            conv.width, 120,
-            "conversation should be 60% of terminal width"
+            conv.width, 119,
+            "conversation should be 60% of terminal width minus separator"
+        );
+        assert_eq!(
+            layout.separator.map(|r| r.width).unwrap_or(0),
+            1,
+            "Visible mode must carve a 1-col separator"
         );
     }
 

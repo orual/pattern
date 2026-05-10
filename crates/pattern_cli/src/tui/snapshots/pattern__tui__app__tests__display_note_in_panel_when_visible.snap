@@ -1,12 +1,11 @@
 ---
 source: crates/pattern_cli/src/tui/app.rs
-assertion_line: 1979
 expression: output
 ---
 [you] Hello                                                                         agent processing query...
                                                                                      panel ─────────────────────────────
 World
-
+Stop: EndTurn
 
 
 

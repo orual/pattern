@@ -26,4 +26,6 @@ pub use port::Port;
 pub use port_registry::PortRegistry;
 pub use provider_client::ProviderClient;
 pub use session::Session;
+pub mod spawn_sink_factory;
+pub use spawn_sink_factory::SpawnSinkFactory;
 pub use turn_sink::{DisplayKind, NoOpSink, TurnEvent, TurnSink, VecSink};

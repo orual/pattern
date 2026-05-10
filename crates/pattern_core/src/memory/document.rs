@@ -1388,16 +1388,9 @@ impl StructuredDocument {
                             }
                         }
 
-                        // Description excerpt (first line or ~80 chars).
+                        // Description excerpt
                         if !description.is_empty() {
-                            let excerpt = description
-                                .lines()
-                                .next()
-                                .unwrap_or(&description)
-                                .chars()
-                                .take(80)
-                                .collect::<String>();
-                            out.push_str(&format!("    description: {excerpt}\n"));
+                            out.push_str(&format!("    description: {description}\n"));
                         }
                     } else {
                         // Non-map item — render as debug.

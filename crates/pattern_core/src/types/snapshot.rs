@@ -174,6 +174,11 @@ pub struct PersonaSnapshot {
     // -- Session-state serialization ------------------------------------
     /// MCP server configs loaded from persona KDL. These are merged with
     /// plugin-sourced configs at session open and fed to McpRegistry.
+    ///
+    /// Feature-gated on `mcp-client` to match the `crate::mcp` module's
+    /// gating; on builds without that feature, snapshots serialize without
+    /// this field (and skip-if-empty keeps existing snapshots compatible).
+    #[cfg(feature = "mcp-client")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<crate::mcp::McpServerConfig>,
 
@@ -212,6 +217,7 @@ impl PersonaSnapshot {
             capabilities: None,
             policy_rules: Vec::new(),
             extra: serde_json::Value::Null,
+            #[cfg(feature = "mcp-client")]
             mcp_servers: Vec::new(),
             open_files: Vec::new(),
         }

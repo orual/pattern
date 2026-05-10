@@ -696,7 +696,25 @@ pub struct TaggedTurnEvent {
     /// Phase 6 T8 introduces this field.
     #[serde(default)]
     pub mount_path: Option<String>,
+    /// Where this event originated from in the spawn graph.
+    ///
+    /// Defaults to [`SpawnSource::Main`] for back-compat with older
+    /// emitters and existing wire payloads. TUI clients use this to
+    /// route ephemeral / sibling / fork output into a sidebar (or
+    /// otherwise distinguish it from the primary conversation
+    /// transcript) instead of letting it merge inline.
+    ///
+    /// Issue 1 of the spawn/fork redesign (2026-05-09) introduces
+    /// this field. Bridges constructed for non-main batches
+    /// populate it with the appropriate variant; the existing
+    /// per-agent main-batch path leaves it at the default.
+    #[serde(default)]
+    pub source: SpawnSource,
 }
+
+/// Re-export from `pattern_core` so existing call sites continue to spell
+/// this as `pattern_server::protocol::SpawnSource`.
+pub use pattern_core::spawn::SpawnSource;
 
 /// Static metadata about a running agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1165,6 +1183,7 @@ mod tests {
             agent_id: "agent-1".into(),
             event: WireTurnEvent::Text("hello world".into()),
             mount_path: None,
+            source: SpawnSource::Main,
         };
         let bytes = postcard::to_allocvec(&event).unwrap();
         let decoded: TaggedTurnEvent = postcard::from_bytes(&bytes).unwrap();
@@ -1224,6 +1243,7 @@ mod tests {
             agent_id: "agent-2".into(),
             event: WireTurnEvent::Stop(StopReason::EndTurn),
             mount_path: None,
+            source: SpawnSource::Main,
         };
         let bytes = postcard::to_allocvec(&event).unwrap();
         let decoded: TaggedTurnEvent = postcard::from_bytes(&bytes).unwrap();
@@ -1345,6 +1365,7 @@ mod tests {
                 rules: vec![],
             },
             mount_path: Some("/path/to/mount".into()),
+            source: SpawnSource::Main,
         };
         let bytes = postcard::to_allocvec(&event).unwrap();
         let decoded: TaggedTurnEvent = postcard::from_bytes(&bytes).unwrap();

@@ -675,12 +675,29 @@ fn load_snapshot_blocks_with_visibility(
             let rendered = render_block_for_snapshot(&doc, true);
 
             // Persona is NEVER rendered inline (already in segment 1).
-            // Otherwise: Full always renders everything; Delta applies
-            // the pinned/block_refs visibility gate for Working blocks.
+            // Otherwise: Full and Delta both gate Working blocks on
+            // pinned/block_refs (Core is always visible). Full additionally
+            // ignores the "unchanged since last shown" check so eligible
+            // blocks always render fresh on full snapshots.
+            //
+            // Bug history: an earlier version of this code unconditionally
+            // set visible=true on Full, which caused every skill-* working
+            // block to render fully on every full snapshot — blowing out
+            // context with ~40 skill bodies the agent rarely reads. The fix
+            // (originally landed 2026-05-05, regressed at some point) is
+            // below. See reflections block + scratchpad note.
             let visible = if is_persona {
                 false
             } else if is_full {
-                true
+                use pattern_core::types::memory_types::MemoryBlockType;
+                match doc.block_type() {
+                    MemoryBlockType::Core => true,
+                    MemoryBlockType::Working | _ => {
+                        let label = doc.label();
+                        doc.is_pinned()
+                            || block_refs.iter().any(|r| r.label.as_str() == label)
+                    }
+                }
             } else {
                 block_visibility_from_hashes(&doc, block_refs, shown_hashes, rendered.content_hash)
             };

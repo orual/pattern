@@ -1580,6 +1580,96 @@ impl App {
             _ => {}
         }
 
+        // Route non-Main spawn events (ephemeral / sibling / fork) into
+        // the panel's spawn-feed so they don't merge into the main agent's
+        // conversation transcript. Each spawn gets its own grouped entry.
+        // Route non-Main spawn events into the panel's spawn-feed using
+        // the new namespaced agent_id structure. Each spawn gets its own
+        // grouped entry whose batch is rendered via the conversation
+        // crate's `render_batch` (full ToolCall/Display/Thinking fidelity).
+        //
+        // Visibility-gated: when the panel is Hidden, the events still get
+        // accumulated into spawn entries — they surface when the user opens
+        // the panel — and the parent's main conversation transcript is left
+        // alone (no merge into the parent agent's batches). When Visible,
+        // we auto-switch to SpawnFeed so the activity is visible.
+        use pattern_server::protocol::SpawnSource;
+        use super::panel::SpawnEntryKind;
+        let routing_info: Option<(String, String, SpawnEntryKind)> = match &tagged.source {
+            SpawnSource::Main => None,
+            SpawnSource::Ephemeral {
+                spawn_id,
+                parent_agent_id: _,
+                progress_log_label: _,
+            } => {
+                // The wire's tagged.agent_id is now the namespaced execution
+                // id (`<parent>:spawn:<name-or-spawn_id>`). Use that as the
+                // entry key so multiple spawns with the same `name` collapse
+                // into one history thread, while distinct spawn_ids keep
+                // distinct keys when no name was supplied.
+                //
+                // Label suffix comes from the agent_id (everything after
+                // `:spawn:`) when present, else falls back to spawn_id short.
+                // Named spawns render as `ephemeral name-test`; unnamed as
+                // `ephemeral 37dd2fad`.
+                let suffix: String = tagged
+                    .agent_id
+                    .rsplit_once(":spawn:")
+                    .map(|(_, s)| s.to_string())
+                    .unwrap_or_else(|| spawn_id[..spawn_id.len().min(8)].to_string());
+                Some((
+                    tagged.agent_id.to_string(),
+                    format!("ephemeral {suffix}"),
+                    SpawnEntryKind::Ephemeral,
+                ))
+            }
+            SpawnSource::Sibling {
+                persona_id,
+                parent_agent_id: _,
+            } => Some((
+                tagged.agent_id.to_string(),
+                format!("sibling {persona_id}"),
+                SpawnEntryKind::Sibling,
+            )),
+            SpawnSource::Fork {
+                fork_id,
+                parent_agent_id: _,
+            } => {
+                let short = &fork_id[..fork_id.len().min(8)];
+                Some((
+                    tagged.agent_id.to_string(),
+                    format!("fork {short}"),
+                    SpawnEntryKind::Fork,
+                ))
+            }
+        };
+        if let Some((key, label, kind)) = routing_info {
+            // Mirror the event into the spawn-feed panel for the focused
+            // drill-down view. Main conversation rendering (below) ALSO
+            // sees this event and will attribute it via tagged.agent_id
+            // (which is namespaced for spawns, e.g. `pattern:spawn:foo`),
+            // so the user sees spawn output inline regardless of panel
+            // visibility. The panel stays as an opt-in focused view.
+            let was_first = self.panel_state.push_spawn_event(
+                &key,
+                &label,
+                kind,
+                &tagged.event,
+            );
+            // Auto-switch panel content to SpawnFeed on first event for any
+            // spawn IF the panel is already visible. Don't force-show a
+            // hidden panel — events still appear inline in main conversation.
+            if was_first
+                && self.panel_visibility != PanelVisibility::Hidden
+                && self.panel_state.content != PanelContent::SpawnFeed
+            {
+                self.panel_state.prev_content_before_spawn_feed =
+                    Some(self.panel_state.content);
+                self.panel_state.content = PanelContent::SpawnFeed;
+            }
+            // FALL THROUGH to conversation rendering — do not early-return.
+        }
+
         // Route Display events to panel/toast instead of the conversation batch.
         if let WireTurnEvent::Display { kind, ref text } = tagged.event {
             if self.panel_visibility == PanelVisibility::Hidden {
@@ -1661,6 +1751,19 @@ impl App {
                 frame.buffer_mut(),
                 &mut self.conversation,
             );
+        }
+
+        // Vertical separator between conversation and side panel (only in
+        // Visible mode where both are present). Drawn as a column of light
+        // box-drawing verticals so the visual divide reads as deliberate
+        // rather than as touching widget chrome.
+        if let Some(sep_rect) = layout.separator {
+            let buf = frame.buffer_mut();
+            for y in sep_rect.y..sep_rect.y.saturating_add(sep_rect.height) {
+                if let Some(cell) = buf.cell_mut((sep_rect.x, y)) {
+                    cell.set_symbol("\u{2502}");
+                }
+            }
         }
 
         // Side panel (when visible or expanded).
@@ -1783,6 +1886,21 @@ fn replace_trailing_mention(text: &str, value: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Render the input area with the InputHandler's textarea.
+/// Truncate a string to at most `max` characters, replacing the tail with
+/// an ellipsis. Used by the spawn-feed routing path so panel entries
+/// don't explode with full ToolCall payloads.
+fn truncate_for_panel(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max).collect();
+        out.push('\u{2026}');
+        out
+    }
+}
+
+
+
 fn render_input_area(area: Rect, buf: &mut Buffer, focus: Focus, input: &InputHandler) {
     let prompt_colour = if focus == Focus::Input {
         Color::Cyan
@@ -1882,6 +2000,7 @@ mod tests {
             agent_id: SmolStr::new_static("test-agent"),
             event,
             mount_path: None,
+            source: pattern_server::protocol::SpawnSource::Main,
         }
     }
 

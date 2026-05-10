@@ -306,6 +306,15 @@ pub struct SessionContext {
     /// `pattern_core::traits::VecSink`; headless runs use
     /// [`NoOpSink`] (the default).
     turn_sink: Arc<dyn TurnSink>,
+    /// Optional [`SpawnSinkFactory`] for minting child turn-sinks tagged
+    /// with the appropriate [`SpawnSource`] variant. Set by the daemon
+    /// (which has access to a stable wire `EventTx`); `None` for headless
+    /// and test sessions, in which case child sessions inherit the
+    /// parent's `turn_sink` verbatim. Wrapped in `RwLock` so the daemon
+    /// can install the factory after `open_with_agent_loop` returns
+    /// without breaking that constructor's signature.
+    spawn_sink_factory:
+        Arc<std::sync::RwLock<Option<Arc<dyn pattern_core::traits::SpawnSinkFactory>>>>,
     /// Shared checkpoint log. Handlers record `(request, response)` pairs
     /// after a successful effect dispatch so restart-then-replay can
     /// deterministically re-drive the JIT. Wired to the same `Arc` as
@@ -786,6 +795,7 @@ impl SessionContext {
             router_bridge: None,
             pending_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
             turn_sink: Arc::new(NoOpSink),
+            spawn_sink_factory: Arc::new(std::sync::RwLock::new(None)),
             checkpoint_log: Arc::new(std::sync::Mutex::new(CheckpointLog::new())),
             current_turn: Arc::new(AtomicU64::new(0)),
             snapshot_policy: persona.context.snapshot_policy.clone(),
@@ -1093,6 +1103,8 @@ impl SessionContext {
         cfg: &pattern_core::spawn::EphemeralConfig,
         child_caps: pattern_core::CapabilitySet,
         child_include_paths: Arc<Vec<std::path::PathBuf>>,
+        child_id: smol_str::SmolStr,
+        progress_log_label: smol_str::SmolStr,
     ) -> Arc<SessionContext> {
         // Sub-registry concurrency limit. Half the parent's default is a
         // conservative starting point — ensembles-of-ensembles are a
@@ -1152,8 +1164,27 @@ impl SessionContext {
         });
         child_registry.install_watcher(cancel_watcher);
 
+        // Namespace the child's execution agent_id so storage / wire
+        // routing naturally distinguish spawn batches from the parent's
+        // own work. Format: `<parent_agent_id>:spawn:<spawn_id>`. The
+        // memory scope still inherits from parent (`default_scope` below)
+        // so block access stays parent-scoped — execution identity and
+        // persona/scope identity are intentionally split. See spawn-fork
+        // design notes for rationale.
+        // Suffix is `name` if the caller supplied one, otherwise the
+        // spawn_id. Named spawns let the caller see clear ids in TUI/storage
+        // (`pattern:spawn:retrieval-helper` instead of `pattern:spawn:37dd...`);
+        // multiple spawns sharing a name share an agent_id by design — name
+        // = group, spawn_id = instance, distinct batch_ids preserve per-turn
+        // routing.
+        let suffix: String = match cfg.name.as_deref() {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => child_id.to_string(),
+        };
+        let child_exec_agent_id: String = format!("{}:spawn:{}", self.agent_id, suffix);
+
         let child = SessionContext {
-            agent_id: self.agent_id.clone(),
+            agent_id: child_exec_agent_id,
             default_scope: self.default_scope.clone(),
             model_id: cfg
                 .model_id
@@ -1179,10 +1210,17 @@ impl SessionContext {
             // CapabilitySet.
             router_bridge: None,
             pending_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
-            // Inherit parent's turn sink so the child's display events
-            // surface in the same place as the parent's. Subscribers
-            // should disambiguate by agent_id when needed.
+            // Inherit parent's turn sink as a default. If the parent has
+            // a `spawn_sink_factory` installed, the child's turn_sink is
+            // post-construction replaced with a freshly minted bridge
+            // tagged `SpawnSource::Ephemeral { ... }` (see immediately
+            // after this struct literal). Headless / test sessions don't
+            // install a factory, so the inherit-verbatim path is the
+            // operative one for them.
             turn_sink: self.turn_sink.clone(),
+            // Children inherit the parent's factory so any grand-child
+            // ephemerals also get tagged sinks.
+            spawn_sink_factory: self.spawn_sink_factory.clone(),
             checkpoint_log: Arc::new(std::sync::Mutex::new(CheckpointLog::new())),
             current_turn: Arc::new(AtomicU64::new(0)),
             snapshot_policy: self.snapshot_policy.clone(),
@@ -1265,6 +1303,31 @@ impl SessionContext {
             fronting_committer: self.fronting_committer.clone(),
             mcp_registry: self.mcp_registry.clone(),
         };
+
+        // If parent has a SpawnSinkFactory installed (daemon-driven
+        // sessions), mint a tagged turn-sink for the child so its events
+        // reach the daemon's bus stamped with `SpawnSource::Ephemeral`.
+        // Headless / test sessions don't install a factory, in which case
+        // child.turn_sink stays as the inherited parent sink (typically
+        // NoOpSink) and this whole block is a no-op.
+        let mut child = child;
+        if let Some(factory) = self
+            .spawn_sink_factory
+            .read()
+            .expect("spawn_sink_factory lock poisoned")
+            .clone()
+        {
+            child.turn_sink = factory.fork_for_spawn(
+                child_id.clone(),
+                child.agent_id.clone().into(),
+                pattern_core::spawn::SpawnSource::Ephemeral {
+                    spawn_id: child_id.to_string(),
+                    parent_agent_id: self.agent_id.to_string(),
+                    progress_log_label: progress_log_label.to_string(),
+                },
+            );
+        }
+
         Arc::new(child)
     }
 
@@ -1435,6 +1498,34 @@ impl SessionContext {
     /// of the session's default routing.
     pub fn persona_scope(&self) -> pattern_core::types::memory_types::Scope {
         pattern_core::types::memory_types::Scope::Global(self.agent_id.clone().into())
+    }
+
+    /// Install a [`SpawnSinkFactory`] on this session. Called by the
+    /// daemon (typically right after `open_with_agent_loop`) so that
+    /// `fork_for_ephemeral` can mint child sinks tagged with the right
+    /// [`pattern_core::spawn::SpawnSource`] variant. Headless and test
+    /// sessions don't call this; their children inherit the parent's
+    /// (NoOp) sink unchanged.
+    pub fn install_spawn_sink_factory(
+        &self,
+        factory: Arc<dyn pattern_core::traits::SpawnSinkFactory>,
+    ) {
+        let mut guard = self
+            .spawn_sink_factory
+            .write()
+            .expect("spawn_sink_factory lock poisoned");
+        *guard = Some(factory);
+    }
+
+    /// Read the currently installed [`SpawnSinkFactory`], if any. Returns
+    /// a clone of the `Arc` so the caller can use it without holding the
+    /// internal lock.
+    pub fn spawn_sink_factory(&self) -> Option<Arc<dyn pattern_core::traits::SpawnSinkFactory>> {
+        let guard = self
+            .spawn_sink_factory
+            .read()
+            .expect("spawn_sink_factory lock poisoned");
+        guard.clone()
     }
 
     /// Replace the default [`NoOpSink`] with a caller-provided sink.

@@ -328,10 +328,11 @@ mod tests {
     #[test]
     fn scroll_down_at_bottom_engages_auto_scroll() {
         let mut state = make_state_with_thinking();
-        // Content: 1 user_msg + 1 intra-batch gap + 1 collapsed thinking + 1
-        // text = 4 lines. With viewport_height=1, bottom = 4-1 = 3. Start one
+        // Content: 1 user_msg + 1 intra-batch gap + 1 collapsed thinking +
+        // 1 text + 1 stop-note (Display section, non-collapsible) = 5
+        // lines. With viewport_height=1, bottom = 5-1 = 4. Start one
         // short of the bottom.
-        state.scroll_offset = 2;
+        state.scroll_offset = 3;
         state.auto_scroll = false;
 
         // Scroll down enough to hit or exceed the bottom.
@@ -342,7 +343,7 @@ mod tests {
             "auto_scroll must re-engage when scrolled to the bottom"
         );
         assert_eq!(
-            state.scroll_offset, 3,
+            state.scroll_offset, 4,
             "offset must be clamped to content bottom"
         );
     }

@@ -753,6 +753,7 @@ mod tests {
             EffectCategory::Wake,
             EffectCategory::Fronting,
             EffectCategory::Constellation,
+            EffectCategory::Web,
         ] {
             // Force exhaustive coverage at compile time. If a new variant
             // is added, the match below stops compiling until it's listed.

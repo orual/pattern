@@ -282,11 +282,27 @@ mod tests {
         }
     }
 
+    /// Helper: type text and submit it via the new double-Enter gesture.
+    /// First Enter inserts a newline (last line becomes empty), second
+    /// Enter submits because the last line is now empty. Returns the
+    /// final InputAction (the submit).
+    fn submit_text(handler: &mut InputHandler, s: &str) -> InputAction {
+        type_str(handler, s);
+        // First Enter: inserts newline (Changed) since input is non-empty
+        // and doesn't start with `/`.
+        handler.handle_key(special_key(KeyCode::Enter));
+        // Second Enter: last line is now empty → submits.
+        handler.handle_key(special_key(KeyCode::Enter))
+    }
+
     #[test]
     fn enter_submits_text() {
         let mut handler = InputHandler::new();
-        type_str(&mut handler, "hello");
-        let action = handler.handle_key(special_key(KeyCode::Enter));
+        // New behavior: single Enter on non-empty single line inserts a
+        // newline (Changed). Submit requires either Enter-on-empty-last-line
+        // ("double-tap") or input starting with `/`. submit_text simulates
+        // the double-Enter user gesture for plain-text submits.
+        let action = submit_text(&mut handler, "hello");
 
         match action {
             InputAction::Submit(parts) => {
@@ -334,11 +350,9 @@ mod tests {
     fn history_up_cycles() {
         let mut handler = InputHandler::new();
 
-        // Submit "a" and "b".
-        type_str(&mut handler, "a");
-        handler.handle_key(special_key(KeyCode::Enter));
-        type_str(&mut handler, "b");
-        handler.handle_key(special_key(KeyCode::Enter));
+        // Submit "a" and "b" (double-Enter gesture for non-slash text).
+        submit_text(&mut handler, "a");
+        submit_text(&mut handler, "b");
 
         // Up → should show "b" (most recent).
         handler.handle_key(special_key(KeyCode::Up));
@@ -353,9 +367,8 @@ mod tests {
     fn history_down_restores() {
         let mut handler = InputHandler::new();
 
-        // Submit "a".
-        type_str(&mut handler, "a");
-        handler.handle_key(special_key(KeyCode::Enter));
+        // Submit "a" (double-Enter gesture).
+        submit_text(&mut handler, "a");
 
         // Up → shows "a".
         handler.handle_key(special_key(KeyCode::Up));
@@ -370,9 +383,8 @@ mod tests {
     fn history_stashes_current_input() {
         let mut handler = InputHandler::new();
 
-        // Submit "a" to have history.
-        type_str(&mut handler, "a");
-        handler.handle_key(special_key(KeyCode::Enter));
+        // Submit "a" to have history (double-Enter gesture).
+        submit_text(&mut handler, "a");
 
         // Type "draft" (don't submit).
         type_str(&mut handler, "draft");
@@ -397,10 +409,9 @@ mod tests {
     fn history_max_size() {
         let mut handler = InputHandler::new();
 
-        // Push 60 entries.
+        // Push 60 entries (double-Enter gesture for non-slash text).
         for i in 0..60 {
-            type_str(&mut handler, &format!("msg{i}"));
-            handler.handle_key(special_key(KeyCode::Enter));
+            submit_text(&mut handler, &format!("msg{i}"));
         }
 
         // History should be capped at 50.

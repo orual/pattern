@@ -16,11 +16,14 @@ use tidepool_eval::Value;
 use pattern_core::AgentAuthor;
 use pattern_core::memory::StructuredDocument;
 use pattern_core::traits::MemoryStore;
-use pattern_core::types::block::{BlockWrite, BlockWriteKind};
+use pattern_core::types::block::{BlockCreate, BlockWrite, BlockWriteKind};
+use pattern_core::types::memory_types::BlockMetadataPatch;
 use pattern_core::types::ids::{TaskItemId, new_snowflake_id};
 use pattern_core::types::memory_types::{
-    BlockFilter, BlockSchema, MemoryError, Scope, TaskEdgeRef, TaskStatus,
-    task_query::{GraphQuery, GraphSlice, TaskFilter, TaskPatch, TaskSpec, TaskView},
+    BlockFilter, BlockSchema, MemoryBlockType, MemoryError, Scope, TaskEdgeRef, TaskStatus,
+    task_query::{
+        GraphQuery, GraphSlice, TaskCreateRequest, TaskFilter, TaskPatch, TaskSpec, TaskView,
+    },
 };
 use pattern_core::types::origin::Author;
 use smol_str::SmolStr;
@@ -68,6 +71,8 @@ impl DescribeEffect for TasksHandler {
                 // side. A future follow-up (B-full) replaces these with
                 // proper typed records flowing through the Core VM.
                 "type TaskSpec = Text  -- JSON: {subject:Text, description:Text, status?:TaskStatus-kebab, owner?:AgentId, active_form?:Text, metadata:Value}",
+                "type TaskCreateRequest = Text  -- JSON: {block_description?:Text, items:[TaskSpec]}  -- block_description applied only on auto-create",
+                "type TaskItemIdsJson = Text  -- JSON: [TaskItemId]  -- returned by Create, decode via Pattern.Aeson",
                 "type TaskPatch = Text  -- JSON: {subject?:Text, description?:Text, status?:TaskStatus-kebab, owner??:AgentId|null, active_form??:Text|null, metadata?:Value} -- `??` = omit (no change), null (clear), or value (set)",
                 "type TaskStatus = Text  -- kebab-case: \"pending\"|\"in-progress\"|\"blocked\"|\"completed\"|\"cancelled\"",
                 "type TaskFilter = Text  -- JSON: {status?:[TaskStatus-kebab], owner?:AgentId, has_blockers?:Bool, keyword?:Text, blocks?:[BlockHandle]}",
@@ -129,24 +134,37 @@ impl EffectHandler<SessionContext> for TasksHandler {
         };
 
         match req {
-            TasksReq::Create(block, spec_json) => {
-                let id = handle_create(&*store, &scope, &agent_id, &block, &spec_json)?;
+            TasksReq::Create(block, request_json) => {
+                let ids = handle_create(&*store, &scope, &agent_id, &block, &request_json)?;
                 record(&block, BlockWriteKind::Updated)?;
-                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
-                    pattern_core::hooks::tags::TASK_CREATED,
-                    serde_json::json!({ "task_id": id.to_string(), "block": block }),
-                ));
-                cx.respond(id.to_string())
+                // Emit one notification per minted task so listeners get
+                // per-item granularity (matches the prior single-item behaviour).
+                for id in &ids {
+                    cx.user()
+                        .hook_bridge()
+                        .emit(pattern_core::hooks::HookEvent::notification(
+                            pattern_core::hooks::tags::TASK_CREATED,
+                            serde_json::json!({ "task_id": id.to_string(), "block": block }),
+                        ));
+                }
+                let id_strings: Vec<String> =
+                    ids.into_iter().map(|id| id.to_string()).collect();
+                let payload = serde_json::to_string(&id_strings).map_err(|e| {
+                    EffectError::Handler(format!("Pattern.Tasks::Create: encode ids: {e}"))
+                })?;
+                cx.respond(payload)
             }
             TasksReq::Update(edge_ref, patch_json) => {
                 handle_update(&*store, &scope, &agent_id, &edge_ref, &patch_json)?;
                 if let Ok((block, _)) = parse_item_ref(&edge_ref) {
                     record(&block, BlockWriteKind::Updated)?;
                 }
-                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
-                    pattern_core::hooks::tags::TASK_CREATED,
-                    serde_json::json!({ "task_id": edge_ref, "operation": "update" }),
-                ));
+                cx.user()
+                    .hook_bridge()
+                    .emit(pattern_core::hooks::HookEvent::notification(
+                        pattern_core::hooks::tags::TASK_CREATED,
+                        serde_json::json!({ "task_id": edge_ref, "operation": "update" }),
+                    ));
                 cx.respond(())
             }
             TasksReq::Transition(edge_ref, status_json) => {
@@ -162,10 +180,12 @@ impl EffectHandler<SessionContext> for TasksHandler {
                     "cancelled" => pattern_core::hooks::tags::TASK_TRANSITIONED_CANCELED,
                     _ => pattern_core::hooks::tags::TASK_CREATED, // fallback for unknown
                 };
-                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
-                    transition_tag,
-                    serde_json::json!({ "task_id": edge_ref, "status": status_json }),
-                ));
+                cx.user()
+                    .hook_bridge()
+                    .emit(pattern_core::hooks::HookEvent::notification(
+                        transition_tag,
+                        serde_json::json!({ "task_id": edge_ref, "status": status_json }),
+                    ));
                 cx.respond(())
             }
             TasksReq::AddComment(edge_ref, text) => {
@@ -173,10 +193,12 @@ impl EffectHandler<SessionContext> for TasksHandler {
                 if let Ok((block, _)) = parse_item_ref(&edge_ref) {
                     record(&block, BlockWriteKind::Updated)?;
                 }
-                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
-                    pattern_core::hooks::tags::TASK_COMMENTED,
-                    serde_json::json!({ "task_id": edge_ref }),
-                ));
+                cx.user()
+                    .hook_bridge()
+                    .emit(pattern_core::hooks::HookEvent::notification(
+                        pattern_core::hooks::tags::TASK_COMMENTED,
+                        serde_json::json!({ "task_id": edge_ref }),
+                    ));
                 cx.respond(())
             }
             TasksReq::Link(source_ref, target_ref) => {
@@ -184,10 +206,12 @@ impl EffectHandler<SessionContext> for TasksHandler {
                 if let Ok((block, _)) = parse_item_ref(&source_ref) {
                     record(&block, BlockWriteKind::Updated)?;
                 }
-                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
-                    pattern_core::hooks::tags::TASK_LINKED,
-                    serde_json::json!({ "from": source_ref, "to": target_ref }),
-                ));
+                cx.user()
+                    .hook_bridge()
+                    .emit(pattern_core::hooks::HookEvent::notification(
+                        pattern_core::hooks::tags::TASK_LINKED,
+                        serde_json::json!({ "from": source_ref, "to": target_ref }),
+                    ));
                 cx.respond(())
             }
             TasksReq::Unlink(source_ref, target_ref) => {
@@ -205,13 +229,8 @@ impl EffectHandler<SessionContext> for TasksHandler {
                 let conn = cx.user().db().get().map_err(|e| {
                     EffectError::Handler(format!("Pattern.Tasks::List: db connection: {e}"))
                 })?;
-                let views = handle_list_tasks(
-                    &*store,
-                    &conn,
-                    &scope,
-                    block_opt.as_deref(),
-                    &filter_json,
-                )?;
+                let views =
+                    handle_list_tasks(&*store, &conn, &scope, block_opt.as_deref(), &filter_json)?;
                 let view_strs: Vec<String> = views
                     .iter()
                     .map(|v| serde_json::to_string(v).unwrap_or_default())
@@ -222,8 +241,7 @@ impl EffectHandler<SessionContext> for TasksHandler {
                 let conn = cx.user().db().get().map_err(|e| {
                     EffectError::Handler(format!("Pattern.Tasks::QueryGraph: db connection: {e}"))
                 })?;
-                let slice =
-                    handle_query_graph(&*store, &conn, &scope, &root_ref, &query_json)?;
+                let slice = handle_query_graph(&*store, &conn, &scope, &root_ref, &query_json)?;
                 cx.respond(serde_json::to_string(&slice).unwrap_or_default())
             }
         }
@@ -275,6 +293,11 @@ pub enum TaskHandlerError {
         scoped_block: String,
         filter_blocks: Vec<String>,
     },
+    /// `Tasks.create` was called with zero items. A create call must add at
+    /// least one task; if the agent only wants to bootstrap the block,
+    /// they should pass an items list with a single placeholder item.
+    #[error("Pattern.Tasks::Create: items list is empty (need at least one TaskSpec)")]
+    EmptyCreate,
 }
 
 impl From<TaskHandlerError> for EffectError {
@@ -525,33 +548,74 @@ fn record_task_write(
     Ok(())
 }
 
+
+/// Recompute the pin state of a TaskList block based on its items'
+/// statuses. Pinned iff at least one item is in a non-terminal status
+/// (Pending / InProgress / Blocked). Idempotent — safe to call after any
+/// status-mutating operation.
+///
+/// Called from `handle_create` (after items push), `handle_transition`,
+/// and `handle_update` (when the patch changes status). The auto-create
+/// branch of `handle_create` sets `pinned = true` directly on block
+/// creation; this helper handles the dynamic case (closing the last open
+/// item should unpin; reopening should re-pin).
+fn recompute_task_block_pin(
+    store: &dyn MemoryStore,
+    scope: &Scope,
+    block: &str,
+) -> Result<(), TaskHandlerError> {
+    let sdoc = fetch_task_list(store, scope, block)?;
+    let doc = sdoc.inner();
+    let list = doc.get_movable_list("items");
+
+    // Walk items and check each item's `status` field. Treat anything
+    // that isn't completed/cancelled as still open — including unknown
+    // values, so a corrupt or partially-written status keeps the block
+    // visible rather than silently hiding it.
+    let mut any_open = false;
+    for i in 0..list.len() {
+        let item = match list.get(i) {
+            Some(loro::ValueOrContainer::Container(loro::Container::Map(m))) => m,
+            _ => continue,
+        };
+        let status = item.get("status").and_then(|v| match v {
+            loro::ValueOrContainer::Value(LoroValue::String(s)) => Some(s.to_string()),
+            _ => None,
+        });
+        match status.as_deref() {
+            Some("completed") | Some("cancelled") => {}
+            _ => {
+                any_open = true;
+                break;
+            }
+        }
+    }
+
+    let patch = BlockMetadataPatch::default().pinned(any_open);
+    store
+        .update_block_metadata(scope, block, patch)
+        .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+    Ok(())
+}
+
 // endregion: helpers
 
 // region: handlers
 
 /// Create a new task item in the given block. Returns the minted item id.
-pub fn handle_create(
-    store: &dyn MemoryStore,
-    scope: &Scope,
-    _agent_id: &str,
-    block: &str,
-    spec_json: &str,
+/// Push one TaskSpec into the given TaskList movable list. Used by
+/// `handle_create` to add each item in a `TaskCreateRequest`. Does not
+/// commit or persist — the caller batches both for the whole request.
+fn push_task_item(
+    doc: &loro::LoroDoc,
+    spec: &TaskSpec,
 ) -> Result<TaskItemId, TaskHandlerError> {
-    let spec: TaskSpec =
-        serde_json::from_str(spec_json).map_err(|source| TaskHandlerError::Json {
-            what: "TaskSpec",
-            source,
-        })?;
-    let sdoc = fetch_task_list(store, scope, block)?;
-
     let item_id: TaskItemId = new_snowflake_id();
     let now = jiff::Timestamp::now();
 
     // Push a nested LoroMap container (NOT a value-map) so subsequent
-    // in-place mutations on individual fields (status, subject, comments,
-    // blocks...) produce proper CRDT ops and merge correctly under
-    // concurrent edits. See review finding I3.
-    let doc = sdoc.inner();
+    // in-place mutations on individual fields produce proper CRDT ops
+    // and merge correctly under concurrent edits.
     let list = doc.get_movable_list("items");
     let item_map = list
         .push_container(loro::LoroMap::new())
@@ -568,7 +632,7 @@ pub fn handle_create(
     if !spec.description.is_empty() {
         insert("description", &spec.description)?;
     }
-    let status = spec.status.unwrap_or(TaskStatus::Pending);
+    let status = spec.status.clone().unwrap_or(TaskStatus::Pending);
     insert("status", &task_status_kebab(status)?)?;
     if let Some(ref owner) = spec.owner {
         insert("owner", owner.as_str())?;
@@ -593,6 +657,95 @@ pub fn handle_create(
         .insert_container("blocks", loro::LoroList::new())
         .map_err(|e| TaskHandlerError::Loro(format!("insert_container blocks: {e}")))?;
 
+    Ok(item_id)
+}
+
+/// Create one or more task items in `block`, auto-creating the TaskList
+/// block if it doesn't already exist. Returns the minted ids in input
+/// order.
+///
+/// `request_json` decodes as a `TaskCreateRequest`. The `block_description`
+/// field is consulted only when this call auto-creates the block; ignored
+/// otherwise. The calling agent becomes the block's `default_owner` on
+/// auto-create unless the first item's `owner` overrides it.
+pub fn handle_create(
+    store: &dyn MemoryStore,
+    scope: &Scope,
+    agent_id: &str,
+    block: &str,
+    request_json: &str,
+) -> Result<Vec<TaskItemId>, TaskHandlerError> {
+    let request: TaskCreateRequest =
+        serde_json::from_str(request_json).map_err(|source| TaskHandlerError::Json {
+            what: "TaskCreateRequest",
+            source,
+        })?;
+
+    if request.items.is_empty() {
+        return Err(TaskHandlerError::EmptyCreate);
+    }
+
+    // Auto-create the TaskList block if it doesn't exist. The Tasks effect
+    // is the intended single entry point for task management — agents don't
+    // need to bootstrap the underlying block separately.
+    //
+    // Block-level defaults: the calling agent becomes `default_owner` (so
+    // subsequent items inherit ownership unless overridden per-item), and
+    // the description comes from `request.block_description` if provided,
+    // falling back to a neutral label. `default_status` stays unset (Pending
+    // is the implicit default) and `display_limit` stays None.
+    //
+    // If the block exists with a non-TaskList schema, fetch_task_list below
+    // surfaces the schema mismatch as `MemoryError::NotATaskList`. If it
+    // exists with the right schema, `block_description` on this call is
+    // ignored (the block keeps its existing description).
+    let exists = store
+        .get_block(scope, block)
+        .map_err(|e| TaskHandlerError::Store(e.to_string()))?
+        .is_some();
+    if !exists {
+        // Default the block's owner to the first item's owner if it has one,
+        // otherwise to the calling agent. Per-item owners on subsequent items
+        // still override this default.
+        let owner = request
+            .items
+            .first()
+            .and_then(|item| item.owner.clone())
+            .unwrap_or_else(|| SmolStr::new(agent_id));
+        let description = request
+            .block_description
+            .clone()
+            .unwrap_or_else(|| format!("Task list `{block}`"));
+        // BlockCreate doesn't carry pin state — pin is set via
+        // update_block_metadata, which we do uniformly via
+        // `recompute_task_block_pin` at the end of handle_create. Since the
+        // newly-pushed items default to Pending, recompute will flip pin to
+        // true for any newly-created TaskList block. This keeps the pin
+        // policy in one place rather than split between create and update.
+        let create = BlockCreate::new(
+            block.to_string(),
+            MemoryBlockType::Working,
+            BlockSchema::TaskList {
+                default_owner: Some(owner),
+                default_status: None,
+                display_limit: None,
+            },
+        )
+        .with_description(description);
+        store
+            .create_block(scope, create)
+            .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+    }
+
+    let sdoc = fetch_task_list(store, scope, block)?;
+    let doc = sdoc.inner();
+
+    let mut ids: Vec<TaskItemId> = Vec::with_capacity(request.items.len());
+    for spec in &request.items {
+        let id = push_task_item(doc, spec)?;
+        ids.push(id);
+    }
+
     doc.commit();
 
     store
@@ -602,7 +755,13 @@ pub fn handle_create(
         .persist_block(scope, block)
         .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
 
-    Ok(item_id)
+    // Recompute pin state. New items default to Pending so this almost always
+    // keeps the block pinned, but if every item in the request was created in
+    // a terminal state (rare) the block correctly stays unpinned. Also handles
+    // the \"add new pending item to a previously-unpinned block\" re-pin case.
+    recompute_task_block_pin(store, scope, block)?;
+
+    Ok(ids)
 }
 
 /// Apply a partial patch to an existing task item. Each field is set
@@ -634,6 +793,10 @@ pub fn handle_update(
         TaskHandlerError::Loro(format!("item at index {index} is not a LoroMap container"))
     })?;
 
+    // Capture whether this patch changes status before consuming the patch,
+    // so we know whether to recompute pin state at the end. Other field
+    // changes (subject, description, owner, etc.) don't affect pin.
+    let status_changed = patch.status.is_some();
     apply_patch_to_item_map(&item_map, patch)?;
     item_map
         .insert("updated_at", jiff::Timestamp::now().to_string().as_str())
@@ -647,6 +810,10 @@ pub fn handle_update(
     store
         .persist_block(scope, &block)
         .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+
+    if status_changed {
+        recompute_task_block_pin(store, scope, &block)?;
+    }
 
     Ok(())
 }
@@ -709,6 +876,11 @@ pub fn handle_transition(
     store
         .persist_block(scope, &block)
         .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+
+    // Status changed → block's pin state may need to flip. If this was the
+    // last open item closing, unpin. If a previously-closed item reopened,
+    // re-pin.
+    recompute_task_block_pin(store, scope, &block)?;
 
     Ok(())
 }
@@ -1279,11 +1451,7 @@ mod tests {
         BlockSchema::Text { viewport: None }
     }
 
-    fn seed_task_list(
-        store: &dyn MemoryStore,
-        scope: &Scope,
-        label: &str,
-    ) -> StructuredDocument {
+    fn seed_task_list(store: &dyn MemoryStore, scope: &Scope, label: &str) -> StructuredDocument {
         let create = BlockCreate::new(
             label.to_string(),
             MemoryBlockType::Working,
@@ -1296,16 +1464,37 @@ mod tests {
             .expect("create TaskList block")
     }
 
+    /// Returns a TaskCreateRequest JSON wrapping a single TaskSpec with the
+    /// given subject. Most tests want the simple \"one item, one block\" shape.
     fn sample_spec(subject: &str) -> String {
-        serde_json::to_string(&TaskSpec {
+        let spec = TaskSpec {
             subject: subject.to_string(),
             description: String::new(),
             active_form: None,
             status: None,
             owner: None,
             metadata: JsonValue::Null,
-        })
-        .unwrap()
+        };
+        let request = TaskCreateRequest {
+            block_description: None,
+            items: vec![spec],
+        };
+        serde_json::to_string(&request).unwrap()
+    }
+
+    /// Test helper: call `handle_create` and return the single minted id.
+    /// Panics if the call returned zero or more than one id (which would
+    /// indicate a bug in the test setup, not the code under test).
+    fn handle_create_one(
+        store: &dyn MemoryStore,
+        scope: &Scope,
+        agent_id: &str,
+        block: &str,
+        request_json: &str,
+    ) -> Result<TaskItemId, TaskHandlerError> {
+        let mut ids = handle_create(store, scope, agent_id, block, request_json)?;
+        assert_eq!(ids.len(), 1, "test helper expects exactly one item");
+        Ok(ids.remove(0))
     }
 
     #[test]
@@ -1314,9 +1503,8 @@ mod tests {
         let scope = Scope::Global("agent-a".into());
         seed_task_list(&*store, &scope, "tasks");
 
-        let item_id =
-            handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("fix bug"))
-                .expect("create succeeds");
+        let item_id = handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("fix bug"))
+            .expect("create succeeds");
 
         // Re-fetch and inspect the movable list.
         let sdoc = store.get_block(&scope, "tasks").unwrap().unwrap();
@@ -1337,6 +1525,121 @@ mod tests {
         assert!(matches!(status, LoroValue::String(s) if s.as_str() == "pending"));
     }
 
+    /// Auto-pin: handle_create must leave the (auto-created) TaskList block
+    /// pinned, since the newly-pushed items default to Pending.
+    #[test]
+    fn create_auto_pins_new_tasklist_block() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let scope = Scope::Global("agent-a".into());
+        // No pre-seed — let handle_create auto-create the block.
+        handle_create_one(
+            &*store,
+            &scope,
+            "agent-a",
+            "auto-pinned",
+            &sample_spec("first task"),
+        )
+        .expect("create succeeds");
+
+        let sdoc = store.get_block(&scope, "auto-pinned").unwrap().unwrap();
+        assert!(
+            sdoc.metadata().pinned,
+            "auto-created TaskList block must be pinned while it has open items"
+        );
+    }
+
+    /// Auto-unpin: closing the last open item (Completed) must flip pin off.
+    #[test]
+    fn closing_last_item_unpins_block() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let scope = Scope::Global("agent-a".into());
+        let id =
+            handle_create_one(&*store, &scope, "agent-a", "unpin-test", &sample_spec("only"))
+                .unwrap();
+        // Sanity: starts pinned.
+        assert!(store.get_block(&scope, "unpin-test").unwrap().unwrap().metadata().pinned);
+
+        let edge = format!("unpin-test#{id}");
+        let completed = serde_json::to_string(&TaskStatus::Completed).unwrap();
+        handle_transition(&*store, &scope, "agent-a", &edge, &completed).unwrap();
+
+        let sdoc = store.get_block(&scope, "unpin-test").unwrap().unwrap();
+        assert!(
+            !sdoc.metadata().pinned,
+            "closing last open item must unpin the block"
+        );
+    }
+
+    /// Re-pin: reopening a previously-completed item must re-pin the block.
+    #[test]
+    fn reopening_item_repins_block() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let scope = Scope::Global("agent-a".into());
+        let id =
+            handle_create_one(&*store, &scope, "agent-a", "repin-test", &sample_spec("only"))
+                .unwrap();
+        let edge = format!("repin-test#{id}");
+
+        // Close it → unpinned.
+        let completed = serde_json::to_string(&TaskStatus::Completed).unwrap();
+        handle_transition(&*store, &scope, "agent-a", &edge, &completed).unwrap();
+        assert!(!store.get_block(&scope, "repin-test").unwrap().unwrap().metadata().pinned);
+
+        // Reopen it → re-pinned.
+        let pending = serde_json::to_string(&TaskStatus::Pending).unwrap();
+        handle_transition(&*store, &scope, "agent-a", &edge, &pending).unwrap();
+        let sdoc = store.get_block(&scope, "repin-test").unwrap().unwrap();
+        assert!(
+            sdoc.metadata().pinned,
+            "reopening a closed item must re-pin the block"
+        );
+    }
+
+    /// Multi-item: one item closing doesn't unpin if others remain open.
+    #[test]
+    fn partial_completion_keeps_block_pinned() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let scope = Scope::Global("agent-a".into());
+        // Create two items in one shot via TaskCreateRequest.
+        let request = TaskCreateRequest {
+            block_description: None,
+            items: vec![
+                TaskSpec {
+                    subject: "first".to_string(),
+                    description: String::new(),
+                    active_form: None,
+                    status: None,
+                    owner: None,
+                    metadata: JsonValue::Null,
+                },
+                TaskSpec {
+                    subject: "second".to_string(),
+                    description: String::new(),
+                    active_form: None,
+                    status: None,
+                    owner: None,
+                    metadata: JsonValue::Null,
+                },
+            ],
+        };
+        let request_json = serde_json::to_string(&request).unwrap();
+        let ids =
+            handle_create(&*store, &scope, "agent-a", "partial", &request_json).unwrap();
+        assert_eq!(ids.len(), 2);
+
+        // Close just the first.
+        let edge_a = format!("partial#{}", ids[0]);
+        let completed = serde_json::to_string(&TaskStatus::Completed).unwrap();
+        handle_transition(&*store, &scope, "agent-a", &edge_a, &completed).unwrap();
+
+        // Block stays pinned because the second item is still pending.
+        let sdoc = store.get_block(&scope, "partial").unwrap().unwrap();
+        assert!(
+            sdoc.metadata().pinned,
+            "block must stay pinned while at least one item is open"
+        );
+    }
+
     #[test]
     fn create_on_non_tasklist_returns_not_a_task_list() {
         let store = Arc::new(InMemoryMemoryStore::new());
@@ -1347,7 +1650,7 @@ mod tests {
             .with_char_limit(4096);
         store.create_block(&scope, create).unwrap();
 
-        let err = handle_create(&*store, &scope, "agent-a", "notes", &sample_spec("x"))
+        let err = handle_create_one(&*store, &scope, "agent-a", "notes", &sample_spec("x"))
             .expect_err("schema mismatch must fail");
         assert!(
             matches!(
@@ -1363,7 +1666,7 @@ mod tests {
         let store = Arc::new(InMemoryMemoryStore::new());
         let scope = Scope::Global("agent-a".into());
         seed_task_list(&*store, &scope, "tasks");
-        let item_id = handle_create(
+        let item_id = handle_create_one(
             &*store,
             &scope,
             "agent-a",
@@ -1410,7 +1713,7 @@ mod tests {
         let scope = Scope::Global("agent-a".into());
         seed_task_list(&*store, &scope, "tasks");
         let item_id =
-            handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("task")).unwrap();
+            handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("task")).unwrap();
         let edge_ref = format!("tasks#{item_id}");
 
         // First complete it to populate completed_at.
@@ -1438,7 +1741,7 @@ mod tests {
         let scope = Scope::Global("agent-a".into());
         seed_task_list(&*store, &scope, "tasks");
         let item_id =
-            handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("task")).unwrap();
+            handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("task")).unwrap();
         let edge_ref = format!("tasks#{item_id}");
 
         let status_json = serde_json::to_string(&TaskStatus::Completed).unwrap();
@@ -1462,7 +1765,7 @@ mod tests {
         let scope = Scope::Global("agent-a".into());
         seed_task_list(&*store, &scope, "tasks");
         let item_id =
-            handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("t")).unwrap();
+            handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("t")).unwrap();
         let edge_ref = format!("tasks#{item_id}");
 
         handle_add_comment(&*store, &scope, "agent-a", &edge_ref, "first").unwrap();
@@ -1513,9 +1816,14 @@ mod tests {
             metadata: None,
         })
         .unwrap();
-        let err =
-            handle_update(&*store, &scope, "agent-a", "tasks#01HQZZZBOGUS01", &patch_json)
-                .expect_err("must fail on missing item");
+        let err = handle_update(
+            &*store,
+            &scope,
+            "agent-a",
+            "tasks#01HQZZZBOGUS01",
+            &patch_json,
+        )
+        .expect_err("must fail on missing item");
         assert!(
             matches!(
                 err,
@@ -1530,17 +1838,22 @@ mod tests {
         let store = Arc::new(InMemoryMemoryStore::new());
         let scope = Scope::Global("agent-a".into());
         seed_task_list(&*store, &scope, "tasks");
-        // Create with an owner.
-        let spec = serde_json::to_string(&TaskSpec {
-            subject: "t".to_string(),
-            description: String::new(),
-            active_form: None,
-            status: None,
-            owner: Some(SmolStr::new("agent-original")),
-            metadata: JsonValue::Null,
-        })
-        .unwrap();
-        let item_id = handle_create(&*store, &scope, "agent-a", "tasks", &spec).unwrap();
+        // Create with an owner. Wrap the TaskSpec in a TaskCreateRequest
+        // since handle_create now takes the multi-item request shape.
+        let request = TaskCreateRequest {
+            block_description: None,
+            items: vec![TaskSpec {
+                subject: "t".to_string(),
+                description: String::new(),
+                active_form: None,
+                status: None,
+                owner: Some(SmolStr::new("agent-original")),
+                metadata: JsonValue::Null,
+            }],
+        };
+        let request_json = serde_json::to_string(&request).unwrap();
+        let item_id =
+            handle_create_one(&*store, &scope, "agent-a", "tasks", &request_json).unwrap();
         let edge_ref = format!("tasks#{item_id}");
 
         // Patch owner to Some(None) → clear.
@@ -1588,8 +1901,8 @@ mod tests {
         let store = Arc::new(InMemoryMemoryStore::new());
         let scope = Scope::Global("agent-a".into());
         seed_task_list(&*store, &scope, "tasks");
-        let a = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
-        let b = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
+        let a = handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
 
         let a_ref = format!("tasks#{a}");
         let b_ref = format!("tasks#{b}");
@@ -1613,8 +1926,8 @@ mod tests {
         let store = Arc::new(InMemoryMemoryStore::new());
         let scope = Scope::Global("agent-a".into());
         seed_task_list(&*store, &scope, "tasks");
-        let a = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
-        let b = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
+        let a = handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
 
         let a_ref = format!("tasks#{a}");
         let b_ref = format!("tasks#{b}");
@@ -1630,7 +1943,7 @@ mod tests {
         let store = Arc::new(InMemoryMemoryStore::new());
         let scope = Scope::Global("agent-a".into());
         seed_task_list(&*store, &scope, "tasks");
-        let a = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let a = handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
 
         let a_ref = format!("tasks#{a}");
         handle_link(&*store, &scope, "agent-a", &a_ref, &a_ref).expect("self-edge allowed");
@@ -1651,8 +1964,8 @@ mod tests {
         let scope = Scope::Global("agent-a".into());
         seed_task_list(&*store, &scope, "l1");
         seed_task_list(&*store, &scope, "l2");
-        let a = handle_create(&*store, &scope, "agent-a", "l1", &sample_spec("A")).unwrap();
-        let b = handle_create(&*store, &scope, "agent-a", "l2", &sample_spec("B")).unwrap();
+        let a = handle_create_one(&*store, &scope, "agent-a", "l1", &sample_spec("A")).unwrap();
+        let b = handle_create_one(&*store, &scope, "agent-a", "l2", &sample_spec("B")).unwrap();
 
         // Snapshot L2's frontier before the link.
         let l2_before = {
@@ -1692,8 +2005,8 @@ mod tests {
         let store = Arc::new(InMemoryMemoryStore::new());
         let scope = Scope::Global("agent-a".into());
         seed_task_list(&*store, &scope, "tasks");
-        let a = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
-        let b = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
+        let a = handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
 
         let a_ref = format!("tasks#{a}");
         let b_ref = format!("tasks#{b}");
@@ -1713,8 +2026,8 @@ mod tests {
         let store = Arc::new(InMemoryMemoryStore::new());
         let scope = Scope::Global("agent-a".into());
         seed_task_list(&*store, &scope, "tasks");
-        let a = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
-        let b = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
+        let a = handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
 
         let a_ref = format!("tasks#{a}");
         let b_ref = format!("tasks#{b}");
@@ -1828,7 +2141,7 @@ mod tests {
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let scope = Scope::Global("agent-a".into());
         seed_task_list(&*store, &scope, "tasks");
-        handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("T1")).unwrap();
+        handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("T1")).unwrap();
 
         let adapter = MemoryStoreAdapter::new(store.clone(), "agent-a");
         record_task_write(
@@ -1964,8 +2277,7 @@ mod tests {
         seed_task_row(&db, "l2", "i3", "task 3", TaskStatus::Pending, None);
 
         let conn = db.get().unwrap();
-        let views =
-            handle_list_tasks(&*store, &conn, &scope, Some("l1"), "{}").expect("list ok");
+        let views = handle_list_tasks(&*store, &conn, &scope, Some("l1"), "{}").expect("list ok");
         assert_eq!(views.len(), 2, "only l1's tasks");
         for v in &views {
             assert_eq!(v.block_ref.block.as_str(), "l1");
@@ -2110,8 +2422,7 @@ mod tests {
         // c gets incoming from a (blocker_count=1 for c).
 
         let conn = db.get().unwrap();
-        let views =
-            handle_list_tasks(&*store, &conn, &scope, Some("tasks"), "{}").unwrap();
+        let views = handle_list_tasks(&*store, &conn, &scope, Some("tasks"), "{}").unwrap();
         let by_item: std::collections::HashMap<&str, &TaskView> = views
             .iter()
             .filter_map(|v| v.block_ref.task_item.as_deref().map(|s| (s, v)))
@@ -2570,8 +2881,8 @@ mod tests {
         let store = Arc::new(InMemoryMemoryStore::new());
         let scope = Scope::Global("agent-a".into());
         seed_task_list(&*store, &scope, "tasks");
-        let a = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
-        let b = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
+        let a = handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
         handle_link(
             &*store,
             &scope,
@@ -2635,8 +2946,8 @@ mod tests {
         let store = Arc::new(InMemoryMemoryStore::new());
         let scope = Scope::Global("agent-a".into());
         seed_task_list(&*store, &scope, "tasks");
-        let a = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
-        let b = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
+        let a = handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create_one(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
         let a_ref = format!("tasks#{a}");
         let b_ref = format!("tasks#{b}");
 

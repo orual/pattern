@@ -50,7 +50,10 @@ fn seed_block(store: &dyn MemoryStore, agent: &str, label: &str) -> String {
 }
 
 fn sample_spec(subject: &str) -> String {
-    format!("{{\"subject\":\"{subject}\",\"description\":\"\",\"metadata\":null}}")
+    // TaskCreateRequest JSON wrapping a single TaskSpec
+    format!(
+        "{{\"items\":[{{\"subject\":\"{subject}\",\"description\":\"\",\"metadata\":null}}]}}"
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -62,10 +65,13 @@ async fn task_dep_resolved_fires_on_completion() {
     let block_id = seed_block(&*store, agent, label);
     let scope = Scope::global(agent);
 
-    // Create a Pending task. handle_create returns the item id.
+    // Create a Pending task. handle_create returns a Vec<TaskItemId>; this
+    // single-item request returns exactly one.
     let item_id = handle_create(&*store, &scope, agent, label, &sample_spec("ship-it"))
         .expect("create task")
-        .to_string();
+        .into_iter()
+        .next()
+        .expect("single-item request returns one id");
 
     let notifier = pattern_memory::subscriber::BlockChangeNotifier::new();
     let (mailbox, _) = Mailbox::new(PersonaId::from(agent));

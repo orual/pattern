@@ -101,12 +101,34 @@ fn seed_task_list_scoped(store: &dyn MemoryStore, scope: &Scope, label: &str) {
 
 /// Build a `TaskSpec` JSON string with the given subject.
 fn task_spec(subject: &str) -> String {
+    // TaskCreateRequest JSON wrapping a single TaskSpec.
     serde_json::to_string(&serde_json::json!({
-        "subject": subject,
-        "description": "",
-        "metadata": null
+        "items": [
+            {
+                "subject": subject,
+                "description": "",
+                "metadata": null
+            }
+        ]
     }))
     .unwrap()
+}
+
+/// Test helper: call `handle_create` with a single-item request and unwrap
+/// the single returned id. Panics if the call returns zero or many ids.
+fn handle_create_one(
+    store: &dyn pattern_core::traits::MemoryStore,
+    scope: &pattern_core::types::memory_types::Scope,
+    agent_id: &str,
+    block: &str,
+    request_json: &str,
+) -> Result<
+    pattern_core::types::ids::TaskItemId,
+    pattern_runtime::sdk::handlers::tasks::TaskHandlerError,
+> {
+    let mut ids = handle_create(store, scope, agent_id, block, request_json)?;
+    assert_eq!(ids.len(), 1, "single-item request must return one id");
+    Ok(ids.remove(0))
 }
 
 /// Build a `TaskPatch` JSON string to update the subject.
@@ -217,21 +239,21 @@ fn smoke_tasks_surface() {
 
     // --- create_task ---
 
-    let id_a = handle_create(&*store, &agent_scope, AGENT, BLOCK, &task_spec("Fix auth flow"))
+    let id_a = handle_create_one(&*store, &agent_scope, AGENT, BLOCK, &task_spec("Fix auth flow"))
         .expect("smoke_tasks_surface[step:create_a]: create must succeed");
     assert!(
         !id_a.as_str().is_empty(),
         "smoke_tasks_surface[step:create_a]: new task id must be non-empty"
     );
 
-    let id_b = handle_create(&*store, &agent_scope, AGENT, BLOCK, &task_spec("Write docs"))
+    let id_b = handle_create_one(&*store, &agent_scope, AGENT, BLOCK, &task_spec("Write docs"))
         .expect("smoke_tasks_surface[step:create_b]: create must succeed");
     assert_ne!(
         id_a, id_b,
         "smoke_tasks_surface[step:create_b]: two creates must produce distinct ids"
     );
 
-    let id_c = handle_create(&*store, &agent_scope, AGENT, BLOCK, &task_spec("Deploy to staging"))
+    let id_c = handle_create_one(&*store, &agent_scope, AGENT, BLOCK, &task_spec("Deploy to staging"))
         .expect("smoke_tasks_surface[step:create_c]: create must succeed");
 
     // Verify LoroDoc has 3 items.
@@ -842,7 +864,7 @@ fn smoke_scope_enforcement() {
 
     // Seed a TaskList block under the project agent (project context).
     seed_task_list_scoped(&inner_store, &project_scope, "project-tasks");
-    let project_task_id = handle_create(
+    let project_task_id = handle_create_one(
         &inner_store,
         &project_scope,
         PROJECT,
@@ -854,7 +876,7 @@ fn smoke_scope_enforcement() {
     // Also seed a TaskList block under the persona agent (persona context).
     // This will be invisible under Full isolation — even to the persona itself.
     seed_task_list(&inner_store, PERSONA, "persona-tasks");
-    handle_create(
+    handle_create_one(
         &inner_store,
         &persona_scope,
         PERSONA,

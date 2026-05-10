@@ -152,7 +152,7 @@ impl StatefulWidget for ConversationView {
 /// Records click targets for collapsible sections (collapsed or expandable)
 /// into `click_targets` as `(batch_idx, section_idx, y_position)`.
 #[allow(clippy::too_many_arguments)]
-fn render_batch(
+pub(crate) fn render_batch(
     batch: &RenderBatch,
     batch_idx: usize,
     area: Rect,
