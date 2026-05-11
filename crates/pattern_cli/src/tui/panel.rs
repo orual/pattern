@@ -50,24 +50,13 @@ pub struct SpawnEntry {
     /// for forks, persona_id for siblings). Used to key incoming events
     /// to the right entry.
     pub key: String,
-    /// Human-readable label rendered in the entry header — e.g.
-    /// `"ephemeral 37dd2fad"`, `"sibling @anchor"`, `"fork ab12cd34"`.
-    pub label: String,
-    /// Discriminator for filtering / styling later.
-    pub kind: SpawnEntryKind,
+
     /// Wire events accumulated as a renderable batch. Mirrors the way
     /// main-conversation batches collect events; the SpawnFeed renderer
     /// hands this to `conversation::render_batch` to get the same look.
     pub batch: crate::tui::model::RenderBatch,
     /// `false` once a `Stop` event arrives.
     pub active: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpawnEntryKind {
-    Ephemeral,
-    Sibling,
-    Fork,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,13 +146,9 @@ impl PanelState {
         &mut self,
         key: &str,
         label: &str,
-        kind: SpawnEntryKind,
         event: &pattern_server::protocol::WireTurnEvent,
     ) -> bool {
-        let stop = matches!(
-            event,
-            pattern_server::protocol::WireTurnEvent::Stop(_)
-        );
+        let stop = matches!(event, pattern_server::protocol::WireTurnEvent::Stop(_));
         let is_new;
         if let Some(idx) = self.spawns.iter().position(|s| s.key == key) {
             is_new = false;
@@ -179,16 +164,11 @@ impl PanelState {
             // shows `[ephemeral 37dd2fad]` as the attribution prefix on
             // the first section. This is the same mechanism the main
             // view uses for agent attribution.
-            let mut batch = crate::tui::model::RenderBatch::new(
-                smol_str::SmolStr::from(key),
-                None,
-            )
-            .with_agent(smol_str::SmolStr::from(label));
+            let mut batch = crate::tui::model::RenderBatch::new(smol_str::SmolStr::from(key), None)
+                .with_agent(smol_str::SmolStr::from(label));
             batch.push_event(event);
             let entry = SpawnEntry {
                 key: key.to_string(),
-                label: label.to_string(),
-                kind,
                 batch,
                 active: !stop,
             };
@@ -353,7 +333,6 @@ fn render_spawn_feed(area: Rect, buf: &mut Buffer, spawns: &mut [SpawnEntry]) {
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Rendering helpers

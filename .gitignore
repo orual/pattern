@@ -5,8 +5,8 @@
 .pattern_cache
 .DS_Store
 .playwright-mcp
-index-bsky.yaml
-feed.yaml
+**.yaml
+
 pattern.toml
 pattern-bsky.toml
 **.env

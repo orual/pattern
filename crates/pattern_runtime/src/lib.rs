@@ -12,6 +12,7 @@ pub mod agent_loop;
 pub mod agent_registry;
 pub mod checkpoint;
 pub mod compaction;
+pub mod embedding;
 pub mod file_manager;
 pub mod fronting_dispatch;
 pub mod mailbox;

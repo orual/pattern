@@ -7,3 +7,4 @@ pub mod backup;
 pub mod constellation;
 pub mod constellation_registry;
 pub mod daemon;
+pub mod reembed;

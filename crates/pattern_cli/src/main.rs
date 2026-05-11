@@ -40,6 +40,8 @@ enum Commands {
     Auth(commands::auth::AuthCmd),
     /// Manage plugins (install, list, uninstall).
     Plugin(PluginCmd),
+    /// Backfill embeddings for existing messages / archival / blocks. Run with daemon stopped.
+    Reembed(commands::reembed::ReembedCmd),
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +542,9 @@ async fn main() -> MietteResult<()> {
         }
         Some(Commands::Plugin(plugin)) => {
             cmd_plugin(plugin).await?;
+        }
+        Some(Commands::Reembed(reembed)) => {
+            commands::reembed::cmd_reembed(reembed).await?;
         }
         None => {
             // Default: enter chat mode with all defaults (auto-zellij enabled).

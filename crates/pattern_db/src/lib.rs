@@ -29,6 +29,10 @@ pub mod search;
 pub mod sql_types;
 pub mod vector;
 
+// Re-export rusqlite so downstream crates that already depend on pattern_db
+// can use its types (Connection, params, etc.) without an additional direct dep.
+pub use rusqlite;
+
 pub use connection::ConstellationDb;
 pub use error::{DbError, DbResult};
 pub use json_wrapper::Json;

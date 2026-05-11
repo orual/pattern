@@ -1593,9 +1593,8 @@ impl App {
         // the panel — and the parent's main conversation transcript is left
         // alone (no merge into the parent agent's batches). When Visible,
         // we auto-switch to SpawnFeed so the activity is visible.
-        use super::panel::SpawnEntryKind;
         use pattern_server::protocol::SpawnSource;
-        let routing_info: Option<(String, String, SpawnEntryKind)> = match &tagged.source {
+        let routing_info: Option<(String, String)> = match &tagged.source {
             SpawnSource::Main => None,
             SpawnSource::Ephemeral {
                 spawn_id,
@@ -1617,33 +1616,21 @@ impl App {
                     .rsplit_once(":spawn:")
                     .map(|(_, s)| s.to_string())
                     .unwrap_or_else(|| spawn_id[..spawn_id.len().min(8)].to_string());
-                Some((
-                    tagged.agent_id.to_string(),
-                    format!("ephemeral {suffix}"),
-                    SpawnEntryKind::Ephemeral,
-                ))
+                Some((tagged.agent_id.to_string(), format!("ephemeral {suffix}")))
             }
             SpawnSource::Sibling {
                 persona_id,
                 parent_agent_id: _,
-            } => Some((
-                tagged.agent_id.to_string(),
-                format!("sibling {persona_id}"),
-                SpawnEntryKind::Sibling,
-            )),
+            } => Some((tagged.agent_id.to_string(), format!("sibling {persona_id}"))),
             SpawnSource::Fork {
                 fork_id,
                 parent_agent_id: _,
             } => {
                 let short = &fork_id[..fork_id.len().min(8)];
-                Some((
-                    tagged.agent_id.to_string(),
-                    format!("fork {short}"),
-                    SpawnEntryKind::Fork,
-                ))
+                Some((tagged.agent_id.to_string(), format!("fork {short}")))
             }
         };
-        if let Some((key, label, kind)) = routing_info {
+        if let Some((key, label)) = routing_info {
             // Mirror the event into the spawn-feed panel for the focused
             // drill-down view. Main conversation rendering (below) ALSO
             // sees this event and will attribute it via tagged.agent_id
@@ -1652,7 +1639,7 @@ impl App {
             // visibility. The panel stays as an opt-in focused view.
             let was_first = self
                 .panel_state
-                .push_spawn_event(&key, &label, kind, &tagged.event);
+                .push_spawn_event(&key, &label, &tagged.event);
             // Auto-switch panel content to SpawnFeed on first event for any
             // spawn IF the panel is already visible. Don't force-show a
             // hidden panel — events still appear inline in main conversation.

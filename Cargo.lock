@@ -5795,6 +5795,7 @@ dependencies = [
  "askama",
  "async-trait",
  "base64 0.22.1",
+ "blake3",
  "clap",
  "comfy-table",
  "crossterm",

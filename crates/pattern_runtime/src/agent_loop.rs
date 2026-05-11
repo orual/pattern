@@ -694,8 +694,7 @@ fn load_snapshot_blocks_with_visibility(
                     MemoryBlockType::Core => true,
                     MemoryBlockType::Working | _ => {
                         let label = doc.label();
-                        doc.is_pinned()
-                            || block_refs.iter().any(|r| r.label.as_str() == label)
+                        doc.is_pinned() || block_refs.iter().any(|r| r.label.as_str() == label)
                     }
                 }
             } else {
@@ -870,7 +869,9 @@ async fn persist_messages(
     batch_type: pattern_db::models::BatchType,
     origin: &pattern_core::types::origin::MessageOrigin,
     step_label: &str,
-    reembed_tx: Option<&tokio::sync::mpsc::UnboundedSender<pattern_memory::subscriber::event::ReembedRequest>>,
+    reembed_tx: Option<
+        &tokio::sync::mpsc::UnboundedSender<pattern_memory::subscriber::event::ReembedRequest>,
+    >,
 ) -> Result<(), RuntimeError> {
     let conn = db
         .get()
@@ -906,12 +907,7 @@ async fn persist_messages(
     Ok(())
 }
 
-/// Render a message into the text used for embedding generation.
-/// Uses the message's first text content (other parts like tool calls
-/// don't carry semantic signal worth indexing for retrieval).
-fn render_message_for_embedding(msg: &Message) -> String {
-    msg.chat_message.content.first_text().unwrap_or("").to_string()
-}
+use crate::embedding::render_message_for_embedding;
 
 // ---- drive_step — loop driver -------------------------------------------
 
@@ -1133,7 +1129,8 @@ pub async fn drive_step(
                         "archive finished work via Recall.insert, or search past context ",
                         "with Recall.search / Search.messages if something feels familiar. ",
                         "No confirmation needed — just do it if relevant."
-                    ).to_string(),
+                    )
+                    .to_string(),
                 });
             }
         }
@@ -1303,7 +1300,7 @@ pub async fn drive_step(
                 ));
         }
 
-        tracing::info!("stop_reason: {:?}", turn.stop_reason);
+        tracing::debug!("stop_reason: {:?}", turn.stop_reason);
 
         // ---- Mid-batch delta attachment ----
         //
@@ -1498,7 +1495,7 @@ pub async fn drive_step(
         turns.push(turn);
 
         if terminal {
-            tracing::info!("terminal turn reached, reason{stop_reason:?}; breaking loop");
+            tracing::debug!("terminal turn reached, reason{stop_reason:?}; breaking loop");
             break;
         }
 
@@ -1508,7 +1505,7 @@ pub async fn drive_step(
         // tool_use/tool_result pairs are already recorded, so nothing is
         // left unpaired.
         if ctx.mailbox().has_pending() {
-            tracing::info!("pending mailbox message detected; breaking continuation loop");
+            tracing::debug!("pending mailbox message detected; breaking continuation loop");
             break;
         }
 
@@ -1521,7 +1518,7 @@ pub async fn drive_step(
         cur_input = TurnInput::continuation(batch_id.clone(), agent_id.clone());
     }
 
-    tracing::info!("leaving turn loop");
+    tracing::debug!("leaving turn loop");
 
     let final_stop_reason = turns
         .last()
