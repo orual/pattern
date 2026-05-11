@@ -393,6 +393,13 @@ pub struct SessionContext {
     /// `ProcessManager` rooted at `current_dir`. Test fixtures override
     /// via [`Self::with_process_manager`].
     process_manager: Arc<crate::process_manager::ProcessManager>,
+    /// Optional embedding-queue sender. Set by the session opener via
+    /// `with_reembed_tx` when the cache has an embedding pipeline
+    /// configured. `persist_messages` in agent_loop pushes per-message
+    /// ReembedRequests with `ContentType::Message` so message rows land
+    /// in the vector index alongside FTS — gives hybrid retrieval over
+    /// conversation history. None for sessions without embeddings.
+    reembed_tx: Option<tokio::sync::mpsc::UnboundedSender<pattern_memory::subscriber::event::ReembedRequest>>,
     /// Per-session port registry. `None` for sessions opened without a
     /// `SessionRegistries.port_registry` — the SDK preamble filters
     /// `Pattern.Port` out of the agent's effect row in that case so
@@ -815,6 +822,7 @@ impl SessionContext {
                     .unwrap_or_else(std::env::temp_dir)
                     .join("pattern"),
             )),
+            reembed_tx: None,
             port_registry: None,
             hook_bus: hook_bus__.clone(),
             hook_bridge: hook_bridge__,
@@ -1257,6 +1265,9 @@ impl SessionContext {
                     .unwrap_or_else(std::env::temp_dir)
                     .join("pattern"),
             )),
+            // Ephemeral children inherit parent's reembed_tx so messages
+            // they persist also land in the vector index.
+            reembed_tx: self.reembed_tx.clone(),
             port_registry: self.port_registry.clone(),
             hook_bus: self.hook_bus.clone(),
             hook_bridge: self.hook_bridge.clone(),
@@ -1609,6 +1620,30 @@ impl SessionContext {
         &self.db
     }
 
+    /// Optional embedding-queue sender. `Some` when the cache has an
+    /// embedding pipeline configured; `None` for tests or configurations
+    /// without an embedding provider. `persist_messages` in agent_loop
+    /// uses this to dispatch per-message ReembedRequests for hybrid
+    /// retrieval over conversation history.
+    pub fn reembed_tx(
+        &self,
+    ) -> Option<&tokio::sync::mpsc::UnboundedSender<pattern_memory::subscriber::event::ReembedRequest>>
+    {
+        self.reembed_tx.as_ref()
+    }
+
+    /// Builder-style: attach the embedding-queue sender. Called by the
+    /// session opener after both the cache and SessionContext exist —
+    /// pulls `cache.reembed_tx().cloned()` into the context so handlers
+    /// (and the message persistence path) can dispatch reembed events.
+    pub fn with_reembed_tx(
+        mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<pattern_memory::subscriber::event::ReembedRequest>,
+    ) -> Self {
+        self.reembed_tx = Some(tx);
+        self
+    }
+
     /// Full snapshot policy: block-selection filter + mid-batch delta
     /// behavior. Controls which blocks appear in
     /// `MessageAttachment::BatchOpeningSnapshot` and whether this turn's
@@ -1876,6 +1911,11 @@ pub struct SessionRegistries {
     /// Optional plugin registry. When set, plugins are enabled at session open
     /// and their hook subscriptions are wired to the session's HookBus.
     pub plugin_registry: Option<Arc<crate::plugin::registry::PluginRegistry>>,
+    /// Optional embedding-queue sender. Daemon callers pull this from
+    /// `cache.reembed_tx().cloned()` and pass it here so message persistence
+    /// in agent_loop dispatches per-message ReembedRequests for hybrid
+    /// retrieval. None for tests / configurations without an embedding provider.
+    pub reembed_tx: Option<tokio::sync::mpsc::UnboundedSender<pattern_memory::subscriber::event::ReembedRequest>>,
 }
 
 /// Extras required to construct a [`crate::wake::WakeRegistry`] inside
@@ -2292,6 +2332,16 @@ impl TidepoolSession {
             // `UnconfiguredSiblingResolver` makes every sibling lookup fail).
             let ctx = if let Some(resolver) = regs.sibling_resolver {
                 ctx.with_sibling_resolver(resolver)
+            } else {
+                ctx
+            };
+
+            // Wire embedding-queue sender. Daemon callers pass
+            // `cache.reembed_tx().cloned()` so message persistence in
+            // agent_loop dispatches per-message ReembedRequests for hybrid
+            // retrieval over conversation history. None for tests.
+            let ctx = if let Some(tx) = regs.reembed_tx {
+                ctx.with_reembed_tx(tx)
             } else {
                 ctx
             };

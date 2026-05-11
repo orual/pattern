@@ -599,6 +599,7 @@ fn render_cycle(
 
     let _ = reembed_tx.send(ReembedRequest {
         block_id: block_id.to_string(),
+        content_type: pattern_db::vector::ContentType::MemoryBlock,
         canonical_bytes: canonical_bytes.clone(),
         content_hash: new_hash,
     });

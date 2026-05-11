@@ -337,8 +337,13 @@ fn fetch_page(
 
     let total_len = content.len();
     let max_chars = limit.unwrap_or(10_000);
-    let start = offset.min(total_len);
-    let end = (start + max_chars).min(total_len);
+    // Agent-supplied byte offsets may land mid-character (e.g. inside a
+    // multi-byte UTF-8 sequence). Round both ends down to the nearest
+    // char boundary before slicing — naked `&content[start..end]` panics
+    // and crashes the eval worker. The reported `next_offset` reflects
+    // the rounded `end` so the agent's next call lands on a valid boundary.
+    let start = floor_char_boundary(&content, offset.min(total_len));
+    let end = floor_char_boundary(&content, (start + max_chars).min(total_len));
     let slice = &content[start..end];
     let has_more = end < total_len;
 
@@ -351,6 +356,19 @@ fn fetch_page(
     });
 
     serde_json::to_string(&result).map_err(|e| format!("failed to serialize: {e}"))
+}
+
+/// Round a byte index down to the nearest UTF-8 character boundary.
+///
+/// Used by the fetch-pagination path so agent-supplied offsets that land
+/// mid-multi-byte-sequence don't panic the slice operation. Walking back
+/// at most 3 bytes is sufficient because UTF-8 sequences are at most 4
+/// bytes; we land on the start byte (high bits 0xxxxxxx or 11xxxxxx).
+fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 /// Convert HTML to readable markdown.

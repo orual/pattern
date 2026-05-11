@@ -36,7 +36,6 @@ type ArchivalHit = Text
 data Recall a where
   RecallInsert :: ArchivalContent -> Recall EntryId
   RecallSearch :: RecallQuery -> Maybe Scope -> Recall [ArchivalHit]
-  RecallGet    :: EntryId -> Recall ArchivalContent
 
 -- | Insert a new archival entry, returning its id.
 insert :: Member Recall effs => ArchivalContent -> Eff effs EntryId
@@ -46,7 +45,3 @@ insert c = send (RecallInsert c)
 -- 'Nothing'.
 search :: Member Recall effs => RecallQuery -> Maybe Scope -> Eff effs [ArchivalHit]
 search q s = send (RecallSearch q s)
-
--- | Get a specific archival entry by id.
-get :: Member Recall effs => EntryId -> Eff effs ArchivalContent
-get i = send (RecallGet i)

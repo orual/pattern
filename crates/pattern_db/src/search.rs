@@ -457,6 +457,29 @@ impl<'a> HybridSearchBuilder<'a> {
     }
 
     /// Reciprocal Rank Fusion - combines results based on rank position.
+    /// Fetch the source-table content for a vector-only hit. Vector
+    /// search returns content_id but not content; without this, fusion
+    /// produces SearchResults with `content: None` for any vector hit
+    /// not also matched by FTS (the conceptual-query case). Dispatch by
+    /// content_type to messages / memory_blocks / archival_entries.
+    fn fetch_content(&self, content_type: ContentType, id: &str) -> Option<String> {
+        match content_type {
+            ContentType::Message => crate::queries::get_message(self.conn, id)
+                .ok()
+                .flatten()
+                .and_then(|m| m.content_preview),
+            ContentType::MemoryBlock => crate::queries::get_block(self.conn, id)
+                .ok()
+                .flatten()
+                .and_then(|b| b.content_preview),
+            ContentType::ArchivalEntry => crate::queries::get_archival_entry(self.conn, id)
+                .ok()
+                .flatten()
+                .map(|e| e.content),
+            ContentType::FilePassage => None,
+        }
+    }
+
     fn fuse_rrf(
         &self,
         fts_results: Option<Vec<(SearchContentType, FtsMatch)>>,
@@ -497,6 +520,8 @@ impl<'a> HybridSearchBuilder<'a> {
                 };
 
                 let rrf_score = 1.0 / (k + (pos + 1) as f64);
+                let fetched_ct = r.content_type;
+                let id_for_fetch = r.content_id.clone();
                 let entry = scores
                     .entry(r.content_id.clone())
                     .or_insert_with(|| SearchResult {
@@ -509,6 +534,9 @@ impl<'a> HybridSearchBuilder<'a> {
                 entry.score += rrf_score;
                 entry.scores.vector_distance = Some(r.distance);
                 entry.scores.vector_position = Some(pos + 1);
+                if entry.content.is_none() {
+                    entry.content = self.fetch_content(fetched_ct, &id_for_fetch);
+                }
             }
         }
 
@@ -580,6 +608,8 @@ impl<'a> HybridSearchBuilder<'a> {
                 let normalized = 1.0 - (r.distance / max_dist) as f64;
                 let weighted = normalized * vector_weight;
 
+                let fetched_ct = r.content_type;
+                let id_for_fetch = r.content_id.clone();
                 let entry = scores
                     .entry(r.content_id.clone())
                     .or_insert_with(|| SearchResult {
@@ -593,6 +623,9 @@ impl<'a> HybridSearchBuilder<'a> {
                 entry.scores.vector_distance = Some(r.distance);
                 entry.scores.vector_normalized = Some(normalized);
                 entry.scores.vector_position = Some(pos + 1);
+                if entry.content.is_none() {
+                    entry.content = self.fetch_content(fetched_ct, &id_for_fetch);
+                }
             }
         }
 

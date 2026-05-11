@@ -2812,6 +2812,10 @@ async fn open_session_with_persona(
         constellation_registry: Some(project_mount.constellation_registry.clone()),
         sibling_resolver: Some(sibling_resolver),
         plugin_registry: plugin_registry_for_session,
+        // Embedding-queue sender — pulled from the project mount's cache.
+        // Enables vector-index coverage of message persistence so future-us
+        // can semantically search past exchanges, not just keyword-match.
+        reembed_tx: project_mount.cache.reembed_tx().cloned(),
     };
     let session = TidepoolSession::open_with_agent_loop(
         persona,

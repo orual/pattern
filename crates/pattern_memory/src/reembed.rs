@@ -73,12 +73,13 @@ impl ReembedQueue {
                 // Persist to vector index via spawn_blocking (rusqlite is sync).
                 let db = db.clone();
                 let block_id = req.block_id.clone();
+                let req_content_type = req.content_type;
                 let content_hash_hex = blake3::Hash::from(req.content_hash).to_hex().to_string();
                 let store_result = tokio::task::spawn_blocking(move || {
                     let conn = db.get()?;
                     pattern_db::vector::update_embedding(
                         &conn,
-                        pattern_db::vector::ContentType::MemoryBlock,
+                        req_content_type,
                         &block_id,
                         &embedding,
                         None,
@@ -88,7 +89,8 @@ impl ReembedQueue {
                 .await;
 
                 match store_result {
-                    Ok(Ok(_rowid)) => {
+                    Ok(Ok(rowid)) => {
+                        tracing::debug!(block_id = %req.block_id, "{:?} reembeded: {rowid}", req.content_type);
                         metrics::counter!("memory.reembed.success").increment(1);
                     }
                     Ok(Err(e)) => {

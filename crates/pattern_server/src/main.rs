@@ -52,7 +52,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> miette::Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "warn,pattern_server=info,pattern_runtime=info,pattern_provider=info,pattern_memory=info,loro_internal=warn,loro=warn".into());
+        .unwrap_or_else(|_| "warn,pattern_server=info,pattern_runtime=info,pattern_provider=info, pattern_db=info,pattern_memory=info,loro_internal=warn,loro=warn".into());
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(filter)

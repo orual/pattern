@@ -444,6 +444,7 @@ async fn sandbox_io_smoke_end_to_end() {
             constellation_registry: None,
             sibling_resolver: None,
             plugin_registry: None,
+            reembed_tx: None,
         }),
     )
     .await
@@ -868,6 +869,7 @@ async fn sandbox_io_smoke_end_to_end() {
             constellation_registry: None,
             sibling_resolver: None, // no file policy needed — denial program doesn't touch files
             plugin_registry: None,
+            reembed_tx: None,
         }),
     )
     .await
@@ -967,6 +969,7 @@ async fn sandbox_io_smoke_end_to_end() {
             constellation_registry: None,
             sibling_resolver: None,
             plugin_registry: None,
+            reembed_tx: None,
         }),
     )
     .await

@@ -47,11 +47,10 @@ impl DescribeEffect for RecallHandler {
     fn effect_decl() -> EffectDecl {
         EffectDecl {
             type_name: "Recall",
-            description: "Archival-entry CRUD with optional scope (RecallInsert/RecallSearch/RecallGet)",
+            description: "Archival-entry CRUD with optional scope (RecallInsert/RecallSearch)",
             constructors: std::borrow::Cow::Borrowed(&[
                 "RecallInsert :: ArchivalContent -> Recall EntryId",
                 "RecallSearch :: RecallQuery -> Maybe Scope -> Recall [ArchivalHit]",
-                "RecallGet    :: EntryId -> Recall ArchivalContent",
             ]),
             type_defs: std::borrow::Cow::Borrowed(&[
                 "type ArchivalContent = Text",
@@ -63,7 +62,6 @@ impl DescribeEffect for RecallHandler {
             helpers: std::borrow::Cow::Borrowed(&[
                 "insert :: Member Recall effs => ArchivalContent -> Eff effs EntryId\ninsert c = send (RecallInsert c)",
                 "search :: Member Recall effs => RecallQuery -> Maybe Scope -> Eff effs [ArchivalHit]\nsearch q s = send (RecallSearch q s)",
-                "get :: Member Recall effs => EntryId -> Eff effs ArchivalContent\nget i = send (RecallGet i)",
             ]),
         }
     }
@@ -92,7 +90,6 @@ impl EffectHandler<SessionContext> for RecallHandler {
         let constructor_name = match &req {
             RecallReq::Insert(_) => "RecallInsert",
             RecallReq::Search(_, _) => "RecallSearch",
-            RecallReq::Get(_) => "RecallGet",
         };
         crate::sdk::effect_classes::check_effect_class(
             cx.user().capabilities(),
@@ -159,19 +156,6 @@ impl EffectHandler<SessionContext> for RecallHandler {
                     serde_json::json!({ "query": query, "results": hits }),
                 ));
                 cx.respond(hits)
-            }
-
-            RecallReq::Get(id) => {
-                let results = store
-                    .search_archival(&session_scope, &id, 1)
-                    .map_err(|e| EffectError::Handler(format!("Pattern.Recall.Get: {e}")))?;
-
-                let entry = results.into_iter().find(|e| e.id == id).ok_or_else(|| {
-                    EffectError::Handler(format!(
-                        "Pattern.Recall.Get: no archival entry with id {id:?}"
-                    ))
-                })?;
-                cx.respond(entry.content)
             }
         })();
 

@@ -49,6 +49,13 @@ pub struct MemoryCache {
     /// Optional embedding provider for vector/hybrid search.
     pub(crate) embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
 
+    /// Stored tokio runtime handle for sync-context query embedding.
+    /// Set by callers that construct the cache from a tokio context.
+    /// `search_archival` (and other sync paths that need to drive async
+    /// work) prefer this over `Handle::try_current()`, which fails when
+    /// invoked from the eval worker's runtime-less OS thread.
+    pub(crate) tokio_handle: Option<tokio::runtime::Handle>,
+
     /// Cached blocks: block_id -> CachedBlock.
     ///
     /// Arc-wrapped so the respawn closure in `with_mount_path` can hold a
@@ -142,6 +149,7 @@ impl MemoryCache {
         Self {
             db,
             embedding_provider: None,
+            tokio_handle: None,
             blocks: Arc::new(DashMap::new()),
             subscribers: Arc::new(DashMap::new()),
             default_char_limit: DEFAULT_MEMORY_CHAR_LIMIT,
@@ -166,6 +174,7 @@ impl MemoryCache {
         Self {
             db,
             embedding_provider: Some(provider),
+            tokio_handle: None,
             blocks: Arc::new(DashMap::new()),
             subscribers: Arc::new(DashMap::new()),
             default_char_limit: DEFAULT_MEMORY_CHAR_LIMIT,
@@ -198,6 +207,15 @@ impl MemoryCache {
         self
     }
 
+    /// Store a tokio runtime handle on the cache so sync code paths
+    /// (notably `search_archival`'s query-embedding step) can drive
+    /// async embedding-provider calls without needing an ambient
+    /// runtime via `Handle::try_current()`.
+    pub fn with_tokio_handle(mut self, handle: tokio::runtime::Handle) -> Self {
+        self.tokio_handle = Some(handle);
+        self
+    }
+
     /// Enable subscriber file emission by setting the mount path and the
     /// channels needed to communicate with the re-embed queue and supervisor.
     ///
@@ -218,6 +236,14 @@ impl MemoryCache {
     /// `<dir>/@<persona_id>/blocks/...` rather than the in-mount fallback
     /// path. Production wiring sets this to `$XDG_STATE_HOME/pattern/personas/`.
     #[must_use]
+    /// Get a clone of the reembed-queue sender, if the cache was
+    /// configured with a mount path (which spawns the embedding queue).
+    /// Used by the session opener to plumb message-embedding dispatch
+    /// into `SessionContext::reembed_tx`.
+    pub fn reembed_tx(&self) -> Option<&tokio::sync::mpsc::UnboundedSender<crate::subscriber::event::ReembedRequest>> {
+        self.reembed_tx.as_ref()
+    }
+
     pub fn with_persona_state_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.persona_state_dir = Some(Arc::new(dir.into()));
         self
@@ -235,10 +261,16 @@ impl MemoryCache {
         self.heartbeat_tx = Some(heartbeat_tx.clone());
 
         // Spawn the supervisor as a tokio task if a runtime is available.
-        // The supervisor needs: heartbeat_rx, subscribers map, cancel token,
-        // state, and a respawn callback.
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
+        // Prefer the stored handle (set by attach() via with_tokio_handle),
+        // fall back to ambient runtime detection. Same pattern as the search
+        // paths — eval-worker thread has no ambient runtime, so callers that
+        // construct cache from sync contexts need to plumb a handle in.
+        let supervisor_handle = self
+            .tokio_handle
+            .clone()
+            .or_else(|| tokio::runtime::Handle::try_current().ok());
+        match supervisor_handle {
+            Some(handle) => {
                 let subscribers = Arc::clone(&self.subscribers);
                 let cancel = self.supervisor_cancel.clone();
                 let state = self.supervisor_state.clone();
@@ -311,9 +343,9 @@ impl MemoryCache {
                 ));
                 self.supervisor_task = Some(task);
             }
-            Err(_) => {
+            None => {
                 tracing::warn!(
-                    "no tokio runtime available when configuring mount path; \
+                    "no tokio handle (stored or ambient) when configuring mount path; \
                      supervisor will not run — subscriber heartbeat timeouts will not be detected"
                 );
             }
@@ -458,7 +490,9 @@ impl MemoryCache {
             _ => return Ok(None),
         };
 
-        Ok(Some(self.hydrate_doc_from_db(&block, effective_permission)?))
+        Ok(Some(
+            self.hydrate_doc_from_db(&block, effective_permission)?,
+        ))
     }
 
     /// Rebuild a `CachedBlock` from a DB `MemoryBlock` row by replaying its
@@ -531,7 +565,12 @@ impl MemoryCache {
                 if rendered.as_bytes() != disk_bytes.as_slice() {
                     // Disk diverged — apply via bridge to merge the human's edit.
                     let vv_before = doc.inner().oplog_vv();
-                    if let Err(e) = crate::subscriber::bridge::apply_block_external_edit(doc.inner(), &doc.schema().clone(), &disk_bytes, &file_path) {
+                    if let Err(e) = crate::subscriber::bridge::apply_block_external_edit(
+                        doc.inner(),
+                        &doc.schema().clone(),
+                        &disk_bytes,
+                        &file_path,
+                    ) {
                         tracing::warn!(
                             block_id = %block.id,
                             path = ?file_path,
@@ -1162,7 +1201,9 @@ impl MemoryCache {
                                 );
                                 // tx drops without commit → implicit rollback.
                             } else if let Err(e) = crate::subscriber::task::reconcile_task_list(
-                                &tx, block_id, reconcile_doc,
+                                &tx,
+                                block_id,
+                                reconcile_doc,
                             ) {
                                 metrics::counter!("memory.external_edit.reconcile_failed")
                                     .increment(1);
@@ -1285,34 +1326,35 @@ impl MemoryCache {
         // we need to handle this carefully.
         let query_embedding = if options.mode.needs_embedding() {
             if let Some(provider) = &self.embedding_provider {
-                // Use a one-shot runtime to drive the async embed call.
-                // This is acceptable because embedding generation is
-                // inherently I/O-bound and infrequent.
-                match tokio::runtime::Handle::try_current() {
-                    Ok(handle) => {
-                        match std::thread::scope(|s| {
-                            let provider = provider.clone();
-                            let query = query.to_string();
-                            s.spawn(move || handle.block_on(provider.embed_query(&query)))
-                                .join()
-                        }) {
-                            Ok(Ok(embedding)) => Some(embedding),
-                            Ok(Err(e)) => {
-                                tracing::warn!(
-                                    "Failed to generate embedding for query, falling back to FTS: {}",
-                                    e
-                                );
-                                None
-                            }
-                            Err(_) => {
-                                tracing::warn!("Embedding thread panicked, falling back to FTS");
-                                None
-                            }
+                // Prefer the stored handle (set by attach() at construction).
+                // Fall back to Handle::try_current() for callers that happen
+                // to run inside an ambient runtime; warn if neither.
+                let handle = self
+                    .tokio_handle
+                    .clone()
+                    .or_else(|| tokio::runtime::Handle::try_current().ok());
+                match handle {
+                    Some(handle) => match std::thread::scope(|s| {
+                        let provider = provider.clone();
+                        let q = query.to_string();
+                        s.spawn(move || handle.block_on(provider.embed_query(&q))).join()
+                    }) {
+                        Ok(Ok(embedding)) => Some(embedding),
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                "Failed to generate embedding for query, falling back to FTS: {}",
+                                e
+                            );
+                            None
                         }
-                    }
-                    Err(_) => {
+                        Err(_) => {
+                            tracing::warn!("Embedding thread panicked, falling back to FTS");
+                            None
+                        }
+                    },
+                    None => {
                         tracing::warn!(
-                            "No tokio runtime available for embedding generation, falling back to FTS"
+                            "No tokio handle (stored or ambient) for query embedding, falling back to FTS"
                         );
                         None
                     }
@@ -1417,6 +1459,18 @@ impl MemoryCache {
 
         // Execute search.
         let results = builder.execute().mem()?;
+
+        tracing::info!(
+            "search_impl: agent_id_filter={:?} content_types={:?} mode={:?} embedding_present={} returned={}",
+            agent_id_filter,
+            options.content_types,
+            effective_mode,
+            query_embedding.is_some(),
+            results.len()
+        );
+        for r in &results {
+            tracing::info!("search_impl result: {:?}", r);
+        }
 
         Ok(results.into_iter().map(db_search_result_to_core).collect())
     }
@@ -2528,6 +2582,21 @@ impl MemoryStore for MemoryCache {
         // Store in DB.
         pattern_db::queries::create_archival_entry(&*self.db.get().mem()?, &entry).mem()?;
 
+        // Push a re-embed request so the vector arm of hybrid retrieval can
+        // match this entry. Without this, archival inserts go to FTS only —
+        // search hits are limited to literal-word overlap. Drop the send if
+        // the queue isn't configured (no embedding provider in test setups).
+        if let Some(tx) = &self.reembed_tx {
+            let bytes = content.as_bytes().to_vec();
+            let hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
+            let _ = tx.send(crate::subscriber::event::ReembedRequest {
+                block_id: entry_id.clone(),
+                content_type: pattern_db::vector::ContentType::ArchivalEntry,
+                canonical_bytes: bytes,
+                content_hash: hash,
+            });
+        }
+
         Ok(entry_id)
     }
 
@@ -2537,17 +2606,62 @@ impl MemoryStore for MemoryCache {
         query: &str,
         limit: usize,
     ) -> MemoryResult<Vec<ArchivalEntry>> {
-        // Use rich search with FTS mode.
+        // Hybrid retrieval: compute query embedding (if provider available)
+        // so the vector arm of execute_hybrid actually fires. Without this,
+        // the search builder receives only a text query and falls into the
+        // FTS-only branch even when SearchMode::Hybrid is requested.
+        let query_embedding = if let Some(provider) = &self.embedding_provider {
+            // Prefer the stored handle (set by callers via with_tokio_handle).
+            // Fall back to Handle::try_current() for callers that happen to
+            // run inside an ambient runtime; warn if neither is available.
+            let handle = self
+                .tokio_handle
+                .clone()
+                .or_else(|| tokio::runtime::Handle::try_current().ok());
+            match handle {
+                Some(handle) => match std::thread::scope(|s| {
+                    let provider = provider.clone();
+                    let q = query.to_string();
+                    s.spawn(move || handle.block_on(provider.embed_query(&q))).join()
+                }) {
+                    Ok(Ok(emb)) => Some(emb),
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            "archival query embedding failed, falling back to FTS-only: {}",
+                            e
+                        );
+                        None
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "archival query embedding thread panicked, falling back to FTS-only"
+                        );
+                        None
+                    }
+                },
+                None => {
+                    tracing::warn!(
+                        "no tokio handle (stored or ambient) for archival query embedding, falling back to FTS-only"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let search_conn = self.db.get().mem()?;
         let key = scope.to_db_key();
         tracing::info!("agent id used: {key}");
-        let results = pattern_db::search::search(&search_conn)
+        let mut builder = pattern_db::search::search(&search_conn)
             .text(query)
-            .mode(pattern_db::search::SearchMode::FtsOnly)
+            .mode(pattern_db::search::SearchMode::Hybrid)
             .limit(limit as i64)
-            .filter(pattern_db::search::ContentFilter::archival(Some(&key)))
-            .execute()
-            .mem()?;
+            .filter(pattern_db::search::ContentFilter::archival(Some(&key)));
+        if let Some(ref emb) = query_embedding {
+            builder = builder.embedding(emb);
+        }
+        let results = builder.execute().mem()?;
 
         // Convert search results to ArchivalEntry.
         let mut entries = Vec::new();
@@ -3295,7 +3409,11 @@ mod tests {
         let blocks = cache
             .list_blocks(BlockFilter::by_agent(scope.to_db_key()))
             .unwrap();
-        assert_eq!(blocks.len(), 1, "reactivation must not produce a duplicate row");
+        assert_eq!(
+            blocks.len(),
+            1,
+            "reactivation must not produce a duplicate row"
+        );
     }
 
     #[test]
@@ -3373,7 +3491,10 @@ mod tests {
 
         // Reactivation must reuse the prior id.
         let id2 = doc2.metadata().id.clone();
-        assert_eq!(id1, id2, "reactivation must reuse the soft-deleted block's id");
+        assert_eq!(
+            id1, id2,
+            "reactivation must reuse the soft-deleted block's id"
+        );
 
         // The hydrated doc carries the prior content as the starting
         // state — the new BlockCreate's content (none yet) hasn't been
@@ -3390,9 +3511,7 @@ mod tests {
         cache.persist_block(&scope, "reusable").unwrap();
 
         // Verify visible content is the new body.
-        let rendered = cache
-            .get_rendered_content(&scope, "reusable")
-            .unwrap();
+        let rendered = cache.get_rendered_content(&scope, "reusable").unwrap();
         assert_eq!(rendered, Some("second body".to_string()));
 
         // List blocks: exactly one row (the reactivated one).
@@ -3415,9 +3534,13 @@ mod tests {
         cache
             .create_block(
                 &scope,
-                BlockCreate::new("shapeshifter", MemoryBlockType::Working, BlockSchema::text())
-                    .with_description("text")
-                    .with_char_limit(1000),
+                BlockCreate::new(
+                    "shapeshifter",
+                    MemoryBlockType::Working,
+                    BlockSchema::text(),
+                )
+                .with_description("text")
+                .with_char_limit(1000),
             )
             .unwrap();
         cache.delete_block(&scope, "shapeshifter").unwrap();
@@ -5106,10 +5229,17 @@ mod tests {
         // 3. Fresh cache with mount_path (simulates daemon restart).
         let (reembed_tx, _reembed_rx) = tokio::sync::mpsc::unbounded_channel();
         let (hb_tx, hb_rx) = crossbeam_channel::bounded::<crate::subscriber::event::Heartbeat>(64);
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let _guard = rt.enter();
-        let cache = MemoryCache::new(Arc::clone(&dbs))
-            .with_mount_path(mount.clone(), reembed_tx, hb_tx, hb_rx);
+        let cache = MemoryCache::new(Arc::clone(&dbs)).with_mount_path(
+            mount.clone(),
+            reembed_tx,
+            hb_tx,
+            hb_rx,
+        );
 
         // 4. Hydrate — should run disk-merge.
         let _doc = MemoryStore::get_block(&cache, &scope, "merge-test")
@@ -5126,10 +5256,13 @@ mod tests {
         );
 
         // 6. New DB update with author="disk-merge-on-hydrate" was persisted.
-        let block_db =
-            pattern_db::queries::get_block_by_label(&dbs.get().unwrap(), &scope.to_db_key(), "merge-test")
-                .unwrap()
-                .expect("block exists");
+        let block_db = pattern_db::queries::get_block_by_label(
+            &dbs.get().unwrap(),
+            &scope.to_db_key(),
+            "merge-test",
+        )
+        .unwrap()
+        .expect("block exists");
         let (_chk, all_updates) =
             pattern_db::queries::get_checkpoint_and_updates(&dbs.get().unwrap(), &block_db.id)
                 .unwrap();
@@ -5139,7 +5272,10 @@ mod tests {
         assert!(
             merge_update.is_some(),
             "a 'disk-merge-on-hydrate' update must be persisted; updates: {:?}",
-            all_updates.iter().map(|u| (u.seq, u.source.clone())).collect::<Vec<_>>()
+            all_updates
+                .iter()
+                .map(|u| (u.seq, u.source.clone()))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -5181,18 +5317,29 @@ mod tests {
 
         let (reembed_tx, _reembed_rx) = tokio::sync::mpsc::unbounded_channel();
         let (hb_tx, hb_rx) = crossbeam_channel::bounded::<crate::subscriber::event::Heartbeat>(64);
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let _guard = rt.enter();
-        let cache = MemoryCache::new(Arc::clone(&dbs))
-            .with_mount_path(mount.clone(), reembed_tx, hb_tx, hb_rx);
+        let cache = MemoryCache::new(Arc::clone(&dbs)).with_mount_path(
+            mount.clone(),
+            reembed_tx,
+            hb_tx,
+            hb_rx,
+        );
 
         // Two sequential appends mimicking Memory.append handler flow.
-        let doc1 = MemoryStore::get_block(&cache, &scope, "multi-append").unwrap().unwrap();
+        let doc1 = MemoryStore::get_block(&cache, &scope, "multi-append")
+            .unwrap()
+            .unwrap();
         doc1.append("first append\n", false).unwrap();
         MemoryStore::mark_dirty(&cache, &scope, "multi-append").unwrap();
         MemoryStore::persist_block(&cache, &scope, "multi-append").unwrap();
 
-        let doc2 = MemoryStore::get_block(&cache, &scope, "multi-append").unwrap().unwrap();
+        let doc2 = MemoryStore::get_block(&cache, &scope, "multi-append")
+            .unwrap()
+            .unwrap();
         doc2.append("second append\n", false).unwrap();
         MemoryStore::mark_dirty(&cache, &scope, "multi-append").unwrap();
         MemoryStore::persist_block(&cache, &scope, "multi-append").unwrap();

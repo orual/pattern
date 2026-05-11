@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use pattern_core::traits::MemoryStore;
-use pattern_core::types::memory_types::{MemorySearchScope, Scope, SearchOptions};
+use pattern_core::types::memory_types::{MemorySearchScope, Scope, SearchMode, SearchOptions};
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
@@ -110,10 +110,14 @@ impl EffectHandler<SessionContext> for SearchHandler {
             let scope = parse_scope(scope_str.as_deref())?;
             let agents = resolve_scope(&scope, &agent_id, &*store)?;
 
+            // Hybrid mode by default — caller asked for Search.* (not
+            // an FTS-specific surface), and they almost certainly want
+            // semantic recall over conversation history / archival /
+            // blocks, not just literal-token matching.
             let options = match domain {
-                SearchDomain::Messages => SearchOptions::new().messages_only(),
-                SearchDomain::Archival => SearchOptions::new().archival_only(),
-                SearchDomain::All => SearchOptions::new(),
+                SearchDomain::Messages => SearchOptions::new().mode(SearchMode::Hybrid).messages_only(),
+                SearchDomain::Archival => SearchOptions::new().mode(SearchMode::Hybrid).archival_only(),
+                SearchDomain::All => SearchOptions::new().mode(SearchMode::Hybrid),
             };
 
             // Collect results across all permitted agents.

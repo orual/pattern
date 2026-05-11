@@ -140,12 +140,6 @@ pub const ALL_CLASSES: &[ConstructorClass] = &[
         class: EffectClass::Observe,
         runtime_check: RuntimeClassCheck::Skip,
     },
-    ConstructorClass {
-        module: "Recall",
-        constructor: "RecallGet",
-        class: EffectClass::Observe,
-        runtime_check: RuntimeClassCheck::Enforce,
-    },
     // ── Pattern.Tasks (8) ────────────────────────────────────────────────
     ConstructorClass {
         module: "Tasks",

@@ -166,7 +166,15 @@ pub fn attach_with_paths(
     // and, when provided, the first-party skill directory for trust-tier
     // enforcement. The first-party dir comes from pattern_runtime and cannot
     // be baked into pattern_memory (circular dep: pattern_memory ← pattern_runtime).
-    let mut mc = MemoryCache::new(db.clone()).with_mount_path(
+    // Capture tokio handle FIRST so with_mount_path can use it when spawning
+    // the supervisor task. Same-context try_current still works for callers that
+    // happen to run inside an ambient runtime, but the stored handle is the
+    // canonical source going forward.
+    let mut mc = MemoryCache::new(db.clone());
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        mc = mc.with_tokio_handle(handle);
+    }
+    mc = mc.with_mount_path(
         mount_path.clone(),
         reembed_tx,
         heartbeat_tx,

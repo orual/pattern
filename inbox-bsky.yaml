@@ -285,7 +285,7 @@ notifications:
       ## Interaction History
       - **2026-05-05:** Profile initialized via automated sync discovery.
 _sync:
-  timestamp: 2026-05-10T19:55:47.322Z
+  timestamp: 2026-05-10T23:55:00.292Z
   platform: bsky
   unreadOnly: true
   newCount: 0

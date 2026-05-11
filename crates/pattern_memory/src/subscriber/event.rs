@@ -30,8 +30,12 @@ pub struct Heartbeat {
 /// `tokio::sync::mpsc::UnboundedSender`.
 #[derive(Debug, Clone)]
 pub struct ReembedRequest {
-    /// Block ID of the document to re-embed.
+    /// Block ID of the document to re-embed (or archival entry ID for ArchivalEntry).
     pub block_id: String,
+    /// Content type — distinguishes MemoryBlock writes from ArchivalEntry inserts
+    /// (and future Message / FilePassage paths). Routes to the correct vector
+    /// index row at re-embed time.
+    pub content_type: pattern_db::vector::ContentType,
     /// Canonical bytes of the rendered content.
     pub canonical_bytes: Vec<u8>,
     /// blake3 hash of `canonical_bytes`.

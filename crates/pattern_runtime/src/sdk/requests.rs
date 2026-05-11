@@ -94,7 +94,7 @@ mod parity {
             "SearchReq",
             &["SearchMessages", "SearchArchival", "SearchAll"],
         ),
-        ("RecallReq", &["RecallInsert", "RecallSearch", "RecallGet"]),
+        ("RecallReq", &["RecallInsert", "RecallSearch"]),
         ("MessageReq", &["Ask", "Send", "Reply", "Notify"]),
         ("ShellReq", &["Execute", "Spawn", "Kill", "Status"]),
         (
@@ -268,8 +268,7 @@ mod parity {
         use super::RecallReq;
         let _ = RecallReq::Insert(String::new());
         let _ = RecallReq::Search(String::new(), None);
-        let _ = RecallReq::Get(String::new());
-        assert_eq!(count("RecallReq"), 3);
+        assert_eq!(count("RecallReq"), 2);
     }
 
     #[test]

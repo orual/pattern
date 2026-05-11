@@ -870,6 +870,7 @@ async fn persist_messages(
     batch_type: pattern_db::models::BatchType,
     origin: &pattern_core::types::origin::MessageOrigin,
     step_label: &str,
+    reembed_tx: Option<&tokio::sync::mpsc::UnboundedSender<pattern_memory::subscriber::event::ReembedRequest>>,
 ) -> Result<(), RuntimeError> {
     let conn = db
         .get()
@@ -885,8 +886,31 @@ async fn persist_messages(
                 reason: e.to_string(),
             }
         })?;
+        // Dispatch reembed for vector-index coverage of message history.
+        // Drop sends are best-effort — embedding pipeline absence is not a
+        // persistence failure.
+        if let Some(tx) = reembed_tx {
+            let content_text = render_message_for_embedding(msg);
+            if !content_text.is_empty() {
+                let bytes = content_text.into_bytes();
+                let hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
+                let _ = tx.send(pattern_memory::subscriber::event::ReembedRequest {
+                    block_id: db_msg.id.clone(),
+                    content_type: pattern_db::vector::ContentType::Message,
+                    canonical_bytes: bytes,
+                    content_hash: hash,
+                });
+            }
+        }
     }
     Ok(())
+}
+
+/// Render a message into the text used for embedding generation.
+/// Uses the message's first text content (other parts like tool calls
+/// don't carry semantic signal worth indexing for retrieval).
+fn render_message_for_embedding(msg: &Message) -> String {
+    msg.chat_message.content.first_text().unwrap_or("").to_string()
 }
 
 // ---- drive_step — loop driver -------------------------------------------
@@ -1191,6 +1215,7 @@ pub async fn drive_step(
             batch_type,
             &cur_input.origin,
             "pre-loop input persist (durability before maybe_compact)",
+            ctx.reembed_tx(),
         )
         .await?;
         for message in &cur_input.messages {
@@ -1436,6 +1461,7 @@ pub async fn drive_step(
         let batch_type = infer_batch_type(&cur_input.origin);
         let db = ctx.db();
         let aid = ctx.agent_id();
+        let reembed_tx = ctx.reembed_tx();
 
         // Input messages (from the caller's TurnInput). Origin is the
         // turn's own input origin (whoever activated this turn — Partner,
@@ -1447,6 +1473,7 @@ pub async fn drive_step(
             batch_type,
             &cur_input.origin,
             "upsert input messages",
+            reembed_tx,
         )
         .await?;
 
@@ -1463,6 +1490,7 @@ pub async fn drive_step(
             batch_type,
             &dispatch_origin,
             "upsert output messages",
+            reembed_tx,
         )
         .await?;
 

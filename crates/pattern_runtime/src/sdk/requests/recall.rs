@@ -14,8 +14,4 @@ pub enum RecallReq {
     /// `RecallSearch :: RecallQuery -> Maybe Scope -> Recall [ArchivalHit]`
     #[core(module = "Pattern.Recall", name = "RecallSearch")]
     Search(String, Option<String>),
-
-    /// `RecallGet :: EntryId -> Recall ArchivalContent`
-    #[core(module = "Pattern.Recall", name = "RecallGet")]
-    Get(String),
 }
