@@ -2662,6 +2662,7 @@ dependencies = [
 [[package]]
 name = "genai"
 version = "0.6.0-beta.17+pattern.1"
+source = "git+https://github.com/orual/rust-genai#07a434e91d17b55f69ed1e6e650067ad987828e6"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -8675,6 +8676,7 @@ dependencies = [
 [[package]]
 name = "tidepool-bridge"
 version = "0.1.0"
+source = "git+https://github.com/orual/tidepool.git#77dd58e4fca734d626bda8a2952e8fa26a3c2841"
 dependencies = [
  "serde_json",
  "thiserror 1.0.69",
@@ -8685,6 +8687,7 @@ dependencies = [
 [[package]]
 name = "tidepool-bridge-derive"
 version = "0.1.0"
+source = "git+https://github.com/orual/tidepool.git#77dd58e4fca734d626bda8a2952e8fa26a3c2841"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8694,6 +8697,7 @@ dependencies = [
 [[package]]
 name = "tidepool-codegen"
 version = "0.1.0"
+source = "git+https://github.com/orual/tidepool.git#77dd58e4fca734d626bda8a2952e8fa26a3c2841"
 dependencies = [
  "cc",
  "cranelift-codegen",
@@ -8715,6 +8719,7 @@ dependencies = [
 [[package]]
 name = "tidepool-effect"
 version = "0.1.0"
+source = "git+https://github.com/orual/tidepool.git#77dd58e4fca734d626bda8a2952e8fa26a3c2841"
 dependencies = [
  "frunk",
  "thiserror 1.0.69",
@@ -8726,6 +8731,7 @@ dependencies = [
 [[package]]
 name = "tidepool-eval"
 version = "0.1.0"
+source = "git+https://github.com/orual/tidepool.git#77dd58e4fca734d626bda8a2952e8fa26a3c2841"
 dependencies = [
  "im",
  "thiserror 1.0.69",
@@ -8735,6 +8741,7 @@ dependencies = [
 [[package]]
 name = "tidepool-heap"
 version = "0.1.0"
+source = "git+https://github.com/orual/tidepool.git#77dd58e4fca734d626bda8a2952e8fa26a3c2841"
 dependencies = [
  "bumpalo",
  "thiserror 1.0.69",
@@ -8745,6 +8752,7 @@ dependencies = [
 [[package]]
 name = "tidepool-optimize"
 version = "0.1.0"
+source = "git+https://github.com/orual/tidepool.git#77dd58e4fca734d626bda8a2952e8fa26a3c2841"
 dependencies = [
  "rustc-hash",
  "tidepool-eval",
@@ -8754,6 +8762,7 @@ dependencies = [
 [[package]]
 name = "tidepool-repr"
 version = "0.1.0"
+source = "git+https://github.com/orual/tidepool.git#77dd58e4fca734d626bda8a2952e8fa26a3c2841"
 dependencies = [
  "ciborium",
  "rustc-hash",
@@ -8763,6 +8772,7 @@ dependencies = [
 [[package]]
 name = "tidepool-runtime"
 version = "0.1.0"
+source = "git+https://github.com/orual/tidepool.git#77dd58e4fca734d626bda8a2952e8fa26a3c2841"
 dependencies = [
  "blake3",
  "serde_json",
@@ -8772,13 +8782,13 @@ dependencies = [
  "tidepool-effect",
  "tidepool-eval",
  "tidepool-repr",
- "tracing",
  "which 7.0.3",
 ]
 
 [[package]]
 name = "tidepool-testing"
 version = "0.1.0"
+source = "git+https://github.com/orual/tidepool.git#77dd58e4fca734d626bda8a2952e8fa26a3c2841"
 dependencies = [
  "criterion",
  "proptest",

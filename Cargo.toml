@@ -54,8 +54,8 @@ metrics = "0.24"
 # `claude-opus-4-7` in the reasoning-support arrays. Path dep during v3
 # foundation for ease of dual-iteration; tracked for conversion to git-rev
 # dep in the post-foundation dep-hardening plan.
-genai = { path = "../rust-genai" }
-# genai = { git = "https://github.com/orual/rust-genai" }
+# genai = { path = "../rust-genai" }
+genai = { git = "https://github.com/orual/rust-genai" }
 # genai = { git = "https://github.com/jeremychone/rust-genai" }
 
 # Utilities
@@ -186,14 +186,14 @@ bsky-sdk = { version = "0.1.20", features = ["default-client"] }
 # Tidepool: Haskell-in-Rust JIT runtime. Path deps during the v3 rewrite
 # for ease of dual-iteration; tracked for conversion to git-rev deps
 # (or upstream crates.io releases) in the post-foundation dep-hardening plan.
-tidepool-runtime = { path = "../tidepool/tidepool-runtime" }
-tidepool-codegen = { path = "../tidepool/tidepool-codegen" }
-tidepool-effect  = { path = "../tidepool/tidepool-effect"  }
-tidepool-bridge  = { path = "../tidepool/tidepool-bridge"  }
-tidepool-bridge-derive = { path = "../tidepool/tidepool-bridge-derive" }
-tidepool-repr    = { path = "../tidepool/tidepool-repr"    }
-tidepool-eval    = { path = "../tidepool/tidepool-eval"    }
-tidepool-testing = { path = "../tidepool/tidepool-testing" }
+tidepool-runtime = { git = "https://github.com/orual/tidepool.git" }
+tidepool-codegen = { git = "https://github.com/orual/tidepool.git" }
+tidepool-effect  = { git = "https://github.com/orual/tidepool.git" }
+tidepool-bridge  = { git = "https://github.com/orual/tidepool.git" }
+tidepool-bridge-derive = { git = "https://github.com/orual/tidepool.git" }
+tidepool-repr    = { git = "https://github.com/orual/tidepool.git" }
+tidepool-eval    = { git = "https://github.com/orual/tidepool.git" }
+tidepool-testing = { git = "https://github.com/orual/tidepool.git" }
 frunk = "0.4"
 
 # Test utilities
