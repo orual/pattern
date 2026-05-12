@@ -1460,7 +1460,7 @@ impl MemoryCache {
         // Execute search.
         let results = builder.execute().mem()?;
 
-        tracing::info!(
+        tracing::debug!(
             "search_impl: agent_id_filter={:?} content_types={:?} mode={:?} embedding_present={} returned={}",
             agent_id_filter,
             options.content_types,
@@ -1469,7 +1469,7 @@ impl MemoryCache {
             results.len()
         );
         for r in &results {
-            tracing::info!("search_impl result: {:?}", r);
+            tracing::debug!("search_impl result: {:?}", r);
         }
 
         Ok(results.into_iter().map(db_search_result_to_core).collect())
@@ -2652,7 +2652,7 @@ impl MemoryStore for MemoryCache {
 
         let search_conn = self.db.get().mem()?;
         let key = scope.to_db_key();
-        tracing::info!("agent id used: {key}");
+        tracing::debug!("search_archival agent id used: {key}");
         let mut builder = pattern_db::search::search(&search_conn)
             .text(query)
             .mode(pattern_db::search::SearchMode::Hybrid)
@@ -2666,7 +2666,7 @@ impl MemoryStore for MemoryCache {
         // Convert search results to ArchivalEntry.
         let mut entries = Vec::new();
         for result in results {
-            tracing::info!("search results: {:?}", result);
+            tracing::debug!("search_archival result: {:?}", result);
             if let Some(entry) =
                 pattern_db::queries::get_archival_entry(&search_conn, &result.id).mem()?
             {

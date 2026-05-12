@@ -62,13 +62,15 @@ data TaskEdgeRef = TaskEdgeRef
 --   The constructor names carry a @Wake@ prefix so they remain
 --   distinct from any GADT constructors that might be in scope.
 data WakeCondition
-  -- | Fire repeatedly every @period_ms@ milliseconds. The runtime
-  --   rejects sub-second periods to prevent runaway polling.
-  = WakeInterval Int                 -- ^ @WakeInterval period_ms@.
-  -- | Fire once after @deadline_ms@ milliseconds elapse, with
+  -- | Fire repeatedly every @period_min@ minutes. The runtime
+  --   rejects sub-minute periods to prevent runaway polling.
+  --   (Wake timers are for long-running tracking, not real-time
+  --   work — minutes is the granularity agents want here.)
+  = WakeInterval Int                 -- ^ @WakeInterval period_min@.
+  -- | Fire once after @deadline_min@ minutes elapse, with
   --   @task@ as the timed-out unit. The agent reads the task on
   --   wake to decide what to do (chase, escalate, drop).
-  | WakeTaskTimeout BlockRef Int     -- ^ @WakeTaskTimeout task deadline_ms@.
+  | WakeTaskTimeout BlockRef Int     -- ^ @WakeTaskTimeout task deadline_min@.
   -- | Fire when @block@'s rendered content changes (any author).
   --   Self-edits are filtered out by the subscriber.
   | WakeBlockChanged BlockRef        -- ^ @WakeBlockChanged block@.
@@ -78,25 +80,54 @@ data WakeCondition
   | WakeTaskDependencyResolved TaskEdgeRef
   -- | Fire when @program@ (a Haskell condition compiled by the
   --   runtime) returns @True@. Evaluated on a read-only restricted
-  --   bundle (Observe-class effects only). @period_ms@ is the
-  --   interval between evaluations (minimum 1000ms; registry rejects
-  --   sub-second values).
-  | WakeCustom Text Text Int         -- ^ @WakeCustom id program period_ms@.
+  --   bundle (Observe-class effects only). @period_min@ is the
+  --   interval between evaluations in minutes (minimum 1; registry
+  --   rejects sub-minute values).
+  | WakeCustom Text Text Int         -- ^ @WakeCustom id program period_min@.
+
+-- | One row in the 'list' response. Pairs the wake id with the
+--   condition it was registered with, so callers can see both what
+--   is registered and its parameters without interpreting an opaque
+--   id. Mirror of @WireWakeListItem@ on the Rust side.
+data WakeListItem = WakeListItem
+  { wakeListItemWakeId    :: WakeId
+  , wakeListItemCondition :: WakeCondition
+  }
 
 -- | Effect algebra.
 data Wake a where
   -- | Register a condition; returns the wake id for later
   --   'unregister'. Capability-gated on
-  --   @WakeConditionRegistration@.
-  Register   :: WakeCondition -> Wake WakeId
+  --   @WakeConditionRegistration@. The optional first arg is a
+  --   caller-supplied name; when @Nothing@ the runtime mints a fresh
+  --   UUID-shaped id. Names are scoped per-agent (composite PK), so
+  --   two personas can both use the same name. Use the 'register' and
+  --   'registerNamed' helpers rather than constructing 'Register'
+  --   manually.
+  Register   :: Maybe Text -> WakeCondition -> Wake WakeId
   -- | Unregister by id. Returns whether the id was actually
   --   registered (@False@ for unknown ids — no error).
   Unregister :: WakeId -> Wake Bool
+  -- | List wake conditions registered by the dispatching agent.
+  --   Returns one 'WakeListItem' per active registration. Scoped
+  --   to the dispatching agent — callers see only their own wakes.
+  List       :: Wake [WakeListItem]
 
--- | Register a wake condition. Capability-gated.
+-- | Register a wake condition with a runtime-minted id. Capability-gated.
 register :: Member Wake effs => WakeCondition -> Eff effs WakeId
-register cond = send (Register cond)
+register cond = send (Register Nothing cond)
+
+-- | Register a wake condition with a caller-supplied name. The name
+--   becomes the returned 'WakeId' and persists across restarts (rows
+--   are keyed by @(agent_id, wake_id)@). Names are validated: must be
+--   non-empty, <= 128 chars, no control chars.
+registerNamed :: Member Wake effs => Text -> WakeCondition -> Eff effs WakeId
+registerNamed name cond = send (Register (Just name) cond)
 
 -- | Unregister a previously-registered wake by id.
 unregister :: Member Wake effs => WakeId -> Eff effs Bool
 unregister wid = send (Unregister wid)
+
+-- | List wakes registered by the dispatching agent.
+list :: Member Wake effs => Eff effs [WakeListItem]
+list = send List

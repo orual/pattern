@@ -15,7 +15,8 @@
 
 use jiff::Span;
 use smol_str::SmolStr;
-use tidepool_bridge_derive::FromCore;
+use serde::{Deserialize, Serialize};
+use tidepool_bridge_derive::{FromCore, ToCore};
 
 use pattern_core::types::block_ref::BlockRef;
 use pattern_core::types::memory_types::TaskEdgeRef;
@@ -31,7 +32,7 @@ use crate::wake::WakeCondition;
 /// `WireBlockRef`. The two are structurally identical; we don't share
 /// because the derive layer keys lookups on
 /// `(module, type_name)` and the Haskell module is different here.
-#[derive(Debug, FromCore)]
+#[derive(Debug, Clone, FromCore, ToCore, Serialize, Deserialize)]
 #[core(module = "Pattern.Wake", name = "BlockRef")]
 pub struct WireBlockRef {
     pub label: String,
@@ -54,7 +55,7 @@ impl From<WireBlockRef> for BlockRef {
 /// records on the wire (avoids the named-field-variant restriction
 /// that the `FromCore` derive imposes when these appear inside an
 /// enum variant).
-#[derive(Debug, FromCore)]
+#[derive(Debug, Clone, FromCore, ToCore, Serialize, Deserialize)]
 #[core(module = "Pattern.Wake", name = "TaskEdgeRef")]
 pub struct WireTaskEdgeRef {
     pub block: String,
@@ -75,24 +76,27 @@ impl From<WireTaskEdgeRef> for TaskEdgeRef {
 /// Wire mirror of [`WakeCondition`]. Constructor names are
 /// `Wake`-prefixed on the Haskell side.
 ///
-/// `period_ms` / `deadline_ms` are wall-clock millisecond durations
+/// `period_min` / `deadline_min` are wall-clock minute durations
 /// converted to [`SpanCompare`] at the conversion boundary. Wake
 /// timers are wall-clock-bounded (rejected at registration if they
-/// carry calendar units), so milliseconds is the right granularity.
+/// carry calendar units). The Int is minutes (not milliseconds or
+/// seconds): wake timers are for long-running tracking, never
+/// sub-second polling, so minutes is the granularity agents want
+/// to think in. The registry enforces a 1-minute minimum.
 ///
 /// `TaskDependencyResolved` carries only the [`TaskEdgeRef`]; the
 /// dispatching agent's id is attached by the handler from
 /// [`crate::session::HasPermissionBridge::dispatch_agent_id`].
-#[derive(Debug, FromCore)]
+#[derive(Debug, Clone, FromCore, ToCore, Serialize, Deserialize)]
 pub enum WireWakeCondition {
-    /// `Interval period_ms`. Wall-clock period in milliseconds; the
+    /// `Interval period_min`. Wall-clock period in minutes; the
     /// registry rejects values below the per-session minimum (default
-    /// 1s).
+    /// 1 minute).
     #[core(module = "Pattern.Wake", name = "WakeInterval")]
     Interval(i64),
-    /// `TaskTimeout task_block deadline_ms`. Fires once after the
-    /// deadline elapses; the agent then reads `task` to act on the
-    /// timeout.
+    /// `TaskTimeout task_block deadline_min`. Fires once after the
+    /// deadline elapses (deadline in minutes); the agent then reads
+    /// `task` to act on the timeout.
     #[core(module = "Pattern.Wake", name = "WakeTaskTimeout")]
     TaskTimeout(WireBlockRef, i64),
     /// `BlockChanged block`. Fires whenever `block`'s rendered
@@ -103,8 +107,8 @@ pub enum WireWakeCondition {
     /// transitions to `Completed`.
     #[core(module = "Pattern.Wake", name = "WakeTaskDependencyResolved")]
     TaskDependencyResolved(WireTaskEdgeRef),
-    /// `Custom id program period_ms`. Evaluates the Haskell program
-    /// every `period_ms` milliseconds against a read-only restricted
+    /// `Custom id program period_min`. Evaluates the Haskell program
+    /// every `period_min` minutes against a read-only restricted
     /// bundle; pokes the mailbox when the result is `True`.
     #[core(module = "Pattern.Wake", name = "WakeCustom")]
     Custom(String, String, i64),
@@ -118,12 +122,12 @@ impl WireWakeCondition {
     /// other variants are agent-agnostic.
     pub fn into_condition(self, agent_id: SmolStr) -> WakeCondition {
         match self {
-            Self::Interval(period_ms) => WakeCondition::Interval {
-                period: SpanCompare(Span::new().milliseconds(period_ms)),
+            Self::Interval(period_min) => WakeCondition::Interval {
+                period: SpanCompare(Span::new().minutes(period_min)),
             },
-            Self::TaskTimeout(task, deadline_ms) => WakeCondition::TaskTimeout {
+            Self::TaskTimeout(task, deadline_min) => WakeCondition::TaskTimeout {
                 task: task.into(),
-                deadline: SpanCompare(Span::new().milliseconds(deadline_ms)),
+                deadline: SpanCompare(Span::new().minutes(deadline_min)),
             },
             Self::BlockChanged(block) => WakeCondition::BlockChanged {
                 block: block.into(),
@@ -132,15 +136,33 @@ impl WireWakeCondition {
                 task: task.into(),
                 agent_id,
             },
-            Self::Custom(id, program, period_ms) => WakeCondition::Custom {
+            Self::Custom(id, program, period_min) => WakeCondition::Custom {
                 id: SmolStr::from(id),
                 program,
                 // Clamp negative or zero periods to the minimum; the registry
                 // validates and rejects them with WakeError::PeriodTooShort.
-                period: std::time::Duration::from_millis(period_ms.max(0) as u64),
+                period: std::time::Duration::from_secs((period_min.max(0) as u64) * 60),
             },
         }
     }
+}
+
+// ── WireWakeListItem ─────────────────────────────────────────────────────────
+
+/// One row in the `Wake.list` response. Pairs the wake id with the
+/// wire form of its condition so agents can see both what is
+/// registered and its parameters (period, deadline, watched block,
+/// etc.) without needing to interpret an opaque id.
+///
+/// `condition` carries the same `WireWakeCondition` that was originally
+/// passed to `register` — the registry stashes the wire form at
+/// register-time so the listing path doesn't need a reverse domain →
+/// wire conversion.
+#[derive(Debug, ToCore)]
+#[core(module = "Pattern.Wake", name = "WakeListItem")]
+pub struct WireWakeListItem {
+    pub wake_id: String,
+    pub condition: WireWakeCondition,
 }
 
 // ── WakeReq ──────────────────────────────────────────────────────────────────
@@ -148,12 +170,22 @@ impl WireWakeCondition {
 /// Rust mirror of the Haskell `Wake` GADT.
 #[derive(Debug, FromCore)]
 pub enum WakeReq {
-    /// Register a wake condition. Runtime mints a fresh id and
-    /// returns it to the agent.
+    /// Register a wake condition. The optional first field is a
+    /// caller-supplied name; when `None` the runtime mints a fresh UUID-shaped
+    /// id. Named ids are per-agent (composite PK `(agent_id, wake_id)` from
+    /// migration 0019), so two personas can both register a wake called
+    /// `social-check` without colliding.
     #[core(module = "Pattern.Wake", name = "Register")]
-    Register(WireWakeCondition),
+    Register(Option<String>, WireWakeCondition),
     /// Unregister a previously-registered wake by id. Returns
     /// whether the id was actually registered.
     #[core(module = "Pattern.Wake", name = "Unregister")]
     Unregister(String),
+    /// List wake conditions registered by the dispatching agent.
+    /// Returns `[(WakeId, WakeCondition)]` — one entry per active
+    /// registration. Scoped to the dispatching agent so callers see
+    /// only their own wakes; cross-agent listing would expose other
+    /// personas' wake state.
+    #[core(module = "Pattern.Wake", name = "List")]
+    List,
 }

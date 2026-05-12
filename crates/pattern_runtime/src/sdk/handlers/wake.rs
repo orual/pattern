@@ -61,13 +61,15 @@ impl DescribeEffect for WakeHandler {
             type_name: "Wake",
             description: "Register and unregister wake conditions (timers, block changes, task dependencies, custom programs)",
             constructors: std::borrow::Cow::Borrowed(&[
-                "Register   :: WakeCondition -> Wake WakeId",
-                "Unregister :: WakeId        -> Wake Bool",
+                "Register   :: Maybe Text -> WakeCondition -> Wake WakeId",
+                "Unregister :: WakeId                       -> Wake Bool",
+                "List       :: Wake [WakeListItem]",
             ]),
             type_defs: std::borrow::Cow::Borrowed(&[
                 "type WakeId = Text",
                 // Typed records — full field definitions live in Pattern.Wake.hs.
                 "data BlockRef    = BlockRef    { blockRefLabel :: Text, blockRefBlockId :: Text, blockRefAgentId :: Text }",
+                "data WakeListItem = WakeListItem { wakeListItemWakeId :: WakeId, wakeListItemCondition :: WakeCondition }",
                 "data TaskEdgeRef = TaskEdgeRef { taskEdgeBlock :: Text, taskEdgeItem :: Maybe Text }",
                 // Wake condition sum. Constructor names are `Wake`-prefixed to
                 // keep them out of the GADT constructor namespace; see
@@ -80,8 +82,10 @@ impl DescribeEffect for WakeHandler {
                  | WakeCustom Text Text",
             ]),
             helpers: std::borrow::Cow::Borrowed(&[
-                "register :: Member Wake effs => WakeCondition -> Eff effs Text\nregister cond = send (Register cond)",
+                "register :: Member Wake effs => WakeCondition -> Eff effs Text\nregister cond = send (Register Nothing cond)",
+                "registerNamed :: Member Wake effs => Text -> WakeCondition -> Eff effs Text\nregisterNamed name cond = send (Register (Just name) cond)",
                 "unregister :: Member Wake effs => Text -> Eff effs Bool\nunregister wid = send (Unregister wid)",
+                "list :: Member Wake effs => Eff effs [WakeListItem]\nlist = send List",
             ]),
         }
     }
@@ -101,8 +105,9 @@ impl EffectHandler<SessionContext> for WakeHandler {
         // flag check. Register/Unregister are both Coordinate/Skip, so this
         // returns Ok(()) immediately, but it's defensive for future reclassification.
         let constructor_name = match &req {
-            WakeReq::Register(_) => "Register",
+            WakeReq::Register(_, _) => "Register",
             WakeReq::Unregister(_) => "Unregister",
+            WakeReq::List => "List",
         };
         crate::sdk::effect_classes::check_effect_class(
             user.capabilities(),
@@ -141,13 +146,15 @@ impl EffectHandler<SessionContext> for WakeHandler {
         })?;
 
         match req {
-            WakeReq::Register(wire_cond) => handle_register(wire_cond, user, &registry, cx),
+            WakeReq::Register(name, wire_cond) => handle_register(name, wire_cond, user, &registry, cx),
             WakeReq::Unregister(id) => handle_unregister(id, &registry, cx),
+            WakeReq::List => handle_list(user, &registry, cx),
         }
     }
 }
 
 fn handle_register(
+    name: Option<String>,
     wire_cond: crate::sdk::requests::wake::WireWakeCondition,
     user: &SessionContext,
     registry: &Arc<WakeRegistry>,
@@ -165,9 +172,33 @@ fn handle_register(
         SmolStr::from(user.agent_id())
     });
 
-    let condition = wire_cond.into_condition(agent_id);
-    let wake_id = SmolStr::from(new_id().to_string());
-    match registry.register(wake_id.clone(), condition) {
+    let wire_for_listing = wire_cond.clone();
+    let condition = wire_cond.into_condition(agent_id.clone());
+    // Caller-supplied name takes precedence; validate basic shape.
+    let wake_id = match name {
+        Some(n) => {
+            let trimmed = n.trim();
+            if trimmed.is_empty() {
+                return Err(EffectError::Handler(
+                    "wake registration: name must not be empty".to_string(),
+                ));
+            }
+            if trimmed.len() > 128 {
+                return Err(EffectError::Handler(format!(
+                    "wake registration: name too long ({} > 128 chars)",
+                    trimmed.len()
+                )));
+            }
+            if trimmed.chars().any(|c| c.is_control()) {
+                return Err(EffectError::Handler(
+                    "wake registration: name must not contain control chars".to_string(),
+                ));
+            }
+            SmolStr::from(trimmed)
+        }
+        None => SmolStr::from(new_id().to_string()),
+    };
+    match registry.register(wake_id.clone(), condition, agent_id, wire_for_listing) {
         Ok(returned) => {
             cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
                 pattern_core::hooks::tags::WAKE_REGISTERED,
@@ -194,4 +225,27 @@ fn handle_unregister(
         ));
     }
     cx.respond(removed)
+}
+
+fn handle_list(
+    user: &SessionContext,
+    registry: &Arc<WakeRegistry>,
+    cx: &EffectContext<'_, SessionContext>,
+) -> Result<Value, EffectError> {
+    // Scope listing to the dispatching agent — cross-agent listing would
+    // expose other personas' wake state. Falls back to the session's
+    // configured agent_id for the `()` test shim path, matching the
+    // resolution used in handle_register.
+    let agent_id = user.dispatch_agent_id().unwrap_or_else(|| {
+        SmolStr::from(user.agent_id())
+    });
+    let entries = registry.list_for_agent(&agent_id);
+    let wires: Vec<crate::sdk::requests::wake::WireWakeListItem> = entries
+        .into_iter()
+        .map(|(wake_id, condition)| crate::sdk::requests::wake::WireWakeListItem {
+            wake_id: wake_id.to_string(),
+            condition,
+        })
+        .collect();
+    cx.respond(wires)
 }

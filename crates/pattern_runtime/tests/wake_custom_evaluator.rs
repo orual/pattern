@@ -54,7 +54,8 @@ async fn test_evaluator() -> (
         include_paths,
         tokio::runtime::Handle::current(),
         ctx.clone(),
-    );
+    )
+    .with_min_interval(std::time::Duration::from_millis(100));
 
     (evaluator, mailbox, ctx)
 }
@@ -604,7 +605,8 @@ async fn condition_cap_enforced() {
 
     let (mailbox, _) = Mailbox::new(PersonaId::from("agent-cap"));
     let evaluator = CustomEvaluator::new(mailbox, vec![], tokio::runtime::Handle::current(), ctx)
-        .with_max_conditions(2);
+        .with_max_conditions(2)
+        .with_min_interval(Duration::from_millis(100));
 
     // Register two conditions — should succeed.
     evaluator
@@ -673,7 +675,8 @@ async fn unregister_aborts_custom_task_and_frees_cap_slot() {
             tokio::runtime::Handle::current(),
             ctx,
         )
-        .with_max_conditions(3),
+        .with_max_conditions(3)
+        .with_min_interval(Duration::from_millis(100)),
     );
 
     let registry = pattern_runtime::wake::WakeRegistry::new(
@@ -688,7 +691,7 @@ async fn unregister_aborts_custom_task_and_frees_cap_slot() {
     // Step 1: register a condition via the WakeRegistry.
     let id = SmolStr::new("test-unreg-1");
     registry
-        .register(
+        .register_test(
             id.clone(),
             WakeCondition::Custom {
                 id: id.clone(),
@@ -729,7 +732,7 @@ async fn unregister_aborts_custom_task_and_frees_cap_slot() {
 
     // Step 3: re-register the same id — must succeed (slot was freed, not leaked).
     registry
-        .register(
+        .register_test(
             id.clone(),
             WakeCondition::Custom {
                 id: id.clone(),

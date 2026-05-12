@@ -69,7 +69,7 @@ The Haskell SDK exposes 19 effect modules: Memory, Shell, File, Mcp, Message, Se
 ### Wake system
 
 Agents can register wake conditions:
-- `WakeInterval` — periodic timer (milliseconds)
+- `WakeInterval` — periodic timer (minutes; minimum 1)
 - `WakeBlockChanged` — fire when a specific block is modified
 - `WakeTaskDependencyResolved` — fire when a task unblocks
 - `WakeCustom` — run a Haskell program periodically, fire when it returns True

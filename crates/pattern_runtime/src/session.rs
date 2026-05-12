@@ -1932,6 +1932,11 @@ pub struct WakeRegistryExtras {
     /// Optional memory store for `TaskDependencyResolved` evaluators. Production
     /// callers pass `cx.user().memory_store()` or the mounted store.
     pub memory_store: Option<Arc<dyn MemoryStore>>,
+    /// Optional ConstellationDb for wake persistence. When set, the wake
+    /// registry will mirror register/unregister operations to the
+    /// `wake_registrations` table and call `restore_for_agent` at session
+    /// open so wakes survive daemon restarts.
+    pub persistence_db: Option<Arc<pattern_db::ConstellationDb>>,
 }
 
 /// A running session: owns the handler bundle, eval worker, and checkpoint log.
@@ -2301,7 +2306,25 @@ impl TidepoolSession {
                 if let Some(store) = extras.memory_store {
                     wake_reg = wake_reg.with_memory_store(store);
                 }
-                ctx.with_wake_registry(Arc::new(wake_reg))
+                let restore_db = extras.persistence_db.clone();
+                if let Some(db) = extras.persistence_db {
+                    wake_reg = wake_reg.with_persistence(db);
+                }
+                let wake_reg = Arc::new(wake_reg);
+                // Replay persisted wakes for this agent. Best-effort: a
+                // failure to restore (or zero rows) doesn't fail session open.
+                if restore_db.is_some() {
+                    let restored = wake_reg.restore_for_agent(&smol_str::SmolStr::from(ctx.agent_id()));
+                    if restored > 0 {
+                        tracing::info!(
+                            target: "pattern_runtime::session",
+                            agent_id = %ctx.agent_id(),
+                            count = restored,
+                            "restored persisted wakes at session open"
+                        );
+                    }
+                }
+                ctx.with_wake_registry(wake_reg)
             } else {
                 ctx
             };

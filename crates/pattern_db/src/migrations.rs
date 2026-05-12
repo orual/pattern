@@ -50,6 +50,12 @@ static MEMORY_MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
             "../migrations/memory/0016_drop_legacy_coordination.sql"
         )),
         M::up(include_str!("../migrations/memory/0017_persona_status.sql")),
+        M::up(include_str!(
+            "../migrations/memory/0018_wake_registrations.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0019_wake_registrations_composite_pk.sql"
+        )),
     ])
 });
 

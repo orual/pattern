@@ -78,9 +78,12 @@ const DEFAULT_MAX_CUSTOM_WAKES: usize = 32;
 /// Stack size for the OS thread that runs `compile_and_run`.
 const EVAL_THREAD_STACK_SIZE: usize = 256 * 1024 * 1024;
 
-/// Minimum interval period for custom wake triggers. Subsecond polling
-/// is rejected at register time.
-const MIN_INTERVAL: Duration = Duration::from_secs(1);
+/// Default minimum interval period for custom wake triggers.
+/// Sub-minute polling is rejected at register time — wake triggers are
+/// for long-running tracking, not real-time polling. Tests override the
+/// per-evaluator floor via `with_min_interval` so they can exercise the
+/// register/unregister/timeout paths without waiting for a real minute.
+const DEFAULT_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Manages tokio tasks for registered custom Haskell wake conditions.
 ///
@@ -113,6 +116,10 @@ pub struct CustomEvaluator {
     /// eval function can build a restricted `SessionContext` for
     /// handler-level enforcement.
     restricted_caps: CapabilitySet,
+    /// Per-evaluator minimum interval. Defaults to `DEFAULT_MIN_INTERVAL`
+    /// (1 minute) for production; tests use `with_min_interval` to lower
+    /// the floor so they can exercise the register/timeout paths quickly.
+    min_interval: Duration,
 }
 
 impl CustomEvaluator {
@@ -149,6 +156,7 @@ impl CustomEvaluator {
             read_only_preamble: Arc::from(preamble_str),
             include_paths: Arc::new(include_paths),
             restricted_caps: caps,
+            min_interval: DEFAULT_MIN_INTERVAL,
         }
     }
 
@@ -156,6 +164,18 @@ impl CustomEvaluator {
     #[must_use]
     pub fn with_max_conditions(mut self, max: usize) -> Self {
         self.max_conditions = max;
+        self
+    }
+
+    /// Override the minimum interval period. Production callers should
+    /// not use this — the default 1-minute floor exists to prevent
+    /// runaway polling. Tests use this to lower the floor so they can
+    /// exercise the register/timeout paths without waiting for a real
+    /// minute. The min_interval is still enforced at register time;
+    /// it's just settable lower for harness use.
+    #[must_use]
+    pub fn with_min_interval(mut self, min: Duration) -> Self {
+        self.min_interval = min;
         self
     }
 
@@ -169,11 +189,11 @@ impl CustomEvaluator {
         period: Duration,
     ) -> Result<(), String> {
         // Min-period check.
-        if period < MIN_INTERVAL {
+        if period < self.min_interval {
             return Err(format!(
-                "CustomWakeMinPeriod: requested {}ms but minimum is {}ms",
-                period.as_millis(),
-                MIN_INTERVAL.as_millis(),
+                "CustomWakeMinPeriod: requested {}s but minimum is {}s",
+                period.as_secs(),
+                self.min_interval.as_secs(),
             ));
         }
 
@@ -510,7 +530,11 @@ mod tests {
     }
 
     #[test]
-    fn min_interval_rejects_subsecond() {
-        assert!(Duration::from_millis(500) < MIN_INTERVAL);
+    fn default_min_interval_is_one_minute() {
+        // The production DEFAULT_MIN_INTERVAL is the 1-minute floor that
+        // rejects sub-minute polling. Anything below should compare less.
+        assert_eq!(DEFAULT_MIN_INTERVAL, Duration::from_secs(60));
+        assert!(Duration::from_secs(30) < DEFAULT_MIN_INTERVAL);
+        assert!(Duration::from_secs(60) >= DEFAULT_MIN_INTERVAL);
     }
 }

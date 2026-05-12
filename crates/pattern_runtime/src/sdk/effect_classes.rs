@@ -493,7 +493,7 @@ pub const ALL_CLASSES: &[ConstructorClass] = &[
         class: EffectClass::Observe,
         runtime_check: RuntimeClassCheck::Enforce,
     },
-    // ── Pattern.Wake (2) ─────────────────────────────────────────────────
+    // ── Pattern.Wake (3) ─────────────────────────────────────────────────
     ConstructorClass {
         module: "Wake",
         constructor: "Register",
@@ -505,6 +505,12 @@ pub const ALL_CLASSES: &[ConstructorClass] = &[
         constructor: "Unregister",
         class: EffectClass::Coordinate,
         runtime_check: RuntimeClassCheck::Enforce,
+    },
+    ConstructorClass {
+        module: "Wake",
+        constructor: "List",
+        class: EffectClass::Observe,
+        runtime_check: RuntimeClassCheck::Skip,
     },
     // ── Pattern.Fronting (4) ─────────────────────────────────────────────
     ConstructorClass {

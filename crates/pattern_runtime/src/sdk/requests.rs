@@ -144,7 +144,7 @@ mod parity {
             "SkillsReq",
             &["List", "GetMetadata", "Load", "Search", "GetUsageStats"],
         ),
-        ("WakeReq", &["Register", "Unregister"]),
+        ("WakeReq", &["Register", "Unregister", "List"]),
         ("FrontingReq", &["Current", "Set", "Route", "Clear"]),
         ("PortReq", &["List", "Call", "Subscribe", "Unsubscribe"]),
         ("ConstellationReq", &["List", "Find", "Groups"]),
@@ -407,9 +407,11 @@ mod parity {
     fn wake_req_variants() {
         use super::WakeReq;
         use super::wake::WireWakeCondition;
-        let _ = WakeReq::Register(WireWakeCondition::Interval(1000));
+        let _ = WakeReq::Register(None, WireWakeCondition::Interval(1000));
+        let _ = WakeReq::Register(Some("social-check".to_string()), WireWakeCondition::Interval(15));
         let _ = WakeReq::Unregister(String::new());
-        assert_eq!(count("WakeReq"), 2);
+        let _ = WakeReq::List;
+        assert_eq!(count("WakeReq"), 3);
     }
 
     #[test]

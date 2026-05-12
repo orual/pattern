@@ -84,7 +84,7 @@ async fn task_dep_resolved_fires_on_completion() {
         task_item: Some(SmolStr::new(&item_id)),
     };
     let wake_id = registry
-        .register(
+        .register_test(
             SmolStr::new("dep-1"),
             WakeCondition::TaskDependencyResolved {
                 task: edge.clone(),

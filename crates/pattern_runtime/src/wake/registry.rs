@@ -184,10 +184,19 @@ pub enum WakeError {
 struct RegisteredCondition {
     /// Stable identifier for unregister + re-register flows.
     id: SmolStr,
+    /// Owning agent id. Used by `list_for_agent` to scope the listing
+    /// to the caller's own wakes. Populated by the handler from
+    /// `dispatch_agent_id`; tests that call `register` directly
+    /// supply their own test agent id.
+    agent_id: SmolStr,
     /// The condition's declaration. Kept for observability +
     /// reflection.
-    #[allow(dead_code)]
     condition: WakeCondition,
+    /// Original wire form of the condition, stashed at register-time
+    /// so `list_for_agent` can return wire payloads without needing
+    /// a `WakeCondition -> WireWakeCondition` reverse conversion.
+    /// `WireWakeCondition` is `Clone` and tiny (primitives only).
+    wire: crate::sdk::requests::wake::WireWakeCondition,
     /// Evaluator task. Aborted on unregister or registry drop.
     handle: JoinHandle<()>,
 }
@@ -228,8 +237,9 @@ pub struct WakeRegistry {
     /// ambient tokio runtime. Without this, `tokio::spawn` would panic.
     tokio_handle: Handle,
     /// Minimum interval period the registry will accept. Defaults to
-    /// 1 second; tuned via [`Self::with_min_period`] (test path only —
-    /// production callers use the default).
+    /// 1 minute (the wake system is for long-running tracking, not
+    /// real-time polling); tuned via [`Self::with_min_period`] (test path
+    /// only — production callers use the default).
     min_period: jiff::Span,
     /// Optional block-change notifier. Required for
     /// [`WakeCondition::BlockChanged`] (and Phase 4 Task 9's
@@ -254,6 +264,12 @@ pub struct WakeRegistry {
     /// construction (the evaluator needs SDK include paths that
     /// aren't known at registry build time).
     custom_evaluator: Mutex<Option<Arc<super::custom::CustomEvaluator>>>,
+    /// Optional persistence: when set, register/unregister mirror to
+    /// the `wake_registrations` table so wakes survive daemon restarts.
+    /// Restored on session open via `restore_for_agent` (see session.rs).
+    /// `None` for sessions that don't want persistence (tests, transient
+    /// shells).
+    persistence: Option<Arc<pattern_db::ConstellationDb>>,
 }
 
 impl WakeRegistry {
@@ -275,11 +291,12 @@ impl WakeRegistry {
             conditions: Mutex::new(Vec::new()),
             mailbox,
             tokio_handle,
-            min_period: jiff::Span::new().seconds(1),
+            min_period: jiff::Span::new().minutes(1),
             block_change_notifier: None,
             memory_store: None,
             default_scope: None,
             custom_evaluator: Mutex::new(None),
+            persistence: None,
         }
     }
 
@@ -341,9 +358,39 @@ impl WakeRegistry {
         *self.custom_evaluator.lock() = Some(evaluator);
     }
 
+    /// Builder-style: wire a `ConstellationDb` for persistence. When set,
+    /// successful `register`/`unregister` calls mirror to the
+    /// `wake_registrations` table so wakes survive daemon restarts.
+    #[must_use]
+    pub fn with_persistence(mut self, db: Arc<pattern_db::ConstellationDb>) -> Self {
+        self.persistence = Some(db);
+        self
+    }
+
     /// Register a wake condition. Returns the id used to refer to it
     /// in [`Self::unregister`].
-    pub fn register(&self, id: SmolStr, condition: WakeCondition) -> Result<SmolStr, WakeError> {
+    /// Public register: mirrors to persistence (if wired). Production
+    /// callers use this. Restore path uses `register_inner` with
+    /// `persist = false` to avoid PK-conflict noise on the row that is
+    /// being restored.
+    pub fn register(
+        &self,
+        id: SmolStr,
+        condition: WakeCondition,
+        agent_id: SmolStr,
+        wire: crate::sdk::requests::wake::WireWakeCondition,
+    ) -> Result<SmolStr, WakeError> {
+        self.register_inner(id, condition, agent_id, wire, true)
+    }
+
+    fn register_inner(
+        &self,
+        id: SmolStr,
+        condition: WakeCondition,
+        agent_id: SmolStr,
+        wire: crate::sdk::requests::wake::WireWakeCondition,
+        persist: bool,
+    ) -> Result<SmolStr, WakeError> {
         // Duplicate-id check.
         {
             let conds = self.conditions.lock();
@@ -470,12 +517,60 @@ impl WakeRegistry {
             }
         };
 
+        // Clone-before-move so we can mirror to persistence after the
+        // local registry is updated.
+        let agent_id_for_db = agent_id.clone();
+        let wire_for_db = wire.clone();
+
         let mut conds = self.conditions.lock();
         conds.push(RegisteredCondition {
             id: id.clone(),
+            agent_id,
             condition,
+            wire,
             handle,
         });
+        drop(conds);
+
+        // Mirror to wake_registrations if persistence is wired AND the
+        // caller asked for persistence (restore path passes `persist=false`
+        // to avoid PK-conflict noise on already-persisted rows). Failures
+        // are logged but don't fail the register — the in-memory wake is
+        // still active, persistence is best-effort across restart.
+        if persist && let Some(db) = &self.persistence {
+            match serde_json::to_string(&wire_for_db) {
+                Ok(json) => match db.get() {
+                    Ok(conn) => {
+                        if let Err(e) = pattern_db::queries::insert_wake_registration(
+                            &conn,
+                            id.as_str(),
+                            agent_id_for_db.as_str(),
+                            &json,
+                        ) {
+                            tracing::warn!(
+                                target: "pattern_runtime::wake",
+                                wake_id = %id,
+                                error = %e,
+                                "failed to persist wake registration; in-memory wake still active"
+                            );
+                        }
+                    }
+                    Err(e) => tracing::warn!(
+                        target: "pattern_runtime::wake",
+                        wake_id = %id,
+                        error = %e,
+                        "failed to get db connection for wake persistence"
+                    ),
+                },
+                Err(e) => tracing::warn!(
+                    target: "pattern_runtime::wake",
+                    wake_id = %id,
+                    error = %e,
+                    "failed to serialize wire wake condition; skipping persistence"
+                ),
+            }
+        }
+
         Ok(id)
     }
 
@@ -506,10 +601,157 @@ impl WakeRegistry {
                     evaluator.unregister(id);
                 }
             }
+            // Mirror the removal to persistence. Best-effort; the in-memory
+            // unregister already succeeded. After 0019 the composite PK
+            // requires both agent_id and wake_id; we have agent_id from the
+            // removed RegisteredCondition.
+            if let Some(db) = &self.persistence {
+                match db.get() {
+                    Ok(conn) => {
+                        if let Err(e) = pattern_db::queries::delete_wake_registration(
+                            &conn,
+                            removed.agent_id.as_str(),
+                            id.as_str(),
+                        ) {
+                            tracing::warn!(
+                                target: "pattern_runtime::wake",
+                                wake_id = %id,
+                                error = %e,
+                                "failed to delete wake registration row"
+                            );
+                        }
+                    }
+                    Err(e) => tracing::warn!(
+                        target: "pattern_runtime::wake",
+                        wake_id = %id,
+                        error = %e,
+                        "failed to get db connection for wake persistence delete"
+                    ),
+                }
+            }
             true
         } else {
             false
         }
+    }
+
+    /// Restore wake registrations for `agent_id` from persistence.
+    /// Called at session-open time after the registry has been wired with
+    /// `with_persistence` + any required notifiers/evaluators. Replays each
+    /// persisted row through `register` using the SAME wake_id so external
+    /// references (e.g. agent-block-stored ids) stay valid across restart.
+    ///
+    /// Rows that fail to deserialize or whose register call fails are logged
+    /// and skipped — restoration is best-effort, partial restore is better
+    /// than failing session-open.
+    ///
+    /// Returns the number of rows successfully restored.
+    pub fn restore_for_agent(&self, agent_id: &SmolStr) -> usize {
+        let Some(db) = &self.persistence else {
+            return 0;
+        };
+        let conn = match db.get() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    target: "pattern_runtime::wake",
+                    agent_id = %agent_id,
+                    error = %e,
+                    "failed to get db connection for wake restore"
+                );
+                return 0;
+            }
+        };
+        let rows = match pattern_db::queries::list_wakes_for_agent(&conn, agent_id.as_str()) {
+            Ok(rs) => rs,
+            Err(e) => {
+                tracing::warn!(
+                    target: "pattern_runtime::wake",
+                    agent_id = %agent_id,
+                    error = %e,
+                    "failed to list persisted wakes for agent; restoring zero"
+                );
+                return 0;
+            }
+        };
+        // Release the conn before calling register (which takes its own
+        // conn for the mirror-write). r2d2 pools tolerate concurrent gets
+        // but releasing early is cheap and avoids holding a connection across
+        // a potentially long compile path for WakeCustom restore.
+        drop(conn);
+
+        let mut restored = 0usize;
+        for row in rows {
+            let wire: crate::sdk::requests::wake::WireWakeCondition = match serde_json::from_str(&row.condition_json) {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "pattern_runtime::wake",
+                        wake_id = %row.wake_id,
+                        error = %e,
+                        "failed to deserialize persisted wake condition; skipping"
+                    );
+                    continue;
+                }
+            };
+            let condition = wire.clone().into_condition(SmolStr::from(row.agent_id.as_str()));
+            let id = SmolStr::from(row.wake_id.as_str());
+            // Use register_inner with persist=false to avoid double-writing
+            // the row we just read.
+            match self.register_inner(id.clone(), condition, SmolStr::from(row.agent_id.as_str()), wire, false) {
+                Ok(_) => restored += 1,
+                Err(e) => tracing::warn!(
+                    target: "pattern_runtime::wake",
+                    wake_id = %id,
+                    error = %e,
+                    "failed to re-register persisted wake; skipping"
+                ),
+            }
+        }
+        if restored > 0 {
+            tracing::info!(
+                target: "pattern_runtime::wake",
+                agent_id = %agent_id,
+                count = restored,
+                "restored persisted wake registrations"
+            );
+        }
+        restored
+    }
+
+    /// Test/harness shim. Production callers (the `Pattern.Wake` handler)
+    /// use `register` directly with the real agent_id + wire form; tests
+    /// and bench harnesses don't care about the listing metadata, so this
+    /// fills both in with synthetic values (`"test-agent"` + a placeholder
+    /// wire). Do not use from production code paths — the wire form
+    /// stashed here would mislead any caller of `list_for_agent`.
+    pub fn register_test(
+        &self,
+        id: SmolStr,
+        condition: WakeCondition,
+    ) -> Result<SmolStr, WakeError> {
+        let wire = crate::sdk::requests::wake::WireWakeCondition::Interval(0);
+        self.register(id, condition, SmolStr::from("test-agent"), wire)
+    }
+
+    /// List wake conditions registered under `agent_id`, in the
+    /// order they were registered. Returns `(wake_id, wire-condition)`
+    /// pairs so handlers can hand the wire form straight back to the
+    /// agent without a reverse conversion.
+    ///
+    /// Scoped to a single agent because cross-agent listing would
+    /// expose other personas' wake state — agents only need to see
+    /// the conditions they themselves registered.
+    pub fn list_for_agent(
+        &self,
+        agent_id: &SmolStr,
+    ) -> Vec<(SmolStr, crate::sdk::requests::wake::WireWakeCondition)> {
+        let conds = self.conditions.lock();
+        conds
+            .iter()
+            .filter(|c| &c.agent_id == agent_id)
+            .map(|c| (c.id.clone(), c.wire.clone()))
+            .collect()
     }
 
     /// Number of currently-registered conditions. For observability
@@ -621,7 +863,7 @@ mod tests {
         let handle = tokio::runtime::Handle::current();
         let reg = WakeRegistry::new(mailbox.clone(), handle)
             .with_min_period(jiff::Span::new().milliseconds(10));
-        reg.register(
+        reg.register_test(
             "iv-pending".into(),
             WakeCondition::Interval {
                 period: SpanCompare(jiff::Span::new().milliseconds(50)),
@@ -657,7 +899,7 @@ mod tests {
             task_item: Some(SmolStr::new("item-1")),
         };
         let err = reg
-            .register(
+            .register_test(
                 SmolStr::new("w1"),
                 WakeCondition::TaskDependencyResolved {
                     task: edge,
@@ -679,7 +921,7 @@ mod tests {
             task_item: Some(SmolStr::new("item-1")),
         };
         let err = reg
-            .register(
+            .register_test(
                 SmolStr::new("w1"),
                 WakeCondition::TaskDependencyResolved {
                     task: edge,
@@ -704,7 +946,7 @@ mod tests {
             task_item: None,
         };
         let err = reg
-            .register(
+            .register_test(
                 SmolStr::new("w1"),
                 WakeCondition::TaskDependencyResolved {
                     task: edge,
@@ -729,7 +971,7 @@ mod tests {
             task_item: Some(SmolStr::new("item-1")),
         };
         let err = reg
-            .register(
+            .register_test(
                 SmolStr::new("w1"),
                 WakeCondition::TaskDependencyResolved {
                     task: edge,
@@ -751,7 +993,7 @@ mod tests {
         let (mailbox, _) = Mailbox::new(PersonaId::from("custom-parked"));
         let reg = WakeRegistry::new(mailbox.clone(), tokio::runtime::Handle::current());
         let id = reg
-            .register(
+            .register_test(
                 SmolStr::new("custom-1"),
                 WakeCondition::Custom {
                     id: SmolStr::new("user-id"),
@@ -802,7 +1044,7 @@ mod tests {
         // Call register from a plain OS thread — no ambient tokio context.
         // This must not panic with "no reactor running".
         std::thread::spawn(move || {
-            reg.register(
+            reg.register_test(
                 SmolStr::new("interval-sync"),
                 WakeCondition::Interval {
                     period: SpanCompare(jiff::Span::new().milliseconds(200)),
@@ -813,5 +1055,53 @@ mod tests {
         })
         .join()
         .expect("sync thread must not panic");
+    }
+
+    /// Persistence roundtrip: register a wake, simulate restart by
+    /// dropping the registry, then build a fresh registry on the same
+    /// db + call `restore_for_agent` and verify the wake comes back
+    /// with the SAME id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persistence_roundtrip_restores_wake_with_same_id() {
+        let db = Arc::new(pattern_db::ConstellationDb::open_in_memory().unwrap());
+        let agent = SmolStr::from("persist-agent");
+
+        // First registry: register a wake.
+        let original_id = {
+            let (mailbox, _) = Mailbox::new(PersonaId::from("persist-1"));
+            let handle = tokio::runtime::Handle::current();
+            let reg = WakeRegistry::new(mailbox, handle)
+                .with_min_period(jiff::Span::new().milliseconds(10))
+                .with_persistence(db.clone());
+            let id = SmolStr::from("my-wake-id");
+            let condition = WakeCondition::Interval {
+                period: SpanCompare(jiff::Span::new().milliseconds(50)),
+            };
+            let wire = crate::sdk::requests::wake::WireWakeCondition::Interval(50);
+            reg.register(id.clone(), condition, agent.clone(), wire).expect("register")
+        };
+        assert_eq!(original_id.as_str(), "my-wake-id");
+
+        // Second registry on same db: should find + restore the persisted row.
+        let (mailbox, _) = Mailbox::new(PersonaId::from("persist-2"));
+        let handle = tokio::runtime::Handle::current();
+        let reg2 = WakeRegistry::new(mailbox, handle)
+            .with_min_period(jiff::Span::new().milliseconds(10))
+            .with_persistence(db.clone());
+        let restored = reg2.restore_for_agent(&agent);
+        assert_eq!(restored, 1, "one wake should be restored");
+
+        let listed = reg2.list_for_agent(&agent);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].0.as_str(), "my-wake-id");
+
+        let removed = reg2.unregister(&SmolStr::from("my-wake-id"));
+        assert!(removed);
+
+        let (mailbox, _) = Mailbox::new(PersonaId::from("persist-3"));
+        let handle = tokio::runtime::Handle::current();
+        let reg3 = WakeRegistry::new(mailbox, handle)
+            .with_persistence(db);
+        assert_eq!(reg3.restore_for_agent(&agent), 0, "no rows after unregister");
     }
 }

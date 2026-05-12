@@ -157,7 +157,7 @@ mod tests {
     async fn task_timeout_fires_after_deadline() {
         let (reg, mailbox) = fast_registry();
         let _ = reg
-            .register(
+            .register_test(
                 "tt-1".into(),
                 WakeCondition::TaskTimeout {
                     task: br("planning"),
@@ -186,7 +186,7 @@ mod tests {
     async fn interval_fires_repeatedly() {
         let (reg, mailbox) = fast_registry();
         let _ = reg
-            .register(
+            .register_test(
                 "iv-1".into(),
                 WakeCondition::Interval {
                     period: SpanCompare(jiff::Span::new().milliseconds(50)),
@@ -222,7 +222,7 @@ mod tests {
     async fn multiple_conditions_fire_independently() {
         let (reg, mailbox) = fast_registry();
         let _ = reg
-            .register(
+            .register_test(
                 "tt".into(),
                 WakeCondition::TaskTimeout {
                     task: br("planning"),
@@ -231,7 +231,7 @@ mod tests {
             )
             .expect("register tt");
         let _ = reg
-            .register(
+            .register_test(
                 "iv".into(),
                 WakeCondition::Interval {
                     period: SpanCompare(jiff::Span::new().milliseconds(100)),
@@ -266,18 +266,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subsecond_interval_rejected_at_register() {
-        let (mailbox, _) = Mailbox::new(PersonaId::from("subsec-reject"));
-        // Production registry — default min_period 1s.
+    async fn period_below_default_minimum_rejected() {
+        // Exercise the actual production threshold (1 minute), not a
+        // synthetic override. A 30-second period is below the default
+        // min_period and must be rejected.
+        let (mailbox, _) = Mailbox::new(PersonaId::from("min-period"));
         let reg = WakeRegistry::new(mailbox, tokio::runtime::Handle::current());
         let err = reg
-            .register(
+            .register_test(
                 "iv".into(),
                 WakeCondition::Interval {
-                    period: SpanCompare(jiff::Span::new().milliseconds(500)),
+                    period: SpanCompare(jiff::Span::new().seconds(30)),
                 },
             )
-            .expect_err("subsecond interval must be rejected");
+            .expect_err("period below 1-minute default must be rejected");
         assert!(
             matches!(err, WakeError::PeriodTooShort(_)),
             "expected PeriodTooShort, got {err:?}"
@@ -288,7 +290,7 @@ mod tests {
     async fn unregister_aborts_evaluator() {
         let (reg, mailbox) = fast_registry();
         let _ = reg
-            .register(
+            .register_test(
                 "iv".into(),
                 WakeCondition::Interval {
                     period: SpanCompare(jiff::Span::new().milliseconds(20)),
@@ -316,7 +318,7 @@ mod tests {
     async fn duplicate_id_rejected() {
         let (reg, _mailbox) = fast_registry();
         let _ = reg
-            .register(
+            .register_test(
                 "id".into(),
                 WakeCondition::Interval {
                     period: SpanCompare(jiff::Span::new().milliseconds(500)),
@@ -324,7 +326,7 @@ mod tests {
             )
             .expect("first register");
         let err = reg
-            .register(
+            .register_test(
                 "id".into(),
                 WakeCondition::Interval {
                     period: SpanCompare(jiff::Span::new().milliseconds(500)),
@@ -344,7 +346,7 @@ mod tests {
         let reg = WakeRegistry::new(mailbox.clone(), tokio::runtime::Handle::current())
             .with_min_period(jiff::Span::new().milliseconds(10));
         let _ = reg
-            .register(
+            .register_test(
                 "iv".into(),
                 WakeCondition::Interval {
                     period: SpanCompare(jiff::Span::new().milliseconds(20)),

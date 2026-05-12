@@ -2754,6 +2754,7 @@ async fn open_session_with_persona(
     let wake_extras = WakeRegistryExtras {
         block_change_notifier: Some(project_mount.cache.block_change_notifier().clone()),
         memory_store: Some(project_mount.cache.clone() as Arc<dyn MemoryStore>),
+        persistence_db: Some(project_mount.db.clone()),
     };
 
     // The committer carries the project_mount's `fronting` Arc internally

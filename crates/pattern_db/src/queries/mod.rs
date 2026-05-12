@@ -17,6 +17,7 @@ mod source;
 pub mod stats;
 mod task;
 pub mod task_row;
+pub mod wake;
 
 pub use agent::*;
 pub use atproto_endpoints::*;
@@ -31,3 +32,4 @@ pub use skill_usage::{get_usage_stats, get_usage_stats_batch, record_usage};
 pub use source::*;
 pub use task::*;
 pub use task_row::{TaskEdgeRow, TaskRow};
+pub use wake::{WakeRegistrationRow, delete_wake_registration, insert_wake_registration, list_wakes_for_agent};

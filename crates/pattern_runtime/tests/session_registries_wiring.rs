@@ -56,6 +56,7 @@ async fn open_with_agent_loop_wires_session_registries() {
         agent_registry: Some(agent_registry.clone()),
         router_registry: Some(router_reg.clone()),
         wake_registry_extras: Some(WakeRegistryExtras {
+            persistence_db: None,
             block_change_notifier: None,
             memory_store: None,
         }),
