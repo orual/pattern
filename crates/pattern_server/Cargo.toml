@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 pattern-core = { path = "../pattern_core", features = ["plugin-transport"] }
+pattern-plugin-sdk = { path = "../pattern_plugin_sdk", features = ["tui-channel"] }
 pattern-runtime = { path = "../pattern_runtime" }
 pattern-db = { path = "../pattern_db" }
 pattern-memory = { path = "../pattern_memory" }
@@ -47,6 +48,7 @@ nix = { version = "0.29", features = ["signal", "process"] }
 # discriminant), and those restrictions are load-bearing for irpc correctness.
 postcard = { version = "1", features = ["alloc"] }
 tempfile = { workspace = true }
+anyhow = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 # Test fixtures (NopProviderClient, InMemoryMemoryStore, etc.) live behind
 # the `test-support` feature in pattern_runtime.

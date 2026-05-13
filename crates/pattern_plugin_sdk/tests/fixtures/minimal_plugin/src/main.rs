@@ -5,7 +5,7 @@
 
 use pattern_plugin_sdk::{
     HookEvent, HookResponse, PluginContext, PluginError,
-    PluginExtension, PortDeclaration, register_plugin, tags,
+    PluginExtension, register_plugin, tags,
 };
 
 #[derive(Debug, Default)]
@@ -13,7 +13,7 @@ struct MinimalPlugin;
 
 #[async_trait::async_trait]
 impl PluginExtension for MinimalPlugin {
-    fn ports(&self) -> Vec<PortDeclaration> { vec![] }
+    fn ports(&self) -> Vec<std::sync::Arc<dyn pattern_plugin_sdk::Port>> { vec![] }
 
     async fn on_enable(&self, _ctx: &PluginContext) -> Result<(), PluginError> {
         tracing::info!("minimal plugin enabled");

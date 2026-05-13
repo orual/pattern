@@ -39,6 +39,23 @@ pub struct PluginManifest {
     pub declared_effects: Option<CapabilitiesBlock>,
     pub pattern: Option<PatternBlock>,
 
+    /// Whether `pattern plugin install` should run `cargo build --release`.
+    /// Defaults to true. When false, install expects a prebuilt binary at
+    /// `<repo>/bin/<plugin-id>[.exe]` and errors if missing.
+    pub build: bool,
+
+    /// Paths (relative to repo root) to copy into the plugin cache alongside
+    /// the standard claude-code-plugin layout. Use for resources that don't
+    /// fit canonical positions like `skills/` or `commands/`. fs-stat at
+    /// install time determines file-vs-directory semantics.
+    pub extras: Vec<std::path::PathBuf>,
+
+    /// Hook event tag globs the plugin subscribes to. Daemon forwards matching
+    /// notification-shape events to the plugin via `connection.on_event` over
+    /// the wire. KDL form: `hook-subscriptions "turn.before" "message.sent.*"`.
+    /// Plugin-settings overlay (future) can narrow per-install but can't widen.
+    pub hook_subscriptions: Vec<String>,
+
     // CC-specific fields preserved from plugin.json translation.
     pub cc: Option<Cc>,
 }
@@ -66,6 +83,9 @@ impl PluginManifest {
             transport: None,
             declared_effects: None,
             pattern: None,
+            build: true,
+            extras: Vec::new(),
+            hook_subscriptions: Vec::new(),
             cc: None,
         }
     }

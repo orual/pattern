@@ -409,6 +409,9 @@ pub struct SessionContext {
     hook_bus: Arc<pattern_core::hooks::HookBus>,
     /// Plugin registry (shared across sessions within a mount).
     plugin_registry: Option<Arc<crate::plugin::registry::PluginRegistry>>,
+    /// Daemon-shared plugin route table (pubkey → session_id). Populated at
+    /// session-open from the registry; entries removed at session drop.
+    plugin_routes: Option<Arc<pattern_core::plugin::auth::PluginRouteTable>>,
     /// Bridge for sync handler → async hook dispatch.
     hook_bridge: crate::hooks::HookBridge,
     /// Session-scoped UUID minted at open. Used by handlers that key
@@ -749,6 +752,28 @@ impl HasFileManager for () {
     }
 }
 
+impl Drop for SessionContext {
+    fn drop(&mut self) {
+        // Unregister all this session's plugin route entries so subsequent
+        // sessions can claim the same plugin pubkeys without collision.
+        // Fires when the last Arc<SessionContext> is dropped — which is
+        // when the TidepoolSession (+ any ephemeral clones holding the Arc)
+        // are all gone. No-op if `plugin_routes` is None or no entries
+        // were registered for this session.
+        if let Some(routes) = self.plugin_routes.as_ref() {
+            let session_id = self.agent_id.to_string();
+            let removed = routes.unregister_session(&session_id);
+            if removed > 0 {
+                tracing::debug!(
+                    session = %session_id,
+                    removed,
+                    "unregistered plugin routes on session-context drop"
+                );
+            }
+        }
+    }
+}
+
 impl SessionContext {
     /// Build a context from a persona + store handle. The store is wrapped
     /// in a [`MemoryStoreAdapter`] that records `BlockWrite` entries;
@@ -783,6 +808,7 @@ impl SessionContext {
             crate::hooks::HookBridge::spawn_on(hook_bus__.clone(), tokio_handle.clone());
         Self {
             plugin_registry: None,
+            plugin_routes: None,
             agent_id,
             default_scope,
             // Thread the caller's declared model through so the composer's
@@ -988,6 +1014,22 @@ impl SessionContext {
         reg: Arc<crate::plugin::registry::PluginRegistry>,
     ) -> Self {
         self.plugin_registry = Some(reg);
+        self
+    }
+
+    /// Borrow the plugin route table.
+    pub fn plugin_routes(
+        &self,
+    ) -> Option<&Arc<pattern_core::plugin::auth::PluginRouteTable>> {
+        self.plugin_routes.as_ref()
+    }
+
+    /// Set the plugin route table (daemon-shared).
+    pub fn with_plugin_routes(
+        mut self,
+        routes: Arc<pattern_core::plugin::auth::PluginRouteTable>,
+    ) -> Self {
+        self.plugin_routes = Some(routes);
         self
     }
 
@@ -1272,6 +1314,7 @@ impl SessionContext {
             hook_bus: self.hook_bus.clone(),
             hook_bridge: self.hook_bridge.clone(),
             plugin_registry: self.plugin_registry.clone(),
+            plugin_routes: self.plugin_routes.clone(),
             // Each ephemeral child gets a fresh session_id (so its
             // PortHandler subscription channels don't collide with the
             // parent's). Inherit `shell_default_timeout` — children
@@ -1911,6 +1954,12 @@ pub struct SessionRegistries {
     /// Optional plugin registry. When set, plugins are enabled at session open
     /// and their hook subscriptions are wired to the session's HookBus.
     pub plugin_registry: Option<Arc<crate::plugin::registry::PluginRegistry>>,
+    /// Optional daemon-shared plugin route table. When set alongside
+    /// `plugin_registry`, session-open walks the registry's routable plugins
+    /// and registers their (pubkey → session_id) entries so the
+    /// SessionRoutingProtocolHandler can route incoming OOP plugin connections
+    /// to this session. None leaves OOP plugins unreachable for this session.
+    pub plugin_routes: Option<Arc<pattern_core::plugin::auth::PluginRouteTable>>,
     /// Optional embedding-queue sender. Daemon callers pull this from
     /// `cache.reembed_tx().cloned()` and pass it here so message persistence
     /// in agent_loop dispatches per-message ReembedRequests for hybrid
@@ -2393,6 +2442,13 @@ impl TidepoolSession {
                 ctx
             };
 
+            // Wire daemon-shared plugin route table if supplied.
+            let ctx = if let Some(routes) = regs.plugin_routes {
+                ctx.with_plugin_routes(routes)
+            } else {
+                ctx
+            };
+
             if let Some(policy) = regs.file_policy {
                 let fm_caps = Arc::new(
                     capabilities
@@ -2590,6 +2646,32 @@ impl TidepoolSession {
         if let Some(plugin_reg) = session.ctx.plugin_registry() {
             let plugins = plugin_reg.list();
 
+            // Populate the daemon-shared plugin route table with this session's
+            // OOP-routable plugins. Each (pubkey, plugin_id) gets keyed by this
+            // session's agent_id so the SessionRoutingProtocolHandler can dispatch
+            // incoming connections to the right session. Drop side: unregister_session
+            // in TidepoolSession::Drop (below). Collision = real bug (two sessions
+            // claim same pubkey); for v1 we log + skip.
+            if let Some(routes) = session.ctx.plugin_routes() {
+                let session_id: smol_str::SmolStr = session.ctx.agent_id().to_string().into();
+                for (plugin_id, pubkey) in plugin_reg.routable_pubkeys() {
+                    if let Err(e) = routes.register(pubkey, plugin_id.clone(), session_id.clone()) {
+                        tracing::warn!(
+                            plugin = %plugin_id,
+                            session = %session_id,
+                            error = %e,
+                            "plugin route registration failed",
+                        );
+                    } else {
+                        tracing::debug!(
+                            plugin = %plugin_id,
+                            session = %session_id,
+                            "plugin route registered",
+                        );
+                    }
+                }
+            }
+
             let hook_bus = session.ctx.hook_bus().clone();
             let mut pending_mcp_configs: Vec<(
                 smol_str::SmolStr,
@@ -2626,6 +2708,101 @@ impl TidepoolSession {
                             error = %e,
                             "plugin on_enable failed"
                         );
+                        continue;
+                    }
+                    // Register declared ports into the session's PortRegistry.
+                    // In-process plugins provide Arc<dyn Port> directly via port_impls();
+                    // out-of-process plugins get WireBackedPort proxies built from their
+                    // WirePortDeclarations, which forward port_call/port_subscribe over the wire.
+                    if let Some(port_registry) = session.ctx.port_registry() {
+                        use pattern_core::traits::port_registry::PortRegistry as _;
+                        match ext.declare_ports().await {
+                            Ok(decls) => {
+                                if let Some(impls) = ext.port_impls() {
+                                    for port in impls {
+                                        let port_id = port.id().clone();
+                                        if let Err(e) = port_registry.register(port).await {
+                                            tracing::warn!(
+                                                plugin = %lp.id,
+                                                port = %port_id,
+                                                error = %e,
+                                                "plugin in-process port registration failed",
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    let conn_weak = std::sync::Arc::downgrade(ext);
+                                    for decl in decls {
+                                        let port_id = decl.id.clone();
+                                        let port: std::sync::Arc<dyn pattern_core::traits::port::Port> =
+                                            std::sync::Arc::new(
+                                                crate::plugin::wire_backed_port::WireBackedPort::new(
+                                                    decl,
+                                                    conn_weak.clone(),
+                                                ),
+                                            );
+                                        if let Err(e) = port_registry.register(port).await {
+                                            tracing::warn!(
+                                                plugin = %lp.id,
+                                                port = %port_id,
+                                                error = %e,
+                                                "plugin wire-backed port registration failed",
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => tracing::warn!(
+                                plugin = %lp.id,
+                                error = %e,
+                                "plugin declare_ports failed",
+                            ),
+                        }
+                    }
+
+                    // OOP plugins can't subscribe to the daemon's hook bus directly;
+                    // forward all notification-shape events over the wire. Plugin's
+                    // on_event filters by tag in-process. v1: forward everything;
+                    // future: plugin declares interests via HostApi.subscribe_hook.
+                    // In-process plugins handle their own subscriptions in on_enable,
+                    // so we use `port_impls().is_none()` as the OOP signal (set None
+                    // by OutOfProcessPluginConnection, Some(Vec) by InProcess).
+                    if ext.port_impls().is_none() {
+                        // OOP plugin: daemon forwards declared hook events to the
+                        // plugin via wire on_event. Plugin author declares interests
+                        // via `hook-subscriptions "tag.glob" ...` in manifest.kdl.
+                        // Future: plugin-settings overlay narrows per-install.
+                        for glob_pattern in &lp.manifest.hook_subscriptions {
+                            let filter = match pattern_core::hooks::filter::HookFilter::new(glob_pattern.clone()) {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        plugin = %lp.id,
+                                        pattern = %glob_pattern,
+                                        error = %e,
+                                        "invalid hook subscription glob — skipping",
+                                    );
+                                    continue;
+                                }
+                            };
+                            let (_sub_id, mut rx) = session.ctx.hook_bus().subscribe_notifications(filter);
+                            let conn = std::sync::Arc::clone(ext);
+                            let plugin_id = lp.id.clone();
+                            let pat = glob_pattern.clone();
+                            tokio::spawn(async move {
+                                while let Some(event) = rx.recv().await {
+                                    if let Err(e) = conn.on_event(event).await {
+                                        tracing::debug!(
+                                            plugin = %plugin_id,
+                                            pattern = %pat,
+                                            error = %e,
+                                            "OOP hook forward failed (plugin may have died)",
+                                        );
+                                    }
+                                }
+                                tracing::debug!(plugin = %plugin_id, pattern = %pat, "OOP hook forwarder stopped (hook bus closed)");
+                            });
+                        }
                     }
                 }
             }

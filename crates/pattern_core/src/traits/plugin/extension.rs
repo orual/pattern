@@ -2,8 +2,11 @@
 
 use async_trait::async_trait;
 
+use std::sync::Arc;
+
 use crate::hooks::event::{HookEvent, HookResponse};
-use super::types::{PluginContext, PluginError, PortDeclaration};
+use crate::traits::port::Port;
+use super::types::{PluginContext, PluginError};
 
 /// Plugin trait. Every plugin — native IRPC, CC adapter, MCP adapter —
 /// implements this.
@@ -13,8 +16,14 @@ use super::types::{PluginContext, PluginError, PortDeclaration};
 /// is sync — it operates against an already-extracted `HookEvent` payload.
 #[async_trait]
 pub trait PluginExtension: Send + Sync + std::fmt::Debug {
-    /// What ports/tools this plugin provides.
-    fn ports(&self) -> Vec<PortDeclaration> {
+    /// Port impls this plugin provides. For in-process plugins (CC adapter,
+    /// native in-tree), the daemon registers these `Arc<dyn Port>` directly
+    /// into the `PortRegistry`. For out-of-process plugins, the same impls live
+    /// inside the plugin process — the SDK's guest handler routes incoming
+    /// `PortCall` / `PortSubscribe` wire messages to them via `Port.id()`
+    /// lookup; the daemon side builds wire-backed proxies from
+    /// `WirePortDeclaration`s derived from each port's metadata.
+    fn ports(&self) -> Vec<Arc<dyn Port>> {
         Vec::new()
     }
 

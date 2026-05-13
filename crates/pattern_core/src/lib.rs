@@ -45,7 +45,6 @@ pub mod plugin;
 pub mod constellation;
 pub mod error;
 pub mod fronting;
-#[cfg(feature = "memory")]
 pub mod memory;
 // `memory_acl` module removed: MemoryOp, MemoryGate, and check() are
 // canonical in types::memory_types::core_types (as methods on MemoryGate).
@@ -56,6 +55,8 @@ pub mod daemon_state;
 pub mod permission;
 pub mod spawn;
 pub mod traits;
+#[cfg(all(feature = "plugin-transport", feature = "provider"))]
+pub mod wire;
 pub mod types;
 pub mod utils;
 
@@ -88,7 +89,6 @@ pub use traits::{
     AgentRuntime, Endpoint, EndpointRegistry, ProviderClient, Session,
 };
 pub use traits::EmbeddingProvider;
-#[cfg(feature = "memory")]
 pub use traits::MemoryStore;
 
 // ── Type re-exports ──────────────────────────────────────────────────────────

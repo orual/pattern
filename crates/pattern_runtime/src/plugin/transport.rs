@@ -17,7 +17,9 @@ use async_trait::async_trait;
 use smol_str::SmolStr;
 
 use pattern_core::hooks::event::{HookEvent, HookResponse};
-use pattern_core::traits::plugin::{PluginContext, PluginError, PluginExtension, PortDeclaration};
+use pattern_core::traits::plugin::{PluginContext, PluginError, PluginExtension};
+use pattern_core::traits::plugin::wire::WirePortDeclaration;
+use pattern_core::traits::port::Port;
 
 /// Health snapshot for a plugin connection.
 #[derive(Debug, Clone)]
@@ -52,7 +54,48 @@ pub trait PluginConnection: Send + Sync + std::fmt::Debug {
     async fn on_disable(&self, ctx: &PluginContext) -> Result<(), PluginError>;
 
     /// Declared ports / tools.
-    async fn declare_ports(&self) -> Result<Vec<PortDeclaration>, PluginError>;
+    /// Wire-friendly port declarations (id + metadata + capabilities + library).
+    /// Daemon side uses these to register `Port` impls in the `PortRegistry`.
+    /// In-process: derived from `port_impls()`. OOP: comes over the wire.
+    async fn declare_ports(&self) -> Result<Vec<WirePortDeclaration>, PluginError>;
+
+    /// In-process Port impls. For OOP plugins, returns `None` — the daemon
+    /// builds wire-backed proxies from `declare_ports()` instead.
+    fn port_impls(&self) -> Option<Vec<Arc<dyn Port>>> { None }
+
+    /// Forward an agent's `Port.call` to this plugin's port impl. In-process:
+    /// looks up the port in `port_impls()` by id, calls directly. OOP: sends
+    /// wire `PortCall` to the plugin process.
+    async fn port_call(
+        &self,
+        port_id: &pattern_core::types::port::PortId,
+        method: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, pattern_core::types::port::PortError> {
+        let _ = (method, payload);
+        Err(pattern_core::types::port::PortError::CallFailed(
+            port_id.clone(),
+            "port_call: default trait impl — connection must override".into(),
+        ))
+    }
+
+    /// Forward an agent's `Port.subscribe` to this plugin's port impl. Returns
+    /// a stream of `PortEvent`s. In-process: delegates to in-proc `Port::subscribe`.
+    /// OOP: opens wire stream, converts items.
+    async fn port_subscribe(
+        &self,
+        port_id: &pattern_core::types::port::PortId,
+        config: serde_json::Value,
+    ) -> Result<
+        futures::stream::BoxStream<'static, pattern_core::types::port::PortEvent>,
+        pattern_core::types::port::PortError,
+    > {
+        let _ = config;
+        Err(pattern_core::types::port::PortError::SubscribeFailed(
+            port_id.clone(),
+            "port_subscribe: default trait impl — connection must override".into(),
+        ))
+    }
 
     /// Optional Haskell prelude library shipped by the plugin.
     async fn library(&self) -> Result<Option<String>, PluginError>;
@@ -104,8 +147,44 @@ impl PluginConnection for InProcessPluginConnection {
         self.extension.on_disable(ctx).await
     }
 
-    async fn declare_ports(&self) -> Result<Vec<PortDeclaration>, PluginError> {
-        Ok(self.extension.ports())
+    async fn declare_ports(&self) -> Result<Vec<WirePortDeclaration>, PluginError> {
+        // Derive WirePortDeclaration from each in-process Port impl's metadata.
+        Ok(self.extension.ports().into_iter().map(|p| WirePortDeclaration {
+            id: p.id().clone(),
+            metadata: p.metadata(),
+            capabilities: p.capabilities(),
+            library: p.library(),
+        }).collect())
+    }
+
+    fn port_impls(&self) -> Option<Vec<Arc<dyn Port>>> {
+        Some(self.extension.ports())
+    }
+
+    async fn port_call(
+        &self,
+        port_id: &pattern_core::types::port::PortId,
+        method: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, pattern_core::types::port::PortError> {
+        let ports = self.extension.ports();
+        let port = ports.iter().find(|p| p.id() == port_id)
+            .ok_or_else(|| pattern_core::types::port::PortError::NotFound(port_id.clone()))?;
+        port.call(method, payload).await
+    }
+
+    async fn port_subscribe(
+        &self,
+        port_id: &pattern_core::types::port::PortId,
+        config: serde_json::Value,
+    ) -> Result<
+        futures::stream::BoxStream<'static, pattern_core::types::port::PortEvent>,
+        pattern_core::types::port::PortError,
+    > {
+        let ports = self.extension.ports();
+        let port = ports.iter().find(|p| p.id() == port_id)
+            .ok_or_else(|| pattern_core::types::port::PortError::NotFound(port_id.clone()))?;
+        port.subscribe(config).await
     }
 
     async fn library(&self) -> Result<Option<String>, PluginError> {

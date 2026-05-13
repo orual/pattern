@@ -81,6 +81,15 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
         DaemonState::clear().ok();
     }
 
+    // Daemon-shared plugin route table. Threaded into SessionConfig so
+    // per-mount session-open populates entries for OOP plugins from the
+    // registry. Also wired into the iroh Router's host-ALPN accept handler
+    // (SessionRoutingProtocolHandler) so accept-time pubkey lookup hits the
+    // same table.
+    let plugin_routes = Arc::new(
+        pattern_core::plugin::auth::PluginRouteTable::new(),
+    );
+
     // Spawn the server actor — echo mode or real session mode.
     // Projects are mounted on demand via InitSession from the TUI client.
     let handle = if echo {
@@ -147,6 +156,7 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
             sdk,
             provider,
             port_registry,
+            plugin_routes: Some(Arc::clone(&plugin_routes)),
         };
 
         info!("starting daemon");
@@ -192,22 +202,39 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
     // Plugin-host accept (Phase 6 Task 5b). v1 stub handler — returns
     // Unimplemented for all 17 PluginHostProtocol variants until 5c+ wires
     // real dispatch into the runtime plugin registry.
+    use pattern_core::plugin::auth::{PluginRouteTable, SessionRoutingProtocolHandler};
     use pattern_core::plugin::protocol::{PluginHostProtocol, PLUGIN_HOST_ALPN};
+    use std::sync::Arc;
+
     let host_client = pattern_runtime::plugin::host_handler::spawn();
     let host_local = host_client
         .as_local()
         .expect("freshly-spawned host client must be local");
     let host_handler = PluginHostProtocol::remote_handler(host_local);
 
+    // Session-routing handler wraps host handler with the daemon-shared
+    // route table (built earlier + passed into SessionConfig so sessions populate
+    // it at open).
+    let gated_host = SessionRoutingProtocolHandler::new(
+        Arc::clone(&plugin_routes),
+        irpc_iroh::IrohProtocol::new(host_handler),
+    );
+
     // Multi-ALPN router. pattern/1 carries the TUI/client protocol;
-    // pattern-plugin-host/1 carries Plugin→Runtime callbacks + memory ops.
+    // pattern-plugin-host/1 carries Plugin→Runtime callbacks + memory ops,
+    // session-gated by PluginRouteTable lookup.
     // Future: pattern-plugin-guest/1 (Runtime→Plugin) lives client-side in
-    // OutOfProcessPluginConnection (task 5c); pattern-plugin-memory-sync/1
-    // (loro delta sync) gets its own accept when MemorySyncProtocol handler ships.
+    // OutOfProcessPluginConnection; pattern-plugin-memory-sync/1 gets its own
+    // accept when MemorySyncProtocol handler ships.
     let _router = iroh::protocol::Router::builder(endpoint)
         .accept(b"pattern/1", irpc_iroh::IrohProtocol::new(handler))
-        .accept(PLUGIN_HOST_ALPN, irpc_iroh::IrohProtocol::new(host_handler))
+        .accept(PLUGIN_HOST_ALPN, gated_host)
         .spawn();
+
+    // plugin_routes is now threaded through SessionConfig → SessionRegistries
+    // → SessionContext, so per-mount session-open populates from PluginRegistry
+    // and Drop on SessionContext clears entries. The Arc here + Arc in SessionConfig
+    // both point at the same dashmap-backed table.
 
     let state = DaemonState {
         pid: std::process::id(),

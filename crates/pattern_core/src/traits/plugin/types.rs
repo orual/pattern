@@ -16,21 +16,32 @@ pub struct PluginContext {
     /// Root directory of the plugin on disk.
     pub plugin_root: std::path::PathBuf,
     /// Memory store for persisting skill blocks and other plugin data.
-    #[cfg(feature = "memory")]
     pub memory_store: Option<Arc<dyn crate::traits::MemoryStore>>,
     /// Default scope for memory operations.
     pub scope: Option<crate::types::memory_types::Scope>,
 }
 
-/// A port/tool declaration from a plugin.
-#[derive(Debug, Clone)]
-pub struct PortDeclaration {
-    /// Port identifier.
-    pub id: SmolStr,
-    /// Human-readable description.
-    pub description: String,
-    /// Methods this port exposes.
-    pub methods: Vec<SmolStr>,
+impl PluginContext {
+    /// Build a minimal plugin context — used by SDK guest-side when converting
+    /// `WirePluginContext` into a local `PluginContext` for an OOP plugin's
+    /// lifecycle methods. Memory store + scope default to `None`; the plugin
+    /// reaches those via `HostApi` (host-protocol) calls instead.
+    ///
+    /// Handles the `memory` feature gate internally so downstream crates
+    /// don't have to mirror the cfg attribute at every construction site.
+    pub fn minimal(
+        plugin_id: PluginId,
+        hook_bus: Arc<HookBus>,
+        plugin_root: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            plugin_id,
+            hook_bus,
+            plugin_root,
+            memory_store: None,
+            scope: None,
+        }
+    }
 }
 
 /// Errors from plugin operations.

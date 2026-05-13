@@ -54,6 +54,29 @@ pub fn from_kdl_doc(
             "transport" => manifest.transport = parse_transport(node),
             "capabilities" => manifest.declared_effects = parse_capabilities_block(node),
             "pattern" => manifest.pattern = parse_pattern_block(node),
+            "build" => {
+                // `build = false` opts out of cargo build at install time.
+                // Any other entry (including bare `build`) leaves the default (true).
+                if let Some(kdl::KdlEntry { .. }) = node.entries().first() {
+                    if let Some(b) = node.entries().first().and_then(|e| e.value().as_bool()) {
+                        manifest.build = b;
+                    }
+                }
+            }
+            "extras" => {
+                manifest.extras = node
+                    .entries()
+                    .iter()
+                    .filter_map(|e| e.value().as_string().map(std::path::PathBuf::from))
+                    .collect();
+            }
+            "hook-subscriptions" | "hook_subscriptions" => {
+                manifest.hook_subscriptions = node
+                    .entries()
+                    .iter()
+                    .filter_map(|e| e.value().as_string().map(String::from))
+                    .collect();
+            }
             _ => {
                 unknown.insert(name.to_string(), node.clone());
             }

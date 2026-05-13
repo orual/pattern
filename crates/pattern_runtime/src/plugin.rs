@@ -9,6 +9,7 @@ pub mod host_handler;
 pub mod manifest;
 pub mod registry;
 pub mod transport;
+pub mod wire_backed_port;
 
 // Re-export core types for convenience.
 pub use pattern_core::plugin::{ManifestError, PluginError, PluginId, PluginScope, RegistryError};

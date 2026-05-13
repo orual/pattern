@@ -29,6 +29,7 @@ fn make_config() -> SessionConfig {
         sdk: SdkLocation::default(),
         provider: Arc::new(NopProviderClient),
         port_registry,
+        plugin_routes: None,
     }
 }
 

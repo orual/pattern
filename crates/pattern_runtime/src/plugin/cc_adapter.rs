@@ -18,7 +18,7 @@ use tokio::task::JoinHandle;
 
 use pattern_core::hooks::event::{HookEvent, HookResponse};
 use pattern_core::traits::plugin::{
-    PluginContext, PluginError, PluginExtension, PortDeclaration,
+    PluginContext, PluginError, PluginExtension,
 };
 use pattern_core::plugin::manifest::PluginManifest;
 
@@ -58,7 +58,7 @@ impl CcPluginAdapter {
 
 #[async_trait]
 impl PluginExtension for CcPluginAdapter {
-    fn ports(&self) -> Vec<PortDeclaration> {
+    fn ports(&self) -> Vec<std::sync::Arc<dyn pattern_core::traits::port::Port>> {
         Vec::new()
     }
 

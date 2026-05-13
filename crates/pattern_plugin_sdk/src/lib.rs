@@ -18,13 +18,13 @@
 //! # Minimum example (Task 5+ will make `register_plugin` available)
 //!
 //! ```rust,ignore
-//! use pattern_plugin_sdk::{PluginExtension, PortDeclaration};
+//! use pattern_plugin_sdk::PluginExtension;
 //!
 //! #[derive(Debug, Default)]
 //! struct MyPlugin;
 //!
 //! impl PluginExtension for MyPlugin {
-//!     fn ports(&self) -> Vec<PortDeclaration> { Vec::new() }
+//!     fn ports(&self) -> Vec<std::sync::Arc<dyn pattern_plugin_sdk::Port>> { Vec::new() }
 //! }
 //! ```
 
@@ -32,7 +32,7 @@
 
 // Plugin trait surface.
 pub use pattern_core::traits::plugin::{
-    PluginContext, PluginError, PluginExtension, PluginHost, PortDeclaration,
+    PluginContext, PluginError, PluginExtension, HostApi,
 };
 
 // Hook lifecycle + tag catalog.
@@ -72,3 +72,17 @@ pub use pattern_core::memory::StructuredDocument;
 // Task 5 will add: `mod memory_sync; pub use memory_sync::PluginMemorySync;`.
 mod registration;
 pub use registration::{register_plugin, PluginHandle, RegisterError};
+
+// ── TUI channel (opt-in via `tui-channel` feature) ──
+//
+// Plugins that want to dispatch slash commands or listen to daemon-level
+// events (FrontingChanged, ConstellationChanged) enable this feature and
+// dial the daemon's `pattern/1` ALPN in parallel to the plugin channel.
+#[cfg(feature = "tui-channel")]
+pub mod tui_channel {
+    //! Daemon TUI client + wire types. Same surface the TUI uses.
+    pub use pattern_core::wire::ui::*;
+    pub use super::tui_client::{DaemonClient, DaemonClientError, Result};
+}
+#[cfg(feature = "tui-channel")]
+mod tui_client;

@@ -6754,6 +6754,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "compact_str",
+ "dashmap",
  "dirs",
  "ferroid",
  "futures",
@@ -6877,6 +6878,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol_str",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -6988,6 +6990,7 @@ dependencies = [
 name = "pattern-server"
 version = "0.4.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "clap",
  "dashmap",
@@ -7003,6 +7006,7 @@ dependencies = [
  "pattern-core",
  "pattern-db",
  "pattern-memory",
+ "pattern-plugin-sdk",
  "pattern-provider",
  "pattern-runtime",
  "postcard",

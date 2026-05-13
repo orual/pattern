@@ -12,7 +12,6 @@ pub mod embedding_provider;
 pub mod endpoint;
 #[cfg(feature = "provider")]
 pub mod endpoint_registry;
-#[cfg(feature = "memory")]
 pub mod memory_store;
 pub mod plugin;
 pub mod port;
@@ -31,7 +30,6 @@ pub use embedding_provider::EmbeddingProvider;
 pub use endpoint::Endpoint;
 #[cfg(feature = "provider")]
 pub use endpoint_registry::EndpointRegistry;
-#[cfg(feature = "memory")]
 pub use memory_store::MemoryStore;
 pub use port::Port;
 pub use port_registry::PortRegistry;

@@ -36,5 +36,14 @@ default = []
 # pattern_core's `memory` feature.
 memory-sync = ["pattern-core/memory"]
 
+# Opt-in: typed client for the daemon's TUI protocol (pattern/1 ALPN). Plugins
+# that want UI-control capabilities (dispatching slash commands, listening to
+# fronting/constellation events, mirroring TUI state) enable this. Re-exports
+# pattern_core::wire::ui + provides a thin DaemonClient wrapper.
+tui-channel = ["pattern-core/provider"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

@@ -1,4 +1,4 @@
-//! The `PluginHost` trait — runtime → plugin callback contract.
+//! The `HostApi` trait — runtime ← plugin callback contract (plugin-to-host).
 //!
 //! Method signatures mirror `PluginProtocol`'s host-callback variants
 //! one-for-one. Two real implementations (Phase 6):
@@ -18,7 +18,7 @@ use super::types::PluginError;
 /// with the task system do so through this trait. The runtime provides
 /// a concrete implementation; out-of-process plugins get an IRPC proxy.
 #[async_trait]
-pub trait PluginHost: Send + Sync + std::fmt::Debug {
+pub trait HostApi: Send + Sync + std::fmt::Debug {
     /// Read a memory block's rendered content.
     async fn memory_get(&self, scope: &str, label: &str) -> Result<String, PluginError>;
 

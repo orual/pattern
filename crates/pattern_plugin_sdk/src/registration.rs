@@ -11,7 +11,7 @@
 //!    the daemon can dial back with lifecycle/hook/port calls (v1: stub handler that
 //!    returns Unimplemented; real dispatch into the PluginExtension impl lands when a
 //!    fixture plugin exists to exercise it — parallel shape to the 5b-accept stub).
-//! 5. Dialing the daemon's `pattern-plugin-host/1` ALPN to obtain a PluginHost client
+//! 5. Dialing the daemon's `pattern-plugin-host/1` ALPN to obtain a HostApi client
 //!    for plugin→runtime calls (memory ops, HostSendMessage, etc.).
 //! 6. Blocking until process shutdown (ctrl-c) or endpoint closure.
 
@@ -34,7 +34,7 @@ use pattern_core::plugin::protocol::{
 };
 use pattern_core::plugin::PluginId;
 use pattern_core::traits::plugin::wire::*;
-use pattern_core::traits::plugin::PluginExtension;
+use pattern_core::traits::plugin::{PluginContext, PluginExtension};
 
 /// Errors register_plugin can raise before the run loop starts.
 #[derive(Debug, thiserror::Error)]
@@ -71,10 +71,27 @@ pub struct PluginHandle {
 /// V1 stub: the guest-side ALPN accept routes incoming PluginGuestProtocol messages to a
 /// no-op actor returning Unimplemented. Real dispatch into the `plugin` impl lands when a
 /// fixture plugin exists to exercise it.
-pub async fn register_plugin<P>(plugin_id: PluginId, _plugin: P) -> Result<PluginHandle, RegisterError>
+pub async fn register_plugin<P>(plugin_id: PluginId, plugin: P) -> Result<PluginHandle, RegisterError>
 where
     P: PluginExtension + Send + Sync + 'static,
 {
+    // `--pattern-plugin-init` mode: triggered by `pattern plugin install` after
+    // copying the binary into the cache. Generates the plugin keypair (or loads
+    // existing) via PluginKeyStore, prints `{plugin_id, pubkey, sdk_version}` JSON
+    // to stdout, exits zero. Doesn't enter the bind-and-serve loop.
+    if std::env::args().any(|a| a == "--pattern-plugin-init") {
+        let sk = PluginKeyStore::load_or_generate(&plugin_id)?;
+        let pubkey = sk.public().to_string();
+        let info = serde_json::json!({
+            "plugin_id": plugin_id.as_str(),
+            "pubkey": pubkey,
+            "sdk_version": env!("CARGO_PKG_VERSION"),
+        });
+        println!("{}", serde_json::to_string(&info).expect("plugin-init info json"));
+        std::process::exit(0);
+    }
+
+    let plugin: std::sync::Arc<dyn PluginExtension> = std::sync::Arc::new(plugin);
 
     let state = DaemonState::load().map_err(|source| RegisterError::DaemonState { source })?;
     let daemon_pubkey: PublicKey = state.node_id.parse().map_err(|e: <PublicKey as std::str::FromStr>::Err| RegisterError::InvalidDaemonState {
@@ -104,7 +121,7 @@ where
     };
     plugin_state.save(plugin_id.as_str()).map_err(|source| RegisterError::PluginStateWrite { source })?;
 
-    let guest_client = spawn_guest_stub();
+    let guest_client = spawn_guest(std::sync::Arc::clone(&plugin));
     let guest_local = guest_client
         .as_local()
         .expect("freshly-spawned guest client must be local");
@@ -135,44 +152,155 @@ where
     })
 }
 
-// ─── Guest handler stub (v1) ─────────────────────────────────────────────────
+// ─── Guest handler dispatcher ───────────────────────────────────────────────
 
-/// Spawn the guest-side stub actor. Returns a Client<PluginGuestProtocol> whose
-/// `as_local()` is passed to `PluginGuestProtocol::remote_handler` for Router accept.
-fn spawn_guest_stub() -> Client<PluginGuestProtocol> {
+/// Spawn the guest-side dispatcher actor wired to the plugin's PluginExtension impl.
+fn spawn_guest(plugin: std::sync::Arc<dyn PluginExtension>) -> Client<PluginGuestProtocol> {
     let (tx, rx) = mpsc::channel(64);
-    tokio::spawn(run_guest(rx));
+    tokio::spawn(run_guest(rx, plugin));
     Client::local(tx)
 }
 
-async fn run_guest(mut rx: mpsc::Receiver<PluginGuestMessage>) {
+async fn run_guest(
+    mut rx: mpsc::Receiver<PluginGuestMessage>,
+    plugin: std::sync::Arc<dyn PluginExtension>,
+) {
     while let Some(msg) = rx.recv().await {
-        handle_guest(msg).await;
+        let plugin = std::sync::Arc::clone(&plugin);
+        tokio::spawn(async move { handle_guest(msg, plugin).await });
     }
 }
 
-fn pe(m: &str) -> WirePluginError {
-    WirePluginError::Unimplemented { method: m.into() }
+/// Build a plugin-side `PluginContext` from a `WirePluginContext`. Local hook bus +
+/// no memory store (memory ops route via `HostApi` client) + no scope.
+fn ctx_from_wire(wire: pattern_core::traits::plugin::wire::WirePluginContext) -> PluginContext {
+    PluginContext {
+        plugin_id: wire.plugin_id,
+        hook_bus: std::sync::Arc::new(pattern_core::hooks::HookBus::new()),
+        plugin_root: wire.plugin_root,
+        memory_store: None,
+        scope: None,
+    }
 }
 
-async fn handle_guest(msg: PluginGuestMessage) {
+async fn handle_guest(
+    msg: PluginGuestMessage,
+    plugin: std::sync::Arc<dyn PluginExtension>,
+) {
     use irpc::WithChannels;
     use PluginGuestMessage::*;
+    use pattern_core::traits::plugin::wire::{WireHookResponse, WireJson};
     match msg {
-        OnInstall(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(pe("OnInstall"))).await; }
-        OnEnable(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(pe("OnEnable"))).await; }
-        OnDisable(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(pe("OnDisable"))).await; }
-        DeclarePorts(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Vec::new()).await; }
-        GetLibrary(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(None).await; }
-        OnHookEvent(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(()).await; let _ = pe; }
-        OnHookEventBlocking(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(WireHookResponse::Continue).await; }
-        PortCall(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(WirePortError::MethodNotFound { port_id: req_method_unreachable(), method: "<stub>".into() })).await; }
-        PortSubscribe(req) => { let WithChannels { tx, .. } = req; drop(tx); }
+        OnInstall(req) => {
+            let WithChannels { tx, inner, .. } = req;
+            let pattern_core::plugin::protocol::OnInstallRequest(wire_ctx) = inner;
+            let ctx = ctx_from_wire(wire_ctx);
+            let resp = plugin.on_install(&ctx).await
+                .map_err(|e| WirePluginError::Unimplemented { method: format!("OnInstall failed: {e}").into() });
+            let _ = tx.send(resp).await;
+        }
+        OnEnable(req) => {
+            let WithChannels { tx, inner, .. } = req;
+            let pattern_core::plugin::protocol::OnEnableRequest(wire_ctx) = inner;
+            let ctx = ctx_from_wire(wire_ctx);
+            let resp = plugin.on_enable(&ctx).await
+                .map_err(|e| WirePluginError::Unimplemented { method: format!("OnEnable failed: {e}").into() });
+            let _ = tx.send(resp).await;
+        }
+        OnDisable(req) => {
+            let WithChannels { tx, inner, .. } = req;
+            let pattern_core::plugin::protocol::OnDisableRequest(wire_ctx) = inner;
+            let ctx = ctx_from_wire(wire_ctx);
+            let resp = plugin.on_disable(&ctx).await
+                .map_err(|e| WirePluginError::Unimplemented { method: format!("OnDisable failed: {e}").into() });
+            let _ = tx.send(resp).await;
+        }
+        DeclarePorts(req) => {
+            let WithChannels { tx, .. } = req;
+            let decls: Vec<pattern_core::traits::plugin::wire::WirePortDeclaration> =
+                plugin.ports().into_iter().map(|p| {
+                    pattern_core::traits::plugin::wire::WirePortDeclaration {
+                        id: p.id().clone(),
+                        metadata: p.metadata(),
+                        capabilities: p.capabilities(),
+                        library: p.library(),
+                    }
+                }).collect();
+            let _ = tx.send(decls).await;
+        }
+        GetLibrary(req) => {
+            let WithChannels { tx, .. } = req;
+            let lib = plugin.library().map(smol_str::SmolStr::from);
+            let _ = tx.send(lib).await;
+        }
+        OnHookEvent(req) => {
+            let WithChannels { tx, inner, .. } = req;
+            let pattern_core::plugin::protocol::OnHookEventRequest(event) = inner;
+            let _ = plugin.on_event(&event);
+            let _ = tx.send(()).await;
+        }
+        OnHookEventBlocking(req) => {
+            let WithChannels { tx, inner, .. } = req;
+            let pattern_core::plugin::protocol::OnHookEventBlockingRequest(event) = inner;
+            let resp = match plugin.on_event(&event) {
+                None => WireHookResponse::Continue,
+                Some(pattern_core::hooks::event::HookResponse::Continue) => WireHookResponse::Continue,
+                Some(pattern_core::hooks::event::HookResponse::Block { reason }) => WireHookResponse::Block { reason },
+                Some(pattern_core::hooks::event::HookResponse::Modify(v)) => {
+                    WireHookResponse::Modify(WireJson::from_value(&v).unwrap_or(WireJson("null".into())))
+                }
+                _ => WireHookResponse::Continue,
+            };
+            let _ = tx.send(resp).await;
+        }
+        PortCall(req) => {
+            let WithChannels { tx, inner, .. } = req;
+            let payload_val = inner.payload.parse().unwrap_or(serde_json::Value::Null);
+            let resp = match plugin.ports().iter().find(|p| p.id() == &inner.port_id) {
+                None => Err(WirePortError::NotFound { port_id: inner.port_id.clone() }),
+                Some(port) => match port.call(&inner.method, payload_val).await {
+                    Ok(v) => match WireJson::from_value(&v) {
+                        Ok(wj) => Ok(wj),
+                        Err(e) => Err(WirePortError::InvalidPayload { reason: format!("encode response: {e}").into() }),
+                    },
+                    Err(e) => Err(WirePortError::CallFailed { port_id: inner.port_id, message: e.to_string().into() }),
+                },
+            };
+            let _ = tx.send(resp).await;
+        }
+        PortSubscribe(req) => {
+            let WithChannels { tx, inner, .. } = req;
+            let config_val = inner.config.parse().unwrap_or(serde_json::Value::Null);
+            let port_id = inner.port_id.clone();
+            let ports = plugin.ports();
+            let port = ports.iter().find(|p| p.id() == &port_id).cloned();
+            tokio::spawn(async move {
+                use pattern_core::traits::plugin::wire::{WirePortEvent, WirePortStreamItem};
+                let Some(port) = port else {
+                    let _ = tx.send(WirePortStreamItem::Done { reason: "port not found".into() }).await;
+                    return;
+                };
+                let stream = match port.subscribe(config_val).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = tx.send(WirePortStreamItem::Done { reason: format!("subscribe failed: {e}").into() }).await;
+                        return;
+                    }
+                };
+                use futures::StreamExt;
+                let mut stream = stream;
+                while let Some(ev) = stream.next().await {
+                    let wire_ev = WirePortEvent {
+                        port_id: ev.port_id,
+                        payload: WireJson::from_value(&ev.payload).unwrap_or(WireJson("null".into())),
+                        at: ev.at,
+                    };
+                    if tx.send(WirePortStreamItem::Event(wire_ev)).await.is_err() {
+                        break;
+                    }
+                }
+                let _ = tx.send(WirePortStreamItem::Done { reason: "stream ended".into() }).await;
+            });
+        }
     }
-}
-
-fn req_method_unreachable() -> pattern_core::types::port::PortId {
-    // Stub returns an unused error variant; consumer never sees this path under
-    // production routing (real dispatch comes when fixture plugin lands).
-    pattern_core::types::port::PortId::new("stub")
 }

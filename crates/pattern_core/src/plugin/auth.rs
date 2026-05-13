@@ -211,6 +211,183 @@ where
     }
 }
 
+// ─── Session-aware routing (replaces AllowList for live daemon use) ─────
+
+/// Identity of a session that owns a plugin route entry. Opaque to the auth layer;
+/// surfaced in logs + diagnostics so cross-session leakage is visible.
+pub type RouteSessionId = SmolStr;
+
+/// A single entry in [`PluginRouteTable`]: which session has this plugin enabled.
+#[derive(Debug, Clone)]
+pub struct PluginRouteEntry {
+    pub plugin_id: PluginId,
+    pub session_id: RouteSessionId,
+}
+
+/// Live, mutable map from plugin pubkey → owning session. Daemon holds one shared
+/// `Arc<PluginRouteTable>`; sessions register their plugins on open + unregister on close.
+/// The session-routing protocol handler consults this on every incoming connection.
+///
+/// Why per-session instead of daemon-wide AllowList: plugin trust is project-scoped.
+/// A plugin enabled in session A shouldn't be reachable from session B if B doesn't
+/// enable it. The canonical case: discord plugin enabled in one project but not another.
+#[derive(Debug, Default)]
+pub struct PluginRouteTable {
+    /// Pubkey can be claimed by multiple sessions (e.g. two project mounts both
+    /// enabling the same plugin). Per-session entries keyed under one pubkey.
+    /// SessionRoutingProtocolHandler dispatches to the first match — all entries
+    /// for a given pubkey trust the same plugin, so any session can handle the
+    /// incoming connection from the auth perspective.
+    routes: dashmap::DashMap<iroh::PublicKey, Vec<PluginRouteEntry>>,
+}
+
+/// Error registering a plugin route. Mismatched plugin_id under the same pubkey
+/// indicates two sessions disagree about which plugin this pubkey represents — that's
+/// a real bug (the pubkey IS the plugin's identity), not a multi-session-routing case.
+#[derive(Debug, thiserror::Error)]
+pub enum PluginRouteError {
+    #[error(
+        "pubkey already claimed under plugin {existing_plugin} by session {existing_session}; \
+         cannot register under different plugin {new_plugin} for session {new_session}"
+    )]
+    PluginIdMismatch {
+        existing_plugin: PluginId,
+        existing_session: RouteSessionId,
+        new_plugin: PluginId,
+        new_session: RouteSessionId,
+    },
+}
+
+impl PluginRouteTable {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a plugin's pubkey under the given session. Multiple sessions may
+    /// claim the same pubkey — they're all valid routing targets for incoming
+    /// connections (any one of them can handle the plugin). Idempotent for the
+    /// same (pubkey, plugin_id, session_id) triple. Errors only on plugin_id
+    /// mismatch (which is a real bug: same pubkey, different plugin identity).
+    pub fn register(
+        &self,
+        pubkey: iroh::PublicKey,
+        plugin_id: PluginId,
+        session_id: RouteSessionId,
+    ) -> Result<(), PluginRouteError> {
+        let mut entries = self.routes.entry(pubkey).or_default();
+        // Same-session idempotent re-register.
+        if entries.iter().any(|e| e.session_id == session_id && e.plugin_id == plugin_id) {
+            return Ok(());
+        }
+        // Sanity check: all entries under this pubkey must claim the same plugin_id.
+        if let Some(other) = entries.iter().find(|e| e.plugin_id != plugin_id) {
+            return Err(PluginRouteError::PluginIdMismatch {
+                existing_plugin: other.plugin_id.clone(),
+                existing_session: other.session_id.clone(),
+                new_plugin: plugin_id,
+                new_session: session_id,
+            });
+        }
+        entries.push(PluginRouteEntry { plugin_id, session_id });
+        Ok(())
+    }
+
+    /// Remove all entries for `pubkey` regardless of session. Returns the prior
+    /// entries if any. Use with care — usually you want `unregister_session` or
+    /// per-(pubkey, session) removal instead.
+    pub fn unregister_all(&self, pubkey: &iroh::PublicKey) -> Vec<PluginRouteEntry> {
+        self.routes.remove(pubkey).map(|(_, v)| v).unwrap_or_default()
+    }
+
+    /// Remove all routes belonging to `session_id` across all pubkeys. Used at
+    /// session close. Returns the count of removed entries (for logging).
+    pub fn unregister_session(&self, session_id: &str) -> usize {
+        let mut removed = 0;
+        // Walk each pubkey's Vec, retaining entries that don't belong to this session.
+        // Drop the whole entry if its Vec becomes empty.
+        self.routes.retain(|_, entries| {
+            let before = entries.len();
+            entries.retain(|e| e.session_id != session_id);
+            removed += before - entries.len();
+            !entries.is_empty()
+        });
+        removed
+    }
+
+    /// Look up the first session that owns this pubkey. SessionRoutingProtocolHandler
+    /// dispatches to this one. Returning None means no session has registered this
+    /// pubkey — reject the connection.
+    pub fn lookup(&self, pubkey: &iroh::PublicKey) -> Option<PluginRouteEntry> {
+        self.routes.get(pubkey).and_then(|r| r.first().cloned())
+    }
+
+    /// All sessions claiming this pubkey. Useful for diagnostics or future
+    /// load-balancing across sessions.
+    pub fn lookup_all(&self, pubkey: &iroh::PublicKey) -> Vec<PluginRouteEntry> {
+        self.routes.get(pubkey).map(|r| r.clone()).unwrap_or_default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.routes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.routes.is_empty()
+    }
+}
+
+/// iroh `ProtocolHandler` wrapper that consults [`PluginRouteTable`] at accept-time.
+/// Replacement for [`AuthGatedProtocolHandler`] when the allow-list is session-scoped
+/// rather than static. V1 dispatches all allowed connections to the same inner handler;
+/// later phases will route to per-session host handlers via the route entry's session_id.
+#[derive(Debug, Clone)]
+pub struct SessionRoutingProtocolHandler<H> {
+    routes: Arc<PluginRouteTable>,
+    inner: H,
+}
+
+impl<H> SessionRoutingProtocolHandler<H> {
+    pub fn new(routes: Arc<PluginRouteTable>, inner: H) -> Self {
+        Self { routes, inner }
+    }
+
+    pub fn routes(&self) -> &PluginRouteTable {
+        &self.routes
+    }
+}
+
+impl<H> ProtocolHandler for SessionRoutingProtocolHandler<H>
+where
+    H: ProtocolHandler,
+{
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        let remote = conn.remote_id();
+        match self.routes.lookup(&remote) {
+            Some(entry) => {
+                tracing::debug!(
+                    plugin_id = %entry.plugin_id,
+                    session_id = %entry.session_id,
+                    remote = %remote,
+                    "plugin route: allowed"
+                );
+                self.inner.accept(conn).await
+            }
+            None => {
+                tracing::warn!(
+                    remote = %remote,
+                    "plugin route: rejected (no session has this pubkey registered)"
+                );
+                conn.close(1u32.into(), b"not allowed");
+                Err(AcceptError::from_err(PluginAuthRejected { pubkey: remote }))
+            }
+        }
+    }
+
+    async fn shutdown(&self) {
+        self.inner.shutdown().await
+    }
+}
+
 // ─── Plugin-side keystore ───────────────────────────────────────────────────
 
 use std::path::PathBuf;
@@ -256,11 +433,16 @@ impl PluginKeyStore {
 
     /// Try to load. Returns Ok(None) if no key is registered, Ok(Some) if found.
     pub fn load(plugin_id: &PluginId) -> Result<Option<iroh::SecretKey>, KeyStoreError> {
-        // Keyring first.
-        if let Some(bytes) = try_keyring_load(plugin_id)? {
-            return Ok(Some(secret_from_bytes(&bytes)?));
+        // Keyring first, unless PATTERN_KEYSTORE_FILE_ONLY is set (test isolation:
+        // keyring access can differ between parent test process + spawned plugin
+        // subprocess, producing different keys for the same plugin_id; forcing file-only
+        // makes both processes share the same PATTERN_HOME-scoped path deterministically).
+        if !file_only_mode() {
+            if let Some(bytes) = try_keyring_load(plugin_id)? {
+                return Ok(Some(secret_from_bytes(&bytes)?));
+            }
         }
-        // File fallback.
+        // File fallback (or primary path when file-only).
         if let Some(bytes) = try_file_load(plugin_id)? {
             return Ok(Some(secret_from_bytes(&bytes)?));
         }
@@ -269,13 +451,26 @@ impl PluginKeyStore {
 
     /// Persist a keypair. Tries keyring first; falls back to file on keyring failure.
     /// A successful keyring write does NOT also write the file (single-source-of-truth).
+    /// `PATTERN_KEYSTORE_FILE_ONLY` env var forces file-only (test isolation).
     pub fn store(plugin_id: &PluginId, secret: &iroh::SecretKey) -> Result<(), KeyStoreError> {
         let bytes = secret.to_bytes();
-        if try_keyring_store(plugin_id, &bytes).is_ok() {
+        if !file_only_mode() && try_keyring_store(plugin_id, &bytes).is_ok() {
             return Ok(());
         }
         try_file_store(plugin_id, &bytes)
     }
+
+    /// Test-only file path inspection. Returns the resolved keystore file path
+    /// for the given plugin id; doesn't read or write.
+    pub fn file_path_for_testing(plugin_id: &PluginId) -> Result<PathBuf, KeyStoreError> {
+        plugin_secret_path(plugin_id)
+    }
+}
+
+fn file_only_mode() -> bool {
+    std::env::var_os("PATTERN_KEYSTORE_FILE_ONLY")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
 }
 
 fn secret_from_bytes(bytes: &[u8]) -> Result<iroh::SecretKey, KeyStoreError> {
@@ -392,3 +587,91 @@ mod keystore_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod route_table_tests {
+    use super::*;
+
+    fn mkpk() -> iroh::PublicKey {
+        iroh::SecretKey::generate().public()
+    }
+
+    #[test]
+    fn register_and_lookup_single() {
+        let table = PluginRouteTable::new();
+        let pk = mkpk();
+        table.register(pk, "plug-a".into(), "sess-1".into()).unwrap();
+        let entry = table.lookup(&pk).unwrap();
+        assert_eq!(entry.plugin_id.as_str(), "plug-a");
+        assert_eq!(entry.session_id.as_str(), "sess-1");
+        assert_eq!(table.len(), 1);
+    }
+
+    #[test]
+    fn same_session_same_plugin_is_idempotent() {
+        let table = PluginRouteTable::new();
+        let pk = mkpk();
+        table.register(pk, "plug-a".into(), "sess-1".into()).unwrap();
+        table.register(pk, "plug-a".into(), "sess-1".into()).unwrap();
+        assert_eq!(table.lookup_all(&pk).len(), 1);
+    }
+
+    #[test]
+    fn multi_session_same_plugin_allowed() {
+        // Two sessions both enabling the same plugin (e.g. two project mounts).
+        // Both routes are kept; lookup returns the first; lookup_all returns both.
+        let table = PluginRouteTable::new();
+        let pk = mkpk();
+        table.register(pk, "plug-a".into(), "sess-1".into()).unwrap();
+        table.register(pk, "plug-a".into(), "sess-2".into()).unwrap();
+        let all = table.lookup_all(&pk);
+        assert_eq!(all.len(), 2);
+        let sessions: std::collections::HashSet<_> =
+            all.iter().map(|e| e.session_id.as_str()).collect();
+        assert!(sessions.contains("sess-1"));
+        assert!(sessions.contains("sess-2"));
+    }
+
+    #[test]
+    fn plugin_id_mismatch_rejected() {
+        // Same pubkey, two different plugin_ids = real bug (pubkey IS plugin identity).
+        let table = PluginRouteTable::new();
+        let pk = mkpk();
+        table.register(pk, "plug-a".into(), "sess-1".into()).unwrap();
+        let err = table.register(pk, "plug-b".into(), "sess-2".into()).unwrap_err();
+        assert!(matches!(err, PluginRouteError::PluginIdMismatch { .. }));
+    }
+
+    #[test]
+    fn unregister_session_removes_only_that_sessions_entries() {
+        let table = PluginRouteTable::new();
+        let pk = mkpk();
+        table.register(pk, "plug-a".into(), "sess-1".into()).unwrap();
+        table.register(pk, "plug-a".into(), "sess-2".into()).unwrap();
+        let removed = table.unregister_session("sess-1");
+        assert_eq!(removed, 1);
+        let remaining = table.lookup_all(&pk);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].session_id.as_str(), "sess-2");
+    }
+
+    #[test]
+    fn unregister_session_drops_empty_pubkey_entry() {
+        // Last session for a pubkey unregisters → the pubkey entry should be
+        // removed entirely so the next registrant doesn't see a stale empty Vec.
+        let table = PluginRouteTable::new();
+        let pk = mkpk();
+        table.register(pk, "plug-a".into(), "sess-1".into()).unwrap();
+        assert_eq!(table.len(), 1);
+        table.unregister_session("sess-1");
+        assert_eq!(table.len(), 0);
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn lookup_miss_returns_none() {
+        let table = PluginRouteTable::new();
+        assert!(table.lookup(&mkpk()).is_none());
+    }
+}
+

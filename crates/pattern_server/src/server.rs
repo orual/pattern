@@ -88,6 +88,12 @@ pub struct SessionConfig {
     /// this daemon instance. Plugins register at boot; agents dispatch
     /// through it via `PortHandler`.
     pub port_registry: std::sync::Arc<pattern_runtime::port_registry::PortRegistryImpl>,
+    /// Daemon-shared plugin route table. Each session opened against this
+    /// daemon populates its OOP plugins into this table at open; the
+    /// `SessionRoutingProtocolHandler` consults it at iroh accept-time to
+    /// dispatch incoming plugin connections to the right session.
+    /// `None` leaves OOP plugin routing inactive (CC plugins still work).
+    pub plugin_routes: Option<std::sync::Arc<pattern_core::plugin::auth::PluginRouteTable>>,
 }
 
 /// Cached project mount state.
@@ -2813,6 +2819,7 @@ async fn open_session_with_persona(
         constellation_registry: Some(project_mount.constellation_registry.clone()),
         sibling_resolver: Some(sibling_resolver),
         plugin_registry: plugin_registry_for_session,
+        plugin_routes: config.plugin_routes.clone(),
         // Embedding-queue sender — pulled from the project mount's cache.
         // Enables vector-index coverage of message persistence so future-us
         // can semantically search past exchanges, not just keyword-match.
@@ -3122,6 +3129,9 @@ fn estimate_batch_tokens(user_message: &Option<String>, events: &[WireTurnEvent]
                             ShellOutputKind::Backgrounded { .. } => 0,
                         },
                         WireMessageAttachment::PortEvent { payload, .. } => payload.len(),
+                        // non_exhaustive on WireMessageAttachment — required wildcard
+                        // since the enum now lives outside this crate.
+                        _ => 0,
                     }
                 }
             }
@@ -3921,6 +3931,7 @@ context {{
                 sdk: pattern_runtime::SdkLocation::default(),
                 provider: Arc::new(pattern_runtime::NopProviderClient),
                 port_registry,
+                plugin_routes: None,
             }
         };
 
@@ -3976,6 +3987,7 @@ context {{
                 sdk: pattern_runtime::SdkLocation::default(),
                 provider: Arc::new(pattern_runtime::NopProviderClient),
                 port_registry,
+                plugin_routes: None,
             }
         };
         let handle2 =

@@ -35,7 +35,11 @@ pub struct LoadedPlugin {
     /// wrap a `PluginExtension`; out-of-process (Task 5) use IRPC/QUIC.
     pub connection: Option<std::sync::Arc<dyn crate::plugin::transport::PluginConnection>>,
     /// Plugin → runtime callback host. None for CC plugins (no callbacks).
-    pub host: Option<std::sync::Arc<dyn pattern_core::traits::plugin::PluginHost>>,
+    pub host: Option<std::sync::Arc<dyn pattern_core::traits::plugin::HostApi>>,
+    /// Parsed plugin key from registry.kdl. `None` for ambient/legacy entries
+    /// (no pubkey field) and freshly-installed plugins (pubkey gets written
+    /// after plugin's first run). Drives session-open route-table population.
+    pub plugin_key: Option<pattern_core::plugin::auth::PluginKey>,
 }
 
 // ---- KDL persistence types (knus::Decode) -----------------------------------
@@ -215,6 +219,25 @@ impl PluginRegistry {
         self.inner.read().values().cloned().collect()
     }
 
+    /// Pubkey-routable plugins in this registry: returns `(plugin_id, pubkey)` for
+    /// each loaded plugin whose registry entry has a parsed `PluginKey::Direct(_)`.
+    /// Atproto-keyed plugins (phase 7) are skipped — their resolution path isn't
+    /// wired yet. Plugins with no `plugin_key` (ambient / legacy / freshly-installed)
+    /// are also skipped; only OOP plugins with a pinned pubkey go through the
+    /// session-aware route table.
+    pub fn routable_pubkeys(&self) -> Vec<(PluginId, iroh::PublicKey)> {
+        self.inner
+            .read()
+            .values()
+            .filter_map(|lp| match lp.plugin_key.as_ref()? {
+                pattern_core::plugin::auth::PluginKey::Direct(pk) => {
+                    Some((lp.id.clone(), *pk))
+                }
+                pattern_core::plugin::auth::PluginKey::Atproto { .. } => None,
+            })
+            .collect()
+    }
+
     /// Read and parse a registry KDL file.
     pub fn read_registry_file(path: &Path) -> Result<Option<RegistryFile>, RegistryError> {
         if !path.exists() {
@@ -271,6 +294,7 @@ impl PluginRegistry {
                         capability_overrides: None,
                         connection: conn,
                         host: None,
+                        plugin_key: None, // ambient = unauthed by design
                     };
                     combined.insert(lp.id.clone(), lp);
                 }
@@ -399,12 +423,143 @@ impl PluginRegistry {
             capability_overrides: None,
             connection: build_connection(&manifest, &dest),
             host: None,
+            plugin_key: None, // newly installed; pubkey lands after plugin's first run
         };
 
         self.insert(lp.clone());
+
+        // Native plugin steps: cargo build (or validate prebuilt), then run
+        // --pattern-plugin-init to extract pubkey. Updates the LoadedPlugin
+        // with plugin_key set so persist_installation writes the pubkey.
+        let lp = match self.install_native_steps(&lp) {
+            Ok(updated) => {
+                if updated.plugin_key.is_some() {
+                    // Replace cached LoadedPlugin with the updated one carrying the pubkey.
+                    self.insert(updated.clone());
+                }
+                updated
+            }
+            Err(e) => {
+                tracing::warn!(plugin = %lp.id, error = %e, "native install steps failed — registering as non-routable");
+                lp
+            }
+        };
+
         // Persist the installation to the registry KDL file for the scope.
         self.persist_installation(&lp)?;
         Ok(lp)
+    }
+
+    /// Native-plugin post-install steps. Cargo build (if `manifest.build`),
+    /// invoke `--pattern-plugin-init` to extract pubkey via PluginKeyStore.
+    /// Returns the LoadedPlugin updated with `plugin_key` set (or unchanged if
+    /// the source isn't a native Rust plugin).
+    fn install_native_steps(&self, lp: &LoadedPlugin) -> Result<LoadedPlugin, RegistryError> {
+        // Not a native rust plugin if there's no Cargo.toml at the source root.
+        if !lp.source_path.join("Cargo.toml").exists() {
+            return Ok(lp.clone());
+        }
+
+        let bin_name = if cfg!(target_os = "windows") {
+            format!("{}.exe", lp.id)
+        } else {
+            lp.id.to_string()
+        };
+        let bin_dir = lp.source_path.join("bin");
+        let bin_path = bin_dir.join(&bin_name);
+
+        // build = true (default): cargo build --release in source_path; copy
+        //     `target/release/<crate-or-bin>` into `bin/<plugin-id>[.exe]`.
+        // build = false: expect prebuilt at `bin/<plugin-id>[.exe]`, error if missing.
+        if lp.manifest.build {
+            tracing::info!(plugin = %lp.id, "running cargo build --release");
+            let output = std::process::Command::new("cargo")
+                .args(["build", "--release"])
+                .current_dir(&lp.source_path)
+                .output()
+                .map_err(|source| RegistryError::Io {
+                    path: lp.source_path.clone(),
+                    source,
+                })?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(RegistryError::Io {
+                    path: lp.source_path.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("cargo build failed: {stderr}"),
+                    ),
+                });
+            }
+            // Find binary: try target/release/<plugin-id> first, then target/release/<plugin-id>[.exe].
+            // crate name = manifest name for the simple case; complex workspace TBD.
+            let target_bin = lp.source_path.join("target").join("release").join(&bin_name);
+            let target_bin_no_ext = lp.source_path.join("target").join("release").join(lp.id.as_str());
+            let src_bin = if target_bin.exists() { target_bin }
+                else if target_bin_no_ext.exists() { target_bin_no_ext }
+                else {
+                    return Err(RegistryError::Io {
+                        path: lp.source_path.clone(),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("built binary not found — expected target/release/{} (no manifest binary-name override yet)", bin_name),
+                        ),
+                    });
+                };
+            std::fs::create_dir_all(&bin_dir).map_err(|source| RegistryError::Io { path: bin_dir.clone(), source })?;
+            std::fs::copy(&src_bin, &bin_path).map_err(|source| RegistryError::Io { path: bin_path.clone(), source })?;
+        } else if !bin_path.exists() {
+            return Err(RegistryError::Io {
+                path: bin_path.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("build = false but no prebuilt binary at {}", bin_path.display()),
+                ),
+            });
+        }
+
+        // Invoke `<bin> --pattern-plugin-init` to generate-or-load keypair + print JSON.
+        tracing::info!(plugin = %lp.id, "running --pattern-plugin-init to extract pubkey");
+        let output = std::process::Command::new(&bin_path)
+            .arg("--pattern-plugin-init")
+            .output()
+            .map_err(|source| RegistryError::Io { path: bin_path.clone(), source })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(RegistryError::Io {
+                path: bin_path.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("--pattern-plugin-init failed: {stderr}"),
+                ),
+            });
+        }
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|e| RegistryError::Io {
+                path: bin_path.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("--pattern-plugin-init stdout not valid JSON: {e}"),
+                ),
+            })?;
+        let pubkey_str = json["pubkey"].as_str().ok_or_else(|| RegistryError::Io {
+            path: bin_path.clone(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "--pattern-plugin-init JSON missing pubkey field",
+            ),
+        })?;
+        let pubkey: iroh::PublicKey = pubkey_str.parse().map_err(|e: <iroh::PublicKey as std::str::FromStr>::Err| RegistryError::Io {
+            path: bin_path.clone(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("--pattern-plugin-init returned invalid pubkey: {e}"),
+            ),
+        })?;
+
+        let mut updated = lp.clone();
+        updated.plugin_key = Some(pattern_core::plugin::auth::PluginKey::Direct(pubkey));
+        Ok(updated)
     }
 
     /// Persist a plugin installation to the appropriate registry KDL file.
@@ -432,13 +587,22 @@ impl PluginRegistry {
             String::new()
         };
 
-        // Append a plugin entry.
+        // Append a plugin entry. Includes pubkey line for native (OOP)
+        // plugins so SessionRoutingProtocolHandler can dispatch incoming
+        // connections to the right plugin at iroh accept time.
         let ts = jiff::Timestamp::now();
+        let pubkey_line = match &plugin.plugin_key {
+            Some(pattern_core::plugin::auth::PluginKey::Direct(pk)) => {
+                format!("    pubkey \"{}\"\n", pk)
+            }
+            _ => String::new(),
+        };
         content.push_str(&format!(
-            "\nplugin \"{}\" {{\n    source \"{}\"\n    installed-at \"{}\"\n}}\n",
+            "\nplugin \"{}\" {{\n    source \"{}\"\n    installed-at \"{}\"\n{}}}\n",
             plugin.id,
             plugin.source_path.display(),
             ts,
+            pubkey_line,
         ));
 
         std::fs::write(&reg_path, &content).map_err(|source| RegistryError::Io {
@@ -598,6 +762,17 @@ fn build_loaded_from_installation(
     scope: PluginScope,
     source_path: &Path,
 ) -> LoadedPlugin {
+    // Parse plugin key from registry entry. Errors here are logged + the plugin
+    // loads as if it had no key (None) — better than failing the whole registry
+    // load on one malformed pubkey. Real malformed entries surface at session-open
+    // when routable_pubkeys() walks the loaded set.
+    let plugin_key = match inst.plugin_key() {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::warn!(plugin_id = %inst.id, error = %e, "failed to parse plugin key; loading as unauthed");
+            None
+        }
+    };
     // Convert user_config entries to a JSON object.
     let user_config = inst
         .user_config
@@ -626,6 +801,7 @@ fn build_loaded_from_installation(
         capability_overrides: None,
         connection: conn,
         host: None,
+        plugin_key,
     }
 }
 
