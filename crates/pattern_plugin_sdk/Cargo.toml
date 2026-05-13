@@ -1,0 +1,40 @@
+[package]
+name = "pattern-plugin-sdk"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SDK for authoring Pattern plugins (in-process or out-of-process via IRPC)"
+
+[dependencies]
+# Slim core: no loro, no genai, no candle by default.
+pattern-core = { path = "../pattern_core", default-features = false, features = ["plugin-transport"] }
+
+# IRPC for the plugin transport.
+irpc = { workspace = true }
+irpc-iroh = { workspace = true }
+# iroh for out-of-process QUIC transport (Task 5 uses iroh::protocol::Router
+# + iroh node identity for the allow-list auth surface). iroh delegates its
+# TLS/QUIC layer to noq, which is also what irpc uses — shared stack.
+iroh = { workspace = true }
+
+# Always-needed plumbing
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+smol_str = { workspace = true }
+futures = { workspace = true }
+
+[features]
+default = []
+# Opt-in: re-exports loro CRDT machinery + MemoryStore trait for plugins
+# that need to participate in memory delta sync. Pulls loro through
+# pattern_core's `memory` feature.
+memory-sync = ["pattern-core/memory"]
+
+[lints]
+workspace = true

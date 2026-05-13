@@ -26,14 +26,14 @@ parking_lot = { workspace = true }
 dirs = { workspace = true }
 secrecy = { workspace = true }
 
-# CRDT
-loro = { version = "1.10", features = ["counter"] }
+# CRDT (feature-gated: `memory`)
+loro = { version = "1.10", features = ["counter"], optional = true }
 
-# AI/LLM
-genai = { workspace = true }
+# AI/LLM (feature-gated: `provider`)
+genai = { workspace = true, optional = true }
 
 # Optional: SQLite type conversions (enabled by pattern-db)
-rusqlite = { version = "0.39", optional = true }
+rusqlite = { version = "0.39", features = ["bundled-full"], optional = true }
 
 # Optional: MCP client (Model Context Protocol)
 rmcp = { workspace = true, features = ["transport-child-process", "client", "transport-streamable-http-client-reqwest", "client-side-sse"], optional = true }
@@ -53,6 +53,14 @@ value-ext = "0.1.2"
 
 jacquard.workspace = true
 
+# Plugin transport (feature-gated: `plugin-transport`)
+iroh = { workspace = true, optional = true }
+irpc = { workspace = true, optional = true }
+irpc-iroh = { workspace = true, optional = true }
+postcard = { workspace = true, optional = true }
+keyring = { workspace = true, optional = true }
+nix = { version = "0.29", features = ["signal", "process"], optional = true }
+
 # Web tool dependencies
 regex = "1.11.1"
 
@@ -71,10 +79,23 @@ miette = { workspace = true, features = ["fancy"] }
 proptest = "1"
 
 [features]
+default = ["memory", "provider"]
+
+# Heavy CRDT machinery (loro). Required by `pattern_core::memory::document`.
+memory = ["dep:loro"]
+
+# LLM provider integration (genai). Required by `pattern_core::types::{message,turn,snapshot,provider}`
+# and one `error::CoreError` variant. Plugin authors usually want this off.
+provider = ["dep:genai"]
 
 # Enable rusqlite FromSql/ToSql impls for domain enums
 sqlite = ["rusqlite"]
 mcp-client = ["dep:rmcp"]       # MCP client for tool invocation
+
+# Plugin transport (iroh + irpc protocol enums + ALPN consts + auth primitives).
+# Required by pattern_runtime + pattern_server + pattern_plugin_sdk. Plain consumers
+# (pattern_cli depending only on domain types) don't need this — it pulls in iroh + irpc.
+plugin-transport = ["dep:iroh", "dep:irpc", "dep:irpc-iroh", "dep:postcard", "dep:keyring", "dep:nix"]
 
 
 [lints]

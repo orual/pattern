@@ -75,7 +75,7 @@ pub type BlockHandle = SmolStr;
 ///     .with_permission(MemoryPermission::ReadOnly);
 /// ```
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlockCreate {
     /// Human-chosen label for the block. Must be unique per agent.
     pub label: String,

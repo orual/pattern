@@ -93,7 +93,7 @@ fn build_split(all_decls: &[EffectDecl], visible_decls: &[EffectDecl]) -> String
 /// An empty slice produces output identical to [`build`].
 pub fn build_with_libraries(
     decls: &[EffectDecl],
-    port_libraries: &[(pattern_core::types::port::PortId, &str)],
+    port_libraries: &[(pattern_core::types::port::PortId, smol_str::SmolStr)],
     visible_decls: Option<&[EffectDecl]>,
 ) -> String {
     let mut out = String::with_capacity(8192);
@@ -717,7 +717,9 @@ mod tests {
     fn library_appended_when_provided() {
         let decls = canonical_effect_decls();
         let port_id = PortId::new("http");
-        let library_src = "-- Http helpers\nhttpGet url = call \"http\" \"get\" url\n";
+        let library_src = smol_str::SmolStr::new_static(
+            "-- Http helpers\nhttpGet url = call \"http\" \"get\" url\n",
+        );
         let preamble = build_with_libraries(&decls, &[(port_id, library_src)], None);
 
         assert!(
@@ -757,9 +759,11 @@ mod tests {
         let decls = canonical_effect_decls();
         let id1 = PortId::new("slack");
         let id2 = PortId::new("weather");
-        let src1 = "slackSend = call \"slack\" \"send\"\n";
-        let src2 = "getWeather loc = call \"weather\" \"current\" loc\n";
-        let preamble = build_with_libraries(&decls, &[(id1, src1), (id2, src2)], None);
+        let src1 = smol_str::SmolStr::new_static("slackSend = call \"slack\" \"send\"\n");
+        let src2 = smol_str::SmolStr::new_static(
+            "getWeather loc = call \"weather\" \"current\" loc\n",
+        );
+        let preamble = build_with_libraries(&decls, &[(id1, src1.clone()), (id2, src2.clone())], None);
 
         assert!(
             preamble.contains("-- Port library: slack"),

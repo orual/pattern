@@ -6,7 +6,7 @@
 // again, rebuild them on top of `types::batch::MessageBatch`.
 
 pub mod memory {
-    use chrono::Utc;
+    use jiff::Timestamp;
     use serde_json::Value as JsonValue;
 
     use crate::memory::StructuredDocument;
@@ -85,8 +85,8 @@ pub mod memory {
                     char_limit: 1000,
                     permission: crate::types::memory_types::MemoryPermission::ReadWrite,
                     pinned: true,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                 }]),
                 Some(MemoryBlockType::Working) => {
                     if self.working_blocks_pinned {
@@ -100,8 +100,8 @@ pub mod memory {
                             char_limit: 2000,
                             permission: crate::types::memory_types::MemoryPermission::ReadWrite,
                             pinned: true,
-                            created_at: Utc::now(),
-                            updated_at: Utc::now(),
+                            created_at: Timestamp::now(),
+                            updated_at: Timestamp::now(),
                         }])
                     } else {
                         Ok(vec![
@@ -115,8 +115,8 @@ pub mod memory {
                                 char_limit: 2000,
                                 permission: crate::types::memory_types::MemoryPermission::ReadWrite,
                                 pinned: false,
-                                created_at: Utc::now(),
-                                updated_at: Utc::now(),
+                                created_at: Timestamp::now(),
+                                updated_at: Timestamp::now(),
                             },
                             BlockMetadata {
                                 id: "ephemeral-2".to_string(),
@@ -128,8 +128,8 @@ pub mod memory {
                                 char_limit: 2000,
                                 permission: crate::types::memory_types::MemoryPermission::ReadWrite,
                                 pinned: false,
-                                created_at: Utc::now(),
-                                updated_at: Utc::now(),
+                                created_at: Timestamp::now(),
+                                updated_at: Timestamp::now(),
                             },
                             BlockMetadata {
                                 id: "pinned-1".to_string(),
@@ -141,8 +141,8 @@ pub mod memory {
                                 char_limit: 2000,
                                 permission: crate::types::memory_types::MemoryPermission::ReadWrite,
                                 pinned: true,
-                                created_at: Utc::now(),
-                                updated_at: Utc::now(),
+                                created_at: Timestamp::now(),
+                                updated_at: Timestamp::now(),
                             },
                         ])
                     }

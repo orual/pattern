@@ -51,7 +51,7 @@ pub enum BlockSchema {
     /// Uses: LoroText container
     Text {
         /// Optional viewport - if set, only displays a window of lines
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         viewport: Option<TextViewport>,
     },
 

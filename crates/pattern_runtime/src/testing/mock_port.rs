@@ -311,8 +311,8 @@ impl Port for MockPort {
     }
 
     /// Returns the optional Haskell library source (AC4.6/4.9).
-    fn library(&self) -> Option<&'static str> {
-        self.library_src
+    fn library(&self) -> Option<smol_str::SmolStr> {
+        self.library_src.map(smol_str::SmolStr::new_static)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -379,7 +379,12 @@ mod tests {
     #[test]
     fn mock_port_library_returns_source() {
         let port = MockPort::new_with_library("mock", "module Mock where mockFn = pure ()\n");
-        assert_eq!(port.library(), Some("module Mock where mockFn = pure ()\n"));
+        assert_eq!(
+            port.library(),
+            Some(smol_str::SmolStr::new_static(
+                "module Mock where mockFn = pure ()\n"
+            ))
+        );
     }
 
     #[test]

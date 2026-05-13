@@ -12,7 +12,7 @@ name = "pattern-server"
 path = "src/main.rs"
 
 [dependencies]
-pattern-core = { path = "../pattern_core" }
+pattern-core = { path = "../pattern_core", features = ["plugin-transport"] }
 pattern-runtime = { path = "../pattern_runtime" }
 pattern-db = { path = "../pattern_db" }
 pattern-memory = { path = "../pattern_memory" }
@@ -21,6 +21,8 @@ pattern-provider = { path = "../pattern_provider" }
 tokio = { workspace = true, features = ["full"] }
 async-trait = { workspace = true }
 irpc = { workspace = true }
+irpc-iroh = { workspace = true }
+iroh = { workspace = true }
 noq = { workspace = true }
 n0-future = { workspace = true }
 

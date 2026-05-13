@@ -2518,7 +2518,7 @@ impl TidepoolSession {
                     })?;
                 for (port_id, src) in libs {
                     let pid = port_id.as_str().to_string();
-                    let module_name = parse_module_name(src).ok_or_else(|| {
+                    let module_name = parse_module_name(&src).ok_or_else(|| {
                         RuntimeError::PortLibrarySetupFailed {
                             port_id: pid.clone(),
                             op: "parse-module-name".to_string(),
@@ -2596,7 +2596,7 @@ impl TidepoolSession {
                 Vec<pattern_core::mcp::McpServerConfig>,
             )> = Vec::new();
             for lp in &plugins {
-                tracing::info!(plugin = %lp.id, has_ext = lp.extension.is_some(), "plugin enable: checking plugin");
+                tracing::info!(plugin = %lp.id, has_ext = lp.connection.is_some(), "plugin enable: checking plugin");
                 // Collect MCP configs for background loading (don't block session open).
                 use crate::plugin::cc_adapter::mcp_config;
                 let mcp_json = lp
@@ -2612,7 +2612,7 @@ impl TidepoolSession {
                 if !configs.is_empty() {
                     pending_mcp_configs.push((lp.id.clone(), configs));
                 }
-                if let Some(ext) = &lp.extension {
+                if let Some(ext) = &lp.connection {
                     let ctx = pattern_core::traits::plugin::PluginContext {
                         plugin_id: lp.id.clone(),
                         hook_bus: hook_bus.clone(),

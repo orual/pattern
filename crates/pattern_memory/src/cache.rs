@@ -12,6 +12,13 @@ use crate::subscriber::event::{Heartbeat, ReembedRequest};
 use crate::subscriber::supervisor::{SupervisorState, run_supervisor};
 use crate::types_internal::CachedBlock;
 use chrono::Utc;
+use jiff::Timestamp;
+
+/// Convert chrono::DateTime<Utc> → jiff::Timestamp at the pattern_db boundary.
+/// pattern_db rows use chrono; pattern_core BlockMetadata + ArchivalEntry use jiff.
+fn chrono_to_jiff(dt: chrono::DateTime<chrono::Utc>) -> Timestamp {
+    Timestamp::from_nanosecond(dt.timestamp_nanos_opt().unwrap_or(0) as i128).unwrap_or_default()
+}
 use dashmap::DashMap;
 use pattern_core::memory::StructuredDocument;
 use pattern_core::traits::EmbeddingProvider;
@@ -2147,8 +2154,8 @@ fn db_block_to_metadata(block: &pattern_db::models::MemoryBlock) -> BlockMetadat
         char_limit: block.char_limit as usize,
         permission: block.permission,
         pinned: block.pinned,
-        created_at: block.created_at,
-        updated_at: block.updated_at,
+        created_at: chrono_to_jiff(block.created_at),
+        updated_at: chrono_to_jiff(block.updated_at),
     }
 }
 
@@ -2159,7 +2166,7 @@ fn db_archival_to_archival(entry: &pattern_db::models::ArchivalEntry) -> Archiva
         agent_id: entry.agent_id.clone(),
         content: entry.content.clone(),
         metadata: entry.metadata.as_ref().map(|j| j.0.clone()),
-        created_at: entry.created_at,
+        created_at: chrono_to_jiff(entry.created_at),
     }
 }
 
@@ -2185,6 +2192,7 @@ impl MemoryStore for MemoryCache {
         // Generate block ID.
         let block_id = format!("mem_{}", Uuid::new_v4().simple());
         let now = Utc::now();
+        let now_jiff = chrono_to_jiff(now);
 
         // Encode scope as prefixed string for DB storage. The cache's
         // in-memory lookups also compare against this encoded form via
@@ -2202,8 +2210,8 @@ impl MemoryStore for MemoryCache {
             char_limit: effective_char_limit,
             permission,
             pinned: false,
-            created_at: now,
-            updated_at: now,
+            created_at: now_jiff,
+            updated_at: now_jiff,
         };
 
         // Create new StructuredDocument with metadata. Mutable because the
@@ -2363,7 +2371,7 @@ impl MemoryStore for MemoryCache {
                     meta.char_limit = effective_char_limit;
                     meta.permission = permission;
                     meta.block_type = block_type;
-                    meta.updated_at = now;
+                    meta.updated_at = now_jiff;
                 }
                 hydrated.dirty = true;
                 hydrated.last_accessed = now;

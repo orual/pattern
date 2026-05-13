@@ -127,13 +127,13 @@ pub trait Port: Send + Sync + std::fmt::Debug {
     /// so agents write ergonomic Haskell helpers (e.g., `Http.get url`)
     /// rather than constructing JSON by hand.
     ///
-    /// Returns `&'static str` because port libraries are typically
-    /// compile-time string literals (`concat!` / `include_str!`). Plugins
-    /// that need runtime-built strings can use `Box::leak` to produce a
-    /// `'static` reference.
+    /// Returns `SmolStr` so compile-time literals stay zero-alloc via
+    /// `SmolStr::new_static(...)`, runtime-built strings allocate normally,
+    /// and the wire format (Phase 6 `WirePortDeclaration`) is a simple
+    /// string carried across the plugin-IRPC boundary.
     ///
     /// Returns `None` when the port provides no Haskell helpers.
-    fn library(&self) -> Option<&'static str> {
+    fn library(&self) -> Option<smol_str::SmolStr> {
         None
     }
 

@@ -106,7 +106,7 @@ async fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
             match reg.install(InstallSource::LocalPath(&path), scope.clone()) {
                 Ok(lp) => {
                     // Call on_install for the extension (imports skills, etc.)
-            if let Some(ext) = &lp.extension {
+            if let Some(ext) = &lp.connection {
                 let ctx = pattern_core::traits::plugin::PluginContext {
                     plugin_id: lp.id.clone(),
                     hook_bus: std::sync::Arc::new(pattern_core::hooks::HookBus::new()),
@@ -139,7 +139,7 @@ async fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
                             {
                                 match reg.install(InstallSource::LocalPath(&sub), scope.clone()) {
                                     Ok(lp) => {
-                                        if let Some(ext) = &lp.extension {
+                                        if let Some(ext) = &lp.connection {
                                             let ctx = pattern_core::traits::plugin::PluginContext {
                                                 plugin_id: lp.id.clone(),
                                                 hook_bus: std::sync::Arc::new(pattern_core::hooks::HookBus::new()),

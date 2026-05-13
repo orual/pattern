@@ -175,7 +175,7 @@ pub use crate::error::memory::{MemoryError, MemoryResult};
 /// assert!(f.agent_id.is_none());
 /// assert_eq!(f.label_prefix.as_deref(), Some("ds:"));
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct BlockFilter {
     /// If set, only blocks owned by this agent are returned.
@@ -251,7 +251,7 @@ impl BlockFilter {
 /// assert_eq!(patch.pinned, Some(true));
 /// assert!(!patch.is_empty());
 /// ```
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct BlockMetadataPatch {
     /// If set, update the block's pinned flag.
@@ -302,7 +302,7 @@ impl BlockMetadataPatch {
 ///
 /// Replaces the pre-Phase-3 separate `undo_block` and `redo_block`
 /// methods.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum UndoRedoOp {
     /// Undo the last persisted change.

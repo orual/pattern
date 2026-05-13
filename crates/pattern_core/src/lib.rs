@@ -45,10 +45,14 @@ pub mod plugin;
 pub mod constellation;
 pub mod error;
 pub mod fronting;
+#[cfg(feature = "memory")]
 pub mod memory;
 // `memory_acl` module removed: MemoryOp, MemoryGate, and check() are
 // canonical in types::memory_types::core_types (as methods on MemoryGate).
 pub mod paths;
+
+#[cfg(feature = "plugin-transport")]
+pub mod daemon_state;
 pub mod permission;
 pub mod spawn;
 pub mod traits;
@@ -79,10 +83,13 @@ pub use error::{
 // ── Trait re-exports ─────────────────────────────────────────────────────────
 // Explicit (no wildcard) so the public surface is greppable.
 
+#[cfg(feature = "provider")]
 pub use traits::{
-    AgentRuntime, EmbeddingProvider, Endpoint, EndpointRegistry, MemoryStore, ProviderClient,
-    Session,
+    AgentRuntime, Endpoint, EndpointRegistry, ProviderClient, Session,
 };
+pub use traits::EmbeddingProvider;
+#[cfg(feature = "memory")]
+pub use traits::MemoryStore;
 
 // ── Type re-exports ──────────────────────────────────────────────────────────
 
@@ -97,9 +104,11 @@ pub use types::ids::{
     new_snowflake_id,
 };
 
-// Message / batch
+// Message / batch (gated: pulls genai)
+#[cfg(feature = "provider")]
 pub use types::batch::{BatchType, MessageBatch};
 pub use types::block_ref::BlockRef;
+#[cfg(feature = "provider")]
 pub use types::message::{Message, ResponseMeta};
 
 // Block value types
@@ -108,10 +117,12 @@ pub use types::block::{BlockCreate, BlockHandle, BlockWrite, BlockWriteKind};
 // Origin / provenance
 pub use types::origin::{AgentAuthor, Author, Human, MessageOrigin, Partner, Sphere, SystemReason};
 
-// Turn types
+// Turn types (gated: pulls genai)
+#[cfg(feature = "provider")]
 pub use types::turn::{StepReply, StopReason, TurnCacheMetrics, TurnId, TurnInput, TurnOutput};
 
-// Snapshot / persona types (Phase 3 checkpoint stubs)
+// Snapshot / persona types (gated: pulls genai)
+#[cfg(feature = "provider")]
 pub use types::snapshot::{PersonaSnapshot, SessionSnapshot};
 
 // Embedding value types
@@ -125,6 +136,7 @@ pub use spawn::{
 
 // Provider request / response types + genai re-exports for callers that
 // want `use pattern_core::*` without also depending on genai directly.
+#[cfg(feature = "provider")]
 pub use types::provider::{
     CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent, CompletionRequest,
     ProviderCredential, ReasoningEffort, StreamEnd, SystemBlock, TokenCount, Tool, ToolCall,

@@ -102,7 +102,7 @@ impl PortRegistryImpl {
     /// tempdir is then added to the GHC include path so agent code can
     /// `import qualified Pattern.Http as Http` (or any other plugin
     /// module name).
-    pub fn port_libraries(&self) -> Vec<(PortId, &'static str)> {
+    pub fn port_libraries(&self) -> Vec<(PortId, smol_str::SmolStr)> {
         self.ports
             .iter()
             .filter_map(|e| e.value().library().map(|src| (e.key().clone(), src)))

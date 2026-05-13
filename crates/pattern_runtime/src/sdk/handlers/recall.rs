@@ -130,7 +130,7 @@ impl EffectHandler<SessionContext> for RecallHandler {
                             "id": r.id,
                             "agentId": r.agent_id,
                             "content": r.content,
-                            "createdAt": r.created_at.to_rfc3339(),
+                            "createdAt": r.created_at.to_string(),
                         });
                         hits.push(serde_json::to_string(&hit).unwrap_or_default());
                     }
@@ -145,7 +145,7 @@ impl EffectHandler<SessionContext> for RecallHandler {
                             "id": r.id,
                             "agentId": r.agent_id,
                             "content": r.content,
-                            "createdAt": r.created_at.to_rfc3339(),
+                            "createdAt": r.created_at.to_string(),
                         });
                         hits.push(serde_json::to_string(&hit).unwrap_or_default());
                     }
@@ -231,7 +231,7 @@ mod tests {
                     agent_id: scope.id().to_string(),
                     content: content.to_string(),
                     metadata: None,
-                    created_at: chrono::Utc::now(),
+                    created_at: jiff::Timestamp::now(),
                 });
             Ok(id)
         }

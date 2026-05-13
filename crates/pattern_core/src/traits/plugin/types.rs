@@ -16,6 +16,7 @@ pub struct PluginContext {
     /// Root directory of the plugin on disk.
     pub plugin_root: std::path::PathBuf,
     /// Memory store for persisting skill blocks and other plugin data.
+    #[cfg(feature = "memory")]
     pub memory_store: Option<Arc<dyn crate::traits::MemoryStore>>,
     /// Default scope for memory operations.
     pub scope: Option<crate::types::memory_types::Scope>,

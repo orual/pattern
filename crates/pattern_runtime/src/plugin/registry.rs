@@ -31,8 +31,9 @@ pub struct LoadedPlugin {
     pub user_config: serde_json::Value,
     /// Capability overrides from the registry.
     pub capability_overrides: Option<CapabilitySet>,
-    /// The plugin's runtime-facing extension trait object.
-    pub extension: Option<std::sync::Arc<dyn pattern_core::traits::plugin::PluginExtension>>,
+    /// The plugin's transport-agnostic connection. In-process variants
+    /// wrap a `PluginExtension`; out-of-process (Task 5) use IRPC/QUIC.
+    pub connection: Option<std::sync::Arc<dyn crate::plugin::transport::PluginConnection>>,
     /// Plugin → runtime callback host. None for CC plugins (no callbacks).
     pub host: Option<std::sync::Arc<dyn pattern_core::traits::plugin::PluginHost>>,
 }
@@ -48,10 +49,73 @@ pub struct PluginInstallation {
     pub source: Option<String>,
     #[knus(child, unwrap(argument), default)]
     pub installed_at: Option<String>,
+    /// Localhost-case: iroh public key in base32 (`PublicKey::to_string()` shape).
+    /// Daemon allow-lists the plugin by this pubkey at startup.
+    #[knus(child, unwrap(argument), default)]
+    pub pubkey: Option<String>,
+    /// Atproto-case (phase 7): AT-URI pointing at an atproto record that publishes the pubkey.
+    /// Resolved at daemon startup via DID-doc lookup. V1 errors at allow-list build.
+    #[knus(child, unwrap(argument), default)]
+    pub pubkey_uri: Option<String>,
+    /// Atproto-case (phase 7): CID pinning the specific version of the pubkey record.
+    /// Required alongside `pubkey_uri`.
+    #[knus(child, unwrap(argument), default)]
+    pub pubkey_cid: Option<String>,
     #[knus(child)]
     pub user_config: Option<UserConfigBlock>,
     #[knus(child)]
     pub capability_override: Option<CapabilitiesBlock>,
+}
+
+impl PluginInstallation {
+    /// Resolve the plugin's registered key, if any.
+    ///
+    /// Returns:
+    /// - `Ok(None)` if no auth fields are set (legacy entries, will be rejected at connection time)
+    /// - `Ok(Some(PluginKey::Direct(_)))` if `pubkey` parses as a valid iroh pubkey
+    /// - `Ok(Some(PluginKey::Atproto { .. }))` if `pubkey_uri` + `pubkey_cid` both set
+    /// - `Err` if a field is malformed (e.g. invalid pubkey encoding, uri without cid)
+    pub fn plugin_key(
+        &self,
+    ) -> Result<Option<pattern_core::plugin::auth::PluginKey>, PluginKeyParseError> {
+        use pattern_core::plugin::auth::PluginKey;
+        match (&self.pubkey, &self.pubkey_uri, &self.pubkey_cid) {
+            (Some(s), None, None) => {
+                let pk = s.parse::<iroh::PublicKey>().map_err(|e| {
+                    PluginKeyParseError::InvalidPubkey {
+                        plugin_id: self.id.clone().into(),
+                        message: e.to_string().into(),
+                    }
+                })?;
+                Ok(Some(PluginKey::Direct(pk)))
+            }
+            (None, Some(uri), Some(cid)) => Ok(Some(PluginKey::Atproto {
+                uri: uri.clone().into(),
+                cid: cid.clone().into(),
+            })),
+            (None, None, None) => Ok(None),
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                Err(PluginKeyParseError::ConflictingAuth {
+                    plugin_id: self.id.clone().into(),
+                })
+            }
+            (None, Some(_), None) | (None, None, Some(_)) => {
+                Err(PluginKeyParseError::AtprotoIncomplete {
+                    plugin_id: self.id.clone().into(),
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PluginKeyParseError {
+    #[error("plugin {plugin_id}: invalid pubkey encoding: {message}")]
+    InvalidPubkey { plugin_id: smol_str::SmolStr, message: smol_str::SmolStr },
+    #[error("plugin {plugin_id}: conflicting auth fields (both `pubkey` and atproto form set)")]
+    ConflictingAuth { plugin_id: smol_str::SmolStr },
+    #[error("plugin {plugin_id}: atproto auth requires both `pubkey-uri` and `pubkey-cid`")]
+    AtprotoIncomplete { plugin_id: smol_str::SmolStr },
 }
 
 /// User-configurable values from the registry KDL.
@@ -197,7 +261,7 @@ impl PluginRegistry {
         if global_root.is_dir() {
             for entry in scan_plugin_dirs(&global_root)? {
                 if let Ok(manifest) = load_manifest_from_dir(&entry) {
-                    let ext = build_extension(&manifest, &entry);
+                    let conn = build_connection(&manifest, &entry);
                     let lp = LoadedPlugin {
                         id: manifest.name.clone(),
                         scope: PluginScope::Ambient,
@@ -205,7 +269,7 @@ impl PluginRegistry {
                         manifest,
                         user_config: serde_json::Value::Null,
                         capability_overrides: None,
-                        extension: ext,
+                        connection: conn,
                         host: None,
                     };
                     combined.insert(lp.id.clone(), lp);
@@ -333,7 +397,7 @@ impl PluginRegistry {
             manifest: manifest.clone(),
             user_config: serde_json::Value::Null,
             capability_overrides: None,
-            extension: build_extension(&manifest, &dest),
+            connection: build_connection(&manifest, &dest),
             host: None,
         };
 
@@ -446,19 +510,24 @@ impl PluginRegistry {
     }
 }
 
-/// Build the appropriate PluginExtension based on manifest source format.
-fn build_extension(
+/// Build the appropriate PluginConnection based on manifest source format.
+/// In-process variants wrap a PluginExtension via InProcessPluginConnection.
+/// Out-of-process native plugins get OutOfProcessPluginConnection (Task 5).
+fn build_connection(
     manifest: &pattern_core::plugin::manifest::PluginManifest,
     source_path: &std::path::Path,
-) -> Option<std::sync::Arc<dyn pattern_core::traits::plugin::PluginExtension>> {
+) -> Option<std::sync::Arc<dyn crate::plugin::transport::PluginConnection>> {
     if manifest.cc.is_some() {
-        Some(super::cc_adapter::CcPluginAdapter::wrap(
+        let ext = super::cc_adapter::CcPluginAdapter::wrap(
             manifest.name.clone(),
             source_path.to_path_buf(),
             manifest.clone(),
+        );
+        Some(std::sync::Arc::new(
+            crate::plugin::transport::InProcessPluginConnection::new(ext, manifest.name.clone()),
         ))
     } else {
-        // Native IRPC plugins get their extension in Phase 6.
+        // Native IRPC plugins get their connection in Phase 6 Task 5.
         None
     }
 }
@@ -547,7 +616,7 @@ fn build_loaded_from_installation(
         })
         .unwrap_or(serde_json::Value::Null);
 
-    let ext = build_extension(&manifest, source_path);
+    let conn = build_connection(&manifest, source_path);
     LoadedPlugin {
         id: manifest.name.clone(),
         scope,
@@ -555,7 +624,7 @@ fn build_loaded_from_installation(
         manifest,
         user_config,
         capability_overrides: None,
-        extension: ext,
+        connection: conn,
         host: None,
     }
 }
@@ -586,4 +655,83 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), RegistryError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod plugin_key_tests {
+    use super::*;
+    use pattern_core::plugin::auth::PluginKey;
+
+    fn inst(id: &str) -> PluginInstallation {
+        PluginInstallation {
+            id: id.into(),
+            source: None,
+            installed_at: None,
+            pubkey: None,
+            pubkey_uri: None,
+            pubkey_cid: None,
+            user_config: None,
+            capability_override: None,
+        }
+    }
+
+    #[test]
+    fn no_auth_fields_returns_none() {
+        assert!(inst("x").plugin_key().unwrap().is_none());
+    }
+
+    #[test]
+    fn valid_direct_pubkey_parses() {
+        let pk = iroh::SecretKey::generate().public();
+        let mut i = inst("x");
+        i.pubkey = Some(pk.to_string());
+        match i.plugin_key().unwrap() {
+            Some(PluginKey::Direct(parsed)) => assert_eq!(parsed, pk),
+            other => panic!("expected Direct, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_pubkey_errors() {
+        let mut i = inst("x");
+        i.pubkey = Some("not-a-real-pubkey".into());
+        assert!(matches!(
+            i.plugin_key(),
+            Err(PluginKeyParseError::InvalidPubkey { .. })
+        ));
+    }
+
+    #[test]
+    fn atproto_pair_parses() {
+        let mut i = inst("remote");
+        i.pubkey_uri = Some("at://did:plc:abc/app.pattern.plugin/foo".into());
+        i.pubkey_cid = Some("bafyabc".into());
+        assert!(matches!(
+            i.plugin_key().unwrap(),
+            Some(PluginKey::Atproto { .. })
+        ));
+    }
+
+    #[test]
+    fn atproto_uri_without_cid_errors() {
+        let mut i = inst("x");
+        i.pubkey_uri = Some("at://did:plc:abc/app.pattern.plugin/foo".into());
+        assert!(matches!(
+            i.plugin_key(),
+            Err(PluginKeyParseError::AtprotoIncomplete { .. })
+        ));
+    }
+
+    #[test]
+    fn direct_and_atproto_conflict_errors() {
+        let pk = iroh::SecretKey::generate().public();
+        let mut i = inst("x");
+        i.pubkey = Some(pk.to_string());
+        i.pubkey_uri = Some("at://did:plc:abc/app.pattern.plugin/foo".into());
+        i.pubkey_cid = Some("bafyabc".into());
+        assert!(matches!(
+            i.plugin_key(),
+            Err(PluginKeyParseError::ConflictingAuth { .. })
+        ));
+    }
 }

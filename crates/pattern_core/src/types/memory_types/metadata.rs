@@ -3,13 +3,13 @@
 //! These types appear in [`crate::traits::MemoryStore`] method return types
 //! and are shared across crate boundaries.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde_json::Value as JsonValue;
 
 use super::{BlockSchema, MemoryBlockType};
 
 /// Block metadata (without loading the full document).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlockMetadata {
     pub id: String,
     pub agent_id: String,
@@ -20,14 +20,14 @@ pub struct BlockMetadata {
     pub char_limit: usize,
     pub permission: super::MemoryPermission,
     pub pinned: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl BlockMetadata {
     /// Create standalone metadata for testing or documents not backed by DB.
     pub fn standalone(schema: BlockSchema) -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             id: String::new(),
             agent_id: String::new(),
@@ -45,13 +45,13 @@ impl BlockMetadata {
 }
 
 /// Archival entry (for search results).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ArchivalEntry {
     pub id: String,
     pub agent_id: String,
     pub content: String,
     pub metadata: Option<JsonValue>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 /// Information about a block shared with an agent.

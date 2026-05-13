@@ -28,6 +28,7 @@ mcp-wrapper.sh
 **/**.output
 pattern-convert.json
 /docs/reading/*
+**/target/
 
 # Deciduous database (local)
 .deciduous/

@@ -70,7 +70,7 @@ fn install_cc_plugin_creates_extension() {
         .get("cc-test-plugin")
         .expect("should find installed plugin");
     assert!(
-        lp.extension.is_some(),
+        lp.connection.is_some(),
         "CC plugin should have extension trait object"
     );
     assert!(
@@ -94,7 +94,7 @@ fn install_native_plugin_has_no_extension_yet() {
 
     let lp = reg.get("test-cache-plugin").expect("should find plugin");
     assert!(
-        lp.extension.is_none(),
+        lp.connection.is_none(),
         "Native plugin should have no extension yet (Phase 6)"
     );
 }

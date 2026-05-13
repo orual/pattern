@@ -292,8 +292,10 @@ impl Port for HttpPort {
     /// declaration (`module Pattern.Http where` → `Pattern/Http.hs`)
     /// and adds the temp dir to the include path. Plugins that ship
     /// non-SDK port libraries follow the same delivery path.
-    fn library(&self) -> Option<&'static str> {
-        Some(include_str!("../../haskell/ports/Http.hs"))
+    fn library(&self) -> Option<smol_str::SmolStr> {
+        Some(smol_str::SmolStr::new_static(include_str!(
+            "../../haskell/ports/Http.hs"
+        )))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

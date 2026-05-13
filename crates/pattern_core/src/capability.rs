@@ -304,7 +304,7 @@ pub struct CapabilitySet {
     ///
     /// If empty, defaults to ALL classes (preserves backwards-compatible
     /// behaviour for existing capability sets that pre-date this axis).
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    #[serde(default)]
     pub allowed_classes: BTreeSet<EffectClass>,
 }
 

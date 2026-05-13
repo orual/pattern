@@ -89,24 +89,31 @@ impl DaemonClient {
             return Err(DaemonClientError::DaemonNotRunning);
         }
 
-        let cert = state
-            .load_cert()
-            .map_err(|e| DaemonClientError::ConnectionFailed {
+        // Parse the daemon's iroh public key (= EndpointId, base32-z encoded).
+        let public_key: iroh::PublicKey = state.node_id.parse().map_err(|e| {
+            DaemonClientError::ConnectionFailed {
                 addr: state.addr.to_string(),
-                source: e,
-            })?;
-
-        let endpoint = irpc::util::make_client_endpoint(
-            std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
-            &[&cert],
-        )
-        .map_err(|e| DaemonClientError::ConnectionFailed {
-            addr: state.addr.to_string(),
-            source: std::io::Error::other(e.to_string()),
+                source: std::io::Error::other(format!("invalid node_id: {e}")),
+            }
         })?;
 
+        // TUI uses ephemeral identity — daemon is allow-listed by public_key.
+        let endpoint = iroh::Endpoint::bind(iroh::endpoint::presets::Minimal)
+            .await
+            .map_err(|e| DaemonClientError::ConnectionFailed {
+                addr: state.addr.to_string(),
+                source: std::io::Error::other(format!("iroh bind: {e}")),
+            })?;
+
+        let daemon_addr = iroh::EndpointAddr::new(public_key)
+            .with_addrs([iroh::TransportAddr::Ip(state.addr)]);
+
         Ok(Self {
-            inner: Client::noq(endpoint, state.addr),
+            inner: irpc_iroh::client::<crate::protocol::PatternProtocol>(
+                endpoint,
+                daemon_addr,
+                b"pattern/1",
+            ),
         })
     }
 

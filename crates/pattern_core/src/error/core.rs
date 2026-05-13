@@ -254,6 +254,7 @@ pub enum CoreError {
     /// # Example
     ///
     /// Cannot construct genai::Error in doctest; see [`ProviderError::RequestFailed`].
+    #[cfg(feature = "provider")]
     #[error("model provider error")]
     #[diagnostic(
         code(pattern_core::model_provider_error),
@@ -698,6 +699,7 @@ impl CoreError {
     }
 
     /// Construct a [`CoreError::ModelProviderError`] from a `genai::Error`.
+    #[cfg(feature = "provider")]
     pub fn model_error(
         provider: impl Into<String>,
         model: impl Into<String>,
@@ -713,6 +715,7 @@ impl CoreError {
     /// Prefer this over `model_error` to preserve HTTP status/headers when
     /// available. Falls back to `ModelProviderError` if the error does not
     /// carry HTTP details.
+    #[cfg(feature = "provider")]
     pub fn from_genai_error(
         provider: impl Into<String>,
         model: impl Into<String>,

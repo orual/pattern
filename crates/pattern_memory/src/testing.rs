@@ -73,7 +73,7 @@ impl ScopeTestStore {
                 agent_id: scope.id().to_string(),
                 content: content.to_string(),
                 metadata: None,
-                created_at: chrono::Utc::now(),
+                created_at: jiff::Timestamp::now(),
             },
         ));
     }
@@ -199,7 +199,7 @@ impl MemoryStore for ScopeTestStore {
                 agent_id: scope.id().to_string(),
                 content: content.to_string(),
                 metadata,
-                created_at: chrono::Utc::now(),
+                created_at: jiff::Timestamp::now(),
             },
         ));
         Ok(id)

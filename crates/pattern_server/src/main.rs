@@ -153,30 +153,69 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
         DaemonServer::spawn_with_config(config)
     };
 
-    // Create QUIC endpoint with a self-signed certificate.
+    // Build iroh endpoint with a stable secret key. Load from prior state's
+    // persisted bytes if exists (so node_id stays stable across restarts), else
+    // generate fresh. Phase 6 Task 5 — replaces noq-cert-pinning with iroh
+    // node-identity-pinning.
     let bind_addr: SocketAddr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into();
-    let (endpoint, cert_der) = irpc::util::make_server_endpoint(bind_addr)
-        .map_err(|e| miette::miette!("failed to create QUIC endpoint: {e}"))?;
+
+    let secret_key = match DaemonState::load().ok().and_then(|s| s.load_secret_bytes().ok()) {
+        Some(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            iroh::SecretKey::from_bytes(&arr)
+        }
+        _ => iroh::SecretKey::generate(),
+    };
+    let node_id = secret_key.public();
+
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .secret_key(secret_key.clone())
+        .bind_addr(bind_addr)
+        .map_err(|e| miette::miette!("failed to set bind addr: {e}"))?
+        .bind()
+        .await
+        .map_err(|e| miette::miette!("failed to bind iroh endpoint: {e}"))?;
 
     let local_addr = endpoint
-        .local_addr()
-        .map_err(|e| miette::miette!("failed to get local addr: {e}"))?;
+        .bound_sockets()
+        .into_iter()
+        .next()
+        .ok_or_else(|| miette::miette!("iroh endpoint has no bound socket"))?;
 
-    // Set up the QUIC listener that forwards remote messages into the actor.
     let local = handle
         .client
         .as_local()
         .expect("freshly-spawned server client must be local");
     let handler = PatternProtocol::remote_handler(local);
-    let _listener = tokio::spawn(irpc::rpc::listen(endpoint, handler));
 
-    // Write state so that `stop` and `status` can find us.
+    // Plugin-host accept (Phase 6 Task 5b). v1 stub handler — returns
+    // Unimplemented for all 17 PluginHostProtocol variants until 5c+ wires
+    // real dispatch into the runtime plugin registry.
+    use pattern_core::plugin::protocol::{PluginHostProtocol, PLUGIN_HOST_ALPN};
+    let host_client = pattern_runtime::plugin::host_handler::spawn();
+    let host_local = host_client
+        .as_local()
+        .expect("freshly-spawned host client must be local");
+    let host_handler = PluginHostProtocol::remote_handler(host_local);
+
+    // Multi-ALPN router. pattern/1 carries the TUI/client protocol;
+    // pattern-plugin-host/1 carries Plugin→Runtime callbacks + memory ops.
+    // Future: pattern-plugin-guest/1 (Runtime→Plugin) lives client-side in
+    // OutOfProcessPluginConnection (task 5c); pattern-plugin-memory-sync/1
+    // (loro delta sync) gets its own accept when MemorySyncProtocol handler ships.
+    let _router = iroh::protocol::Router::builder(endpoint)
+        .accept(b"pattern/1", irpc_iroh::IrohProtocol::new(handler))
+        .accept(PLUGIN_HOST_ALPN, irpc_iroh::IrohProtocol::new(host_handler))
+        .spawn();
+
     let state = DaemonState {
         pid: std::process::id(),
         addr: local_addr,
+        node_id: node_id.to_string(),
     };
     state
-        .save(&cert_der)
+        .save(&secret_key.to_bytes())
         .map_err(|e| miette::miette!("failed to write state: {e}"))?;
 
     info!("daemon listening on {}", local_addr);

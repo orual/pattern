@@ -1,0 +1,15 @@
+[workspace]
+
+[package]
+name = "minimal_plugin"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+pattern-plugin-sdk = { path = "../../.." }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "signal"] }
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1"

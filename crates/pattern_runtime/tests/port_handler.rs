@@ -396,7 +396,7 @@ async fn port_library_appended_to_preamble_when_capable() {
     assert_eq!(metadatas.len(), 1);
 
     // Build the port_libraries list the way code_tool.rs would:
-    let libraries: Vec<(PortId, &str)> = metadatas
+    let libraries: Vec<(PortId, smol_str::SmolStr)> = metadatas
         .iter()
         .filter_map(|m| {
             let port = registry_ref.get(&m.id)?;
@@ -563,7 +563,7 @@ async fn port_library_excluded_when_not_capable() {
     let registry_ref: &dyn PortRegistry = registry.as_ref();
     let metadatas = registry_ref.list();
 
-    let libraries: Vec<(PortId, &str)> = metadatas
+    let libraries: Vec<(PortId, smol_str::SmolStr)> = metadatas
         .iter()
         .filter(|m| {
             // Full power (None caps) → all ports included.

@@ -8,6 +8,7 @@
 pub mod extension;
 pub mod host;
 pub mod types;
+pub mod wire;
 
 pub use extension::PluginExtension;
 pub use host::PluginHost;
