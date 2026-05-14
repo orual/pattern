@@ -76,7 +76,28 @@ impl OutOfProcessPluginConnection {
 
         let _ = PluginState::clear(&plugin_id);
 
+        // Capture plugin stderr to a per-plugin log file so plugin tracing
+        // output isn't lost to the void. Daemon uses tracing-appender direct-to-
+        // file and its own stderr typically goes nowhere when detached, so
+        // inheriting daemon stdio would drop plugin output.
+        let plugin_log_path = plugin_root.join("plugin.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&plugin_log_path)
+            .map_err(|source| OopSpawnError::Spawn {
+                plugin_id: plugin_id.clone(),
+                source,
+            })?;
+        let stderr_file = log_file.try_clone().map_err(|source| OopSpawnError::Spawn {
+            plugin_id: plugin_id.clone(),
+            source,
+        })?;
+
         let child = Command::new(&binary_path)
+            .current_dir(&plugin_root)
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(stderr_file))
             .kill_on_drop(true)
             .spawn()
             .map_err(|source| OopSpawnError::Spawn {
@@ -166,6 +187,7 @@ impl OutOfProcessPluginConnection {
         pattern_core::traits::plugin::wire::WirePluginContext {
             plugin_id: ctx.plugin_id.clone(),
             plugin_root: self.plugin_root.clone(),
+            mount_path: ctx.mount_path.clone(),
             user_config: pattern_core::traits::plugin::wire::WireJson::from_value(&self.user_config)
                 .unwrap_or_else(|_| pattern_core::traits::plugin::wire::WireJson("null".to_string())),
             effective_capabilities: self.effective_capabilities.clone(),
@@ -227,13 +249,6 @@ impl PluginConnection for OutOfProcessPluginConnection {
                     .map_err(|e| PluginError::HostCallback(format!("oop on_event(notify) rpc: {e}")))?;
                 Ok(None)
             }
-            _ => {
-                // Non-exhaustive enum fallback — treat unknown as notification (safer than panicking).
-                self.client.rpc(pattern_core::plugin::protocol::OnHookEventRequest(event))
-                    .await
-                    .map_err(|e| PluginError::HostCallback(format!("oop on_event(unknown semantics): {e}")))?;
-                return Ok(None);
-            }
             HookSemantics::Blocking => {
                 let wire_resp = self.client.rpc(pattern_core::plugin::protocol::OnHookEventBlockingRequest(event))
                     .await
@@ -254,6 +269,14 @@ impl PluginConnection for OutOfProcessPluginConnection {
                     )),
                 };
                 Ok(Some(resp))
+            }
+            // HookSemantics is non_exhaustive — future variants default to
+            // fire-and-forget notification semantics rather than panicking.
+            _ => {
+                self.client.rpc(pattern_core::plugin::protocol::OnHookEventRequest(event))
+                    .await
+                    .map_err(|e| PluginError::HostCallback(format!("oop on_event(unknown semantics): {e}")))?;
+                Ok(None)
             }
         }
     }
@@ -314,7 +337,7 @@ impl PluginConnection for OutOfProcessPluginConnection {
                 }
             })?,
         };
-        let mut rx = self.client.server_streaming(req, 64).await.map_err(|e| {
+        let rx = self.client.server_streaming(req, 64).await.map_err(|e| {
             pattern_core::types::port::PortError::SubscribeFailed(
                 port_id.clone(),
                 format!("oop port_subscribe open: {e}"),

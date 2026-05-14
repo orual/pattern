@@ -412,6 +412,11 @@ pub struct SessionContext {
     /// Daemon-shared plugin route table (pubkey → session_id). Populated at
     /// session-open from the registry; entries removed at session drop.
     plugin_routes: Option<Arc<pattern_core::plugin::auth::PluginRouteTable>>,
+    /// Daemon iroh endpoint used to dial spawned plugin processes for the
+    /// guest-side `pattern-plugin-guest/1` ALPN. Required to construct
+    /// `OutOfProcessPluginConnection` for native plugins at session-open.
+    /// `None` leaves native plugin spawn disabled.
+    daemon_endpoint: Option<iroh::Endpoint>,
     /// Bridge for sync handler → async hook dispatch.
     hook_bridge: crate::hooks::HookBridge,
     /// Session-scoped UUID minted at open. Used by handlers that key
@@ -809,6 +814,7 @@ impl SessionContext {
         Self {
             plugin_registry: None,
             plugin_routes: None,
+            daemon_endpoint: None,
             agent_id,
             default_scope,
             // Thread the caller's declared model through so the composer's
@@ -1030,6 +1036,17 @@ impl SessionContext {
         routes: Arc<pattern_core::plugin::auth::PluginRouteTable>,
     ) -> Self {
         self.plugin_routes = Some(routes);
+        self
+    }
+
+    /// Daemon iroh endpoint accessor (Phase 6 Task 5). Used at session-open
+    /// to construct `OutOfProcessPluginConnection` for native plugins.
+    pub fn daemon_endpoint(&self) -> Option<&iroh::Endpoint> {
+        self.daemon_endpoint.as_ref()
+    }
+
+    pub fn with_daemon_endpoint(mut self, endpoint: iroh::Endpoint) -> Self {
+        self.daemon_endpoint = Some(endpoint);
         self
     }
 
@@ -1315,6 +1332,7 @@ impl SessionContext {
             hook_bridge: self.hook_bridge.clone(),
             plugin_registry: self.plugin_registry.clone(),
             plugin_routes: self.plugin_routes.clone(),
+            daemon_endpoint: self.daemon_endpoint.clone(),
             // Each ephemeral child gets a fresh session_id (so its
             // PortHandler subscription channels don't collide with the
             // parent's). Inherit `shell_default_timeout` — children
@@ -1960,6 +1978,9 @@ pub struct SessionRegistries {
     /// SessionRoutingProtocolHandler can route incoming OOP plugin connections
     /// to this session. None leaves OOP plugins unreachable for this session.
     pub plugin_routes: Option<Arc<pattern_core::plugin::auth::PluginRouteTable>>,
+    /// Optional daemon iroh endpoint. Required to spawn native (OOP) plugins
+    /// at session-open. `None` disables native plugin spawn (CC plugins work).
+    pub daemon_endpoint: Option<iroh::Endpoint>,
     /// Optional embedding-queue sender. Daemon callers pull this from
     /// `cache.reembed_tx().cloned()` and pass it here so message persistence
     /// in agent_loop dispatches per-message ReembedRequests for hybrid
@@ -2449,6 +2470,13 @@ impl TidepoolSession {
                 ctx
             };
 
+            // Wire daemon iroh endpoint for OOP plugin spawn at session-open.
+            let ctx = if let Some(endpoint) = regs.daemon_endpoint {
+                ctx.with_daemon_endpoint(endpoint)
+            } else {
+                ctx
+            };
+
             if let Some(policy) = regs.file_policy {
                 let fm_caps = Arc::new(
                     capabilities
@@ -2644,7 +2672,69 @@ impl TidepoolSession {
         // wires its hook subscriptions to the session's HookBus.
         // Uses block_in_place because we're inside a tokio runtime.
         if let Some(plugin_reg) = session.ctx.plugin_registry() {
-            let plugins = plugin_reg.list();
+            let mut plugins = plugin_reg.list();
+
+            // OOP-spawn pass: for each native plugin (has pubkey, no connection yet),
+            // spawn `OutOfProcessPluginConnection` using the daemon endpoint. This is
+            // the integration wire that Phase 6 Task 5 left stubbed in `build_connection`:
+            // the connection couldn't be built at registry-load time because the daemon
+            // endpoint isn't available then; it has to happen here at session-open.
+            if let Some(endpoint) = session.ctx.daemon_endpoint().cloned() {
+                for lp in plugins.iter_mut() {
+                    if lp.connection.is_some() { continue; }
+                    let pubkey = match &lp.plugin_key {
+                        Some(pattern_core::plugin::auth::PluginKey::Direct(pk)) => pk.clone(),
+                        _ => continue,
+                    };
+                    // Binary lives at <plugin_root>/bin/<plugin_id>[.exe] per install spec.
+                    let bin_name = if cfg!(windows) {
+                        format!("{}.exe", lp.id)
+                    } else {
+                        lp.id.to_string()
+                    };
+                    let binary_path = lp.source_path.join("bin").join(&bin_name);
+                    if !binary_path.exists() {
+                        tracing::warn!(
+                            plugin = %lp.id,
+                            path = %binary_path.display(),
+                            "native plugin binary not found; skipping OOP spawn",
+                        );
+                        continue;
+                    }
+                    // v0.1: pass empty user_config + all-capabilities. Per-install
+                    // overlay + manifest-declared-effects narrowing land later.
+                    let user_config = serde_json::Value::Null;
+                    let effective_caps = pattern_core::CapabilitySet::all();
+                    match crate::plugin::transport::OutOfProcessPluginConnection::spawn(
+                        lp.id.clone(),
+                        binary_path,
+                        pubkey,
+                        endpoint.clone(),
+                        lp.source_path.clone(),
+                        user_config,
+                        effective_caps,
+                    ).await {
+                        Ok(conn) => {
+                            tracing::info!(plugin = %lp.id, "OOP plugin spawned");
+                            let conn_arc: Arc<dyn crate::plugin::transport::PluginConnection> =
+                                Arc::new(conn);
+                            // Mutate local copy so the rest of THIS loop sees the
+                            // connection (declare_ports etc). Also write back to
+                            // the registry so the Arc outlives session-open —
+                            // WireBackedPort holds only a Weak to this Arc.
+                            lp.connection = Some(conn_arc.clone());
+                            plugin_reg.set_connection(&lp.id, conn_arc);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                plugin = %lp.id,
+                                error = %e,
+                                "OOP plugin spawn failed",
+                            );
+                        }
+                    }
+                }
+            }
 
             // Populate the daemon-shared plugin route table with this session's
             // OOP-routable plugins. Each (pubkey, plugin_id) gets keyed by this
@@ -2699,6 +2789,7 @@ impl TidepoolSession {
                         plugin_id: lp.id.clone(),
                         hook_bus: hook_bus.clone(),
                         plugin_root: lp.source_path.clone(),
+                        mount_path: mount_path.clone(),
                         memory_store: Some(session.ctx.memory_store()),
                         scope: Some(session.ctx.default_scope().clone()),
                     };

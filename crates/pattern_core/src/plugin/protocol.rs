@@ -84,6 +84,9 @@ pub enum PluginGuestProtocol {
     /// closes or the client drops its receiver.
     #[rpc(tx = mpsc::Sender<WirePortStreamItem>)]
     PortSubscribe(WirePortSubscribeRequest),
+    /// Agent unsubscribes from a port. Symmetric pair with PortSubscribe.
+    #[rpc(tx = oneshot::Sender<Result<(), WirePortError>>)]
+    PortUnsubscribe(WirePortUnsubscribeRequest),
 
 }
 
@@ -257,6 +260,7 @@ mod tests {
         let ctx = WirePluginContext {
             plugin_id: "discord".into(),
             plugin_root: std::path::PathBuf::from("/plugins/discord"),
+            mount_path: None,
             user_config: WireJson("{}".into()),
             effective_capabilities: CapabilitySet::default(),
         };

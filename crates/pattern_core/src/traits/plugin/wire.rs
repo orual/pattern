@@ -108,6 +108,10 @@ use crate::types::port::{PortCapabilities, PortId, PortMetadata};
 pub struct WirePluginContext {
     pub plugin_id: SmolStr,
     pub plugin_root: std::path::PathBuf,
+    /// Mount path this plugin instance is scoped to. See
+    /// [`crate::traits::plugin::PluginContext::mount_path`].
+    #[serde(default)]
+    pub mount_path: Option<std::path::PathBuf>,
     pub user_config: WireJson,
     pub effective_capabilities: CapabilitySet,
 }
@@ -137,6 +141,13 @@ pub struct WirePortCallRequest {
 pub struct WirePortSubscribeRequest {
     pub port_id: PortId,
     pub config: WireJson,
+}
+
+/// Agent → plugin port unsubscribe (via Port.unsubscribe effect → IRPC).
+/// Symmetric pair with [`WirePortSubscribeRequest`]; no config payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WirePortUnsubscribeRequest {
+    pub port_id: PortId,
 }
 
 /// Plugin → agent port event. Streamed through the subscribe response stream.

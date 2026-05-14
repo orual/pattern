@@ -94,6 +94,11 @@ pub struct SessionConfig {
     /// dispatch incoming plugin connections to the right session.
     /// `None` leaves OOP plugin routing inactive (CC plugins still work).
     pub plugin_routes: Option<std::sync::Arc<pattern_core::plugin::auth::PluginRouteTable>>,
+    /// Daemon iroh endpoint used to dial spawned plugin processes for the
+    /// guest-side `pattern-plugin-guest/1` ALPN. Required to construct
+    /// `OutOfProcessPluginConnection` for native plugins at session-open.
+    /// `None` leaves native plugin spawn disabled. CC plugins still work.
+    pub daemon_endpoint: Option<iroh::Endpoint>,
 }
 
 /// Cached project mount state.
@@ -2820,6 +2825,7 @@ async fn open_session_with_persona(
         sibling_resolver: Some(sibling_resolver),
         plugin_registry: plugin_registry_for_session,
         plugin_routes: config.plugin_routes.clone(),
+        daemon_endpoint: config.daemon_endpoint.clone(),
         // Embedding-queue sender — pulled from the project mount's cache.
         // Enables vector-index coverage of message persistence so future-us
         // can semantically search past exchanges, not just keyword-match.
@@ -3932,6 +3938,7 @@ context {{
                 provider: Arc::new(pattern_runtime::NopProviderClient),
                 port_registry,
                 plugin_routes: None,
+                daemon_endpoint: None,
             }
         };
 
@@ -3988,6 +3995,7 @@ context {{
                 provider: Arc::new(pattern_runtime::NopProviderClient),
                 port_registry,
                 plugin_routes: None,
+                daemon_endpoint: None,
             }
         };
         let handle2 =

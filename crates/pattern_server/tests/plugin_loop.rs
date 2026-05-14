@@ -211,6 +211,7 @@ fn make_real_plugin_context() -> pattern_core::traits::plugin::PluginContext {
         plugin_id: "minimal-plugin-fixture".into(),
         hook_bus: Arc::new(pattern_core::hooks::HookBus::new()),
         plugin_root: std::env::temp_dir(),
+        mount_path: None,
         memory_store: Some(Arc::new(InMemoryMemoryStore::new())),
         scope: Some(pattern_core::types::memory_types::Scope::global("test-persona")),
     }

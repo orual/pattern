@@ -10,10 +10,6 @@
 
 use std::path::PathBuf;
 
-use irpc::{
-    channel::{mpsc, oneshot},
-    rpc_requests,
-};
 use crate::types::{
     memory_types::SkillTrustTier,
     message::{RenderedBlock, SnapshotKind},
@@ -30,6 +26,10 @@ use crate::{
 use crate::{
     traits::turn_sink::{DisplayKind, TurnEvent},
     types::message::MessageAttachment,
+};
+use irpc::{
+    channel::{mpsc, oneshot},
+    rpc_requests,
 };
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -589,7 +589,6 @@ impl WireTurnEvent {
             TurnEvent::Stop(reason) => Some(Self::Stop(*reason)),
             TurnEvent::ComposedRequest(_) => None,
             TurnEvent::Attachments(a) => Some(Self::Attachments(attachments_to_wire(a))),
-            _ => None, // Forward-compat for future variants.
         }
     }
 }
@@ -666,7 +665,6 @@ pub fn attachments_to_wire(attachments: &[MessageAttachment]) -> Vec<WireMessage
                 payload: payload.to_string(),
                 at: at.clone(),
             }),
-            _ => None,
         })
         .collect::<Vec<_>>()
 }
@@ -1217,8 +1215,8 @@ mod tests {
     #[test]
     fn block_write_notifications_roundtrip() {
         use crate::types::block::{BlockWrite, BlockWriteKind};
-        use crate::types::origin::{Author, SystemReason};
         use crate::types::memory_types::MemoryBlockType;
+        use crate::types::origin::{Author, SystemReason};
 
         let attachment = WireMessageAttachment::BlockWriteNotifications {
             writes: vec![BlockWrite {

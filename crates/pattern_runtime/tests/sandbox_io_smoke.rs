@@ -445,6 +445,7 @@ async fn sandbox_io_smoke_end_to_end() {
             sibling_resolver: None,
             plugin_registry: None,
             plugin_routes: None,
+            daemon_endpoint: None,
             reembed_tx: None,
         }),
     )
@@ -871,6 +872,7 @@ async fn sandbox_io_smoke_end_to_end() {
             sibling_resolver: None, // no file policy needed — denial program doesn't touch files
             plugin_registry: None,
             plugin_routes: None,
+            daemon_endpoint: None,
             reembed_tx: None,
         }),
     )
@@ -972,6 +974,7 @@ async fn sandbox_io_smoke_end_to_end() {
             sibling_resolver: None,
             plugin_registry: None,
             plugin_routes: None,
+            daemon_endpoint: None,
             reembed_tx: None,
         }),
     )

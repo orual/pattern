@@ -145,6 +145,7 @@ async fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
                                         pattern_core::hooks::HookBus::new(),
                                     ),
                                     plugin_root: lp.source_path.clone(),
+                                    mount_path: None,
                                     memory_store: None,
                                     scope: None,
                                 };
@@ -181,6 +182,7 @@ async fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
                             plugin_id: lp.id.clone(),
                             hook_bus: std::sync::Arc::new(pattern_core::hooks::HookBus::new()),
                             plugin_root: lp.source_path.clone(),
+                            mount_path: None,
                             memory_store: None,
                             scope: None,
                         };
@@ -218,6 +220,7 @@ async fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
                                                     pattern_core::hooks::HookBus::new(),
                                                 ),
                                                 plugin_root: lp.source_path.clone(),
+                                                mount_path: None,
                                                 memory_store: None,
                                                 scope: None,
                                             };

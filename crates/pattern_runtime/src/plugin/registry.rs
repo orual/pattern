@@ -222,6 +222,23 @@ impl PluginRegistry {
         self.inner.read().values().cloned().collect()
     }
 
+    /// Replace the connection for an already-loaded plugin. Used at
+    /// session-open by the OOP-spawn pass to install the lazily-constructed
+    /// `OutOfProcessPluginConnection` into the registry so the long-lived Arc
+    /// outlives session-open (WireBackedPort holds a Weak to this).
+    pub fn set_connection(
+        &self,
+        plugin_id: &str,
+        connection: std::sync::Arc<dyn crate::plugin::transport::PluginConnection>,
+    ) -> bool {
+        if let Some(lp) = self.inner.write().get_mut(plugin_id) {
+            lp.connection = Some(connection);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Pubkey-routable plugins in this registry: returns `(plugin_id, pubkey)` for
     /// each loaded plugin whose registry entry has a parsed `PluginKey::Direct(_)`.
     /// Atproto-keyed plugins (phase 7) are skipped — their resolution path isn't

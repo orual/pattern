@@ -570,6 +570,7 @@ async fn smoke_integrated_turn_loop(
             sibling_resolver: None,
             plugin_registry: None,
             plugin_routes: None,
+            daemon_endpoint: None,
             reembed_tx: None,
         }),
     )
@@ -603,6 +604,7 @@ async fn smoke_integrated_turn_loop(
             sibling_resolver: None,
             plugin_registry: None,
             plugin_routes: None,
+            daemon_endpoint: None,
             reembed_tx: None,
         }),
     )

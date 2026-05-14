@@ -109,6 +109,20 @@ pub trait Port: Send + Sync + std::fmt::Debug {
         config: serde_json::Value,
     ) -> Result<BoxStream<'static, PortEvent>, PortError>;
 
+    /// Disable a previously-installed subscription.
+    ///
+    /// Symmetric pair with [`subscribe`]. Ports that maintain server-side
+    /// state (active forwarders, registered listeners, etc) tear it down
+    /// here. Ports whose subscriptions are purely stream-lifetime can keep
+    /// the default no-op impl — dropping the `BoxStream` is sufficient for
+    /// those.
+    ///
+    /// The Haskell SDK exposes `Port.unsubscribe`; this trait method is the
+    /// runtime-side surface it dispatches into.
+    async fn unsubscribe(&self) -> Result<(), PortError> {
+        Ok(())
+    }
+
     /// One-shot call to a named method.
     ///
     /// `method` is a plain string; `payload` is a JSON value. Returns a JSON

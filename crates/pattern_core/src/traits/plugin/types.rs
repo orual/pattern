@@ -15,6 +15,12 @@ pub struct PluginContext {
     pub hook_bus: Arc<HookBus>,
     /// Root directory of the plugin on disk.
     pub plugin_root: std::path::PathBuf,
+    /// Mount path this plugin instance is scoped to. Plugins spawned by a
+    /// session-open at mount M get `mount_path = Some(M)`; ambient/global
+    /// fixtures get `None`. Plugins that dial back to the daemon's TUI channel
+    /// (e.g. for `DaemonClient::subscribe_all`) use this to identify their
+    /// mount-scoped event stream.
+    pub mount_path: Option<std::path::PathBuf>,
     /// Memory store for persisting skill blocks and other plugin data.
     pub memory_store: Option<Arc<dyn crate::traits::MemoryStore>>,
     /// Default scope for memory operations.
@@ -38,6 +44,7 @@ impl PluginContext {
             plugin_id,
             hook_bus,
             plugin_root,
+            mount_path: None,
             memory_store: None,
             scope: None,
         }

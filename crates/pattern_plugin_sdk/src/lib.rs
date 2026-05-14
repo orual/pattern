@@ -82,6 +82,9 @@ pub use registration::{register_plugin, PluginHandle, RegisterError};
 pub mod tui_channel {
     //! Daemon TUI client + wire types. Same surface the TUI uses.
     pub use pattern_core::wire::ui::*;
+    pub use pattern_core::types::ids::new_snowflake_id;
+    pub use pattern_core::types::origin::{Author, Human, MessageOrigin, Partner, Sphere};
+    pub use pattern_core::types::provider::ContentPart;
     pub use super::tui_client::{DaemonClient, DaemonClientError, Result};
 }
 #[cfg(feature = "tui-channel")]

@@ -14,7 +14,6 @@
 //! 7. Blocks until SIGTERM or Ctrl-C, then cleans up state.
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use tracing::info;
@@ -86,9 +85,37 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
     // registry. Also wired into the iroh Router's host-ALPN accept handler
     // (SessionRoutingProtocolHandler) so accept-time pubkey lookup hits the
     // same table.
-    let plugin_routes = Arc::new(
-        pattern_core::plugin::auth::PluginRouteTable::new(),
-    );
+    let plugin_routes = Arc::new(pattern_core::plugin::auth::PluginRouteTable::new());
+
+    // Bind iroh endpoint FIRST so SessionConfig can hold it for native-plugin
+    // OOP spawn at session-open. Phase 6 Task 5 — replaces noq-cert-pinning
+    // with iroh node-identity-pinning. Load secret_key from prior state if
+    // present (stable node_id across restarts), else generate fresh.
+    let bind_addr: SocketAddr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into();
+    let secret_key = match DaemonState::load()
+        .ok()
+        .and_then(|s| s.load_secret_bytes().ok())
+    {
+        Some(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            iroh::SecretKey::from_bytes(&arr)
+        }
+        _ => iroh::SecretKey::generate(),
+    };
+    let node_id = secret_key.public();
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
+        .secret_key(secret_key.clone())
+        .bind_addr(bind_addr)
+        .map_err(|e| miette::miette!("failed to set bind addr: {e}"))?
+        .bind()
+        .await
+        .map_err(|e| miette::miette!("failed to bind iroh endpoint: {e}"))?;
+    let local_addr = endpoint
+        .bound_sockets()
+        .into_iter()
+        .next()
+        .ok_or_else(|| miette::miette!("iroh endpoint has no bound socket"))?;
 
     // Spawn the server actor — echo mode or real session mode.
     // Projects are mounted on demand via InitSession from the TUI client.
@@ -157,41 +184,12 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
             provider,
             port_registry,
             plugin_routes: Some(Arc::clone(&plugin_routes)),
+            daemon_endpoint: Some(endpoint.clone()),
         };
 
         info!("starting daemon");
         DaemonServer::spawn_with_config(config)
     };
-
-    // Build iroh endpoint with a stable secret key. Load from prior state's
-    // persisted bytes if exists (so node_id stays stable across restarts), else
-    // generate fresh. Phase 6 Task 5 — replaces noq-cert-pinning with iroh
-    // node-identity-pinning.
-    let bind_addr: SocketAddr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into();
-
-    let secret_key = match DaemonState::load().ok().and_then(|s| s.load_secret_bytes().ok()) {
-        Some(bytes) if bytes.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            iroh::SecretKey::from_bytes(&arr)
-        }
-        _ => iroh::SecretKey::generate(),
-    };
-    let node_id = secret_key.public();
-
-    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-        .secret_key(secret_key.clone())
-        .bind_addr(bind_addr)
-        .map_err(|e| miette::miette!("failed to set bind addr: {e}"))?
-        .bind()
-        .await
-        .map_err(|e| miette::miette!("failed to bind iroh endpoint: {e}"))?;
-
-    let local_addr = endpoint
-        .bound_sockets()
-        .into_iter()
-        .next()
-        .ok_or_else(|| miette::miette!("iroh endpoint has no bound socket"))?;
 
     let local = handle
         .client
@@ -202,8 +200,8 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
     // Plugin-host accept (Phase 6 Task 5b). v1 stub handler — returns
     // Unimplemented for all 17 PluginHostProtocol variants until 5c+ wires
     // real dispatch into the runtime plugin registry.
-    use pattern_core::plugin::auth::{PluginRouteTable, SessionRoutingProtocolHandler};
-    use pattern_core::plugin::protocol::{PluginHostProtocol, PLUGIN_HOST_ALPN};
+    use pattern_core::plugin::auth::SessionRoutingProtocolHandler;
+    use pattern_core::plugin::protocol::{PLUGIN_HOST_ALPN, PluginHostProtocol};
     use std::sync::Arc;
 
     let host_client = pattern_runtime::plugin::host_handler::spawn();

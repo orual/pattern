@@ -98,7 +98,7 @@ impl DaemonClient {
         })?;
 
         // TUI uses ephemeral identity — daemon is allow-listed by public_key.
-        let endpoint = iroh::Endpoint::bind(iroh::endpoint::presets::Minimal)
+        let endpoint = iroh::Endpoint::bind(iroh::endpoint::presets::N0DisableRelay)
             .await
             .map_err(|e| DaemonClientError::ConnectionFailed {
                 addr: state.addr.to_string(),

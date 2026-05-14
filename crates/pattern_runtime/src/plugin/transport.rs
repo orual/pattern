@@ -97,6 +97,17 @@ pub trait PluginConnection: Send + Sync + std::fmt::Debug {
         ))
     }
 
+    /// Forward an agent's `Port.unsubscribe` to this plugin's port impl.
+    /// Symmetric pair with [`port_subscribe`]. Default impl is a no-op,
+    /// matching the [`Port::unsubscribe`] trait default.
+    async fn port_unsubscribe(
+        &self,
+        port_id: &pattern_core::types::port::PortId,
+    ) -> Result<(), pattern_core::types::port::PortError> {
+        let _ = port_id;
+        Ok(())
+    }
+
     /// Optional Haskell prelude library shipped by the plugin.
     async fn library(&self) -> Result<Option<String>, PluginError>;
 
@@ -185,6 +196,16 @@ impl PluginConnection for InProcessPluginConnection {
         let port = ports.iter().find(|p| p.id() == port_id)
             .ok_or_else(|| pattern_core::types::port::PortError::NotFound(port_id.clone()))?;
         port.subscribe(config).await
+    }
+
+    async fn port_unsubscribe(
+        &self,
+        port_id: &pattern_core::types::port::PortId,
+    ) -> Result<(), pattern_core::types::port::PortError> {
+        let ports = self.extension.ports();
+        let port = ports.iter().find(|p| p.id() == port_id)
+            .ok_or_else(|| pattern_core::types::port::PortError::NotFound(port_id.clone()))?;
+        port.unsubscribe().await
     }
 
     async fn library(&self) -> Result<Option<String>, PluginError> {
