@@ -1,0 +1,35 @@
+[package]
+name = "pattern-discord-plugin"
+version = "0.1.0"
+edition = "2024"
+authors = ["Orual <orual@nonbinary.computer>"]
+license = "AGPL-3.0"
+description = "First-party Discord plugin for Pattern"
+
+# Standalone crate — NOT a member of pattern's workspace (per the in-repo
+# separate-workspace decision 2026-05-13). The plugin gets its own target/,
+# its own lockfile, and stays at arms-length from the runtime. When SDK
+# stabilizes post-phase-6, this will move to a separate repo.
+
+[[bin]]
+name = "pattern-discord"
+path = "src/main.rs"
+
+[dependencies]
+# Path dep on the SDK with tui-channel feature for slash-command dispatch +
+# daemon UI-event subscription (FrontingChanged etc).
+pattern-plugin-sdk = { path = "../../crates/pattern_plugin_sdk", features = ["tui-channel"] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smol_str = "0.3"
+
+# Discord gateway + REST. Locked to serenity per v1 prior art.
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "cache"] }
+
+# .env file loader for bot token + admin allowlist.
+dotenvy = "0.15"

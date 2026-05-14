@@ -115,7 +115,10 @@ impl PluginInstallation {
 #[derive(Debug, thiserror::Error)]
 pub enum PluginKeyParseError {
     #[error("plugin {plugin_id}: invalid pubkey encoding: {message}")]
-    InvalidPubkey { plugin_id: smol_str::SmolStr, message: smol_str::SmolStr },
+    InvalidPubkey {
+        plugin_id: smol_str::SmolStr,
+        message: smol_str::SmolStr,
+    },
     #[error("plugin {plugin_id}: conflicting auth fields (both `pubkey` and atproto form set)")]
     ConflictingAuth { plugin_id: smol_str::SmolStr },
     #[error("plugin {plugin_id}: atproto auth requires both `pubkey-uri` and `pubkey-cid`")]
@@ -230,9 +233,7 @@ impl PluginRegistry {
             .read()
             .values()
             .filter_map(|lp| match lp.plugin_key.as_ref()? {
-                pattern_core::plugin::auth::PluginKey::Direct(pk) => {
-                    Some((lp.id.clone(), *pk))
-                }
+                pattern_core::plugin::auth::PluginKey::Direct(pk) => Some((lp.id.clone(), *pk)),
                 pattern_core::plugin::auth::PluginKey::Atproto { .. } => None,
             })
             .collect()
@@ -363,207 +364,102 @@ impl PluginRegistry {
     }
 
     /// Install a plugin from a local path or git URL into the given scope.
+    /// Install a plugin from a local path or git URL into the given scope.
+    ///
+    /// **Architecture:** the BUILD ENV (where cargo runs / where source lives) is
+    /// strictly separate from the CACHE (the distribution artifact directory).
+    /// For LocalPath, build env = the source path itself (no copy). For Git, build
+    /// env = the clone dir. The cache only ever receives the resulting binary +
+    /// standard layout dirs + manifest + extras. This way relative path-deps in
+    /// the plugin's Cargo.toml resolve correctly at build time.
     pub fn install(
         &self,
         source: InstallSource<'_>,
         scope: PluginScope,
     ) -> Result<LoadedPlugin, RegistryError> {
-        let dest = match &source {
+        // 1. Resolve the build env. This is where cargo invokes + where path-deps resolve.
+        //    For Git, clone to a tempdir held alive through this scope (RAII cleanup on
+        //    install completion — we only need the source long enough to build + extract
+        //    the binary to cache).
+        let _build_guard: Option<tempfile::TempDir>;
+        let build_env: std::path::PathBuf = match &source {
             InstallSource::LocalPath(path) => {
-                // Read the manifest from the source path directly.
-                let manifest = load_manifest_from_dir(path).map_err(|e| RegistryError::Io {
-                    path: path.to_path_buf(),
-                    source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-                })?;
-                let cache_dir = self.paths.plugin_cache_dir(&manifest.name);
-                if !cache_dir.exists() {
-                    // Copy the plugin directory to the cache.
-                    copy_dir_recursive(path, &cache_dir)?;
-                }
-                cache_dir
+                _build_guard = None;
+                path.to_path_buf()
             }
             InstallSource::JjGitUrl(url) => {
-                // For now, use a simple git clone to the cache dir.
-                // TODO: wire through JjAdapter when available.
-                let temp_id = url.rsplit('/').next().unwrap_or("plugin");
-                let temp_id = temp_id.trim_end_matches(".git");
-                let cache_dir = self.paths.plugin_cache_dir(temp_id);
-                if cache_dir.exists() {
-                    return Err(RegistryError::DestinationExists(cache_dir));
-                }
-                // Shell out to git clone as a fallback.
-                let status = std::process::Command::new("git")
-                    .args(["clone", url, &cache_dir.to_string_lossy()])
+                let td = tempfile::TempDir::new().map_err(|source| RegistryError::Io {
+                    path: std::path::PathBuf::from("<tempdir>"),
+                    source,
+                })?;
+                let clone_target = td.path().join("src");
+                let status = std::process::Command::new("jj")
+                    .args(["git", "clone", url, &clone_target.to_string_lossy()])
                     .status()
-                    .map_err(|e| RegistryError::Io {
-                        path: cache_dir.clone(),
-                        source: e,
+                    .map_err(|source| RegistryError::Io {
+                        path: clone_target.clone(),
+                        source,
                     })?;
                 if !status.success() {
                     return Err(RegistryError::Io {
-                        path: cache_dir.clone(),
-                        source: std::io::Error::new(std::io::ErrorKind::Other, "git clone failed"),
+                        path: clone_target.clone(),
+                        source: std::io::Error::other("jj git clone failed"),
                     });
                 }
-                cache_dir
+                _build_guard = Some(td);
+                clone_target
             }
         };
 
-        let manifest = load_manifest_from_dir(&dest).map_err(|e| RegistryError::Io {
-            path: dest.clone(),
-            source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+        // 2. Read manifest from the build env.
+        let manifest = load_manifest_from_dir(&build_env).map_err(|e| RegistryError::Io {
+            path: build_env.clone(),
+            source: std::io::Error::other(e.to_string()),
         })?;
 
+        // 3. Resolve cache dir + ensure clean state. Stale cache from a previous
+        //    failed install would shadow the new build artifacts; better to wipe.
+        let cache_dir = self.paths.plugin_cache_dir(&manifest.name);
+        if cache_dir.exists() {
+            std::fs::remove_dir_all(&cache_dir).map_err(|source| RegistryError::Io {
+                path: cache_dir.clone(),
+                source,
+            })?;
+        }
+        std::fs::create_dir_all(&cache_dir).map_err(|source| RegistryError::Io {
+            path: cache_dir.clone(),
+            source,
+        })?;
+
+        // 4. Run native install steps: cargo build at build_env, copy artifacts to cache.
+        //    Errors PROPAGATE — no silent warn-and-continue. If cargo fails, the install fails.
+        let plugin_key = install_native_steps(&build_env, &cache_dir, &manifest)?;
+
+        // 5. Build LoadedPlugin pointing at the cache as its runtime location.
         let lp = LoadedPlugin {
             id: manifest.name.clone(),
             scope,
-            source_path: dest.clone(),
+            source_path: cache_dir.clone(),
             manifest: manifest.clone(),
             user_config: serde_json::Value::Null,
             capability_overrides: None,
-            connection: build_connection(&manifest, &dest),
+            connection: build_connection(&manifest, &cache_dir),
             host: None,
-            plugin_key: None, // newly installed; pubkey lands after plugin's first run
+            plugin_key,
         };
 
         self.insert(lp.clone());
-
-        // Native plugin steps: cargo build (or validate prebuilt), then run
-        // --pattern-plugin-init to extract pubkey. Updates the LoadedPlugin
-        // with plugin_key set so persist_installation writes the pubkey.
-        let lp = match self.install_native_steps(&lp) {
-            Ok(updated) => {
-                if updated.plugin_key.is_some() {
-                    // Replace cached LoadedPlugin with the updated one carrying the pubkey.
-                    self.insert(updated.clone());
-                }
-                updated
-            }
-            Err(e) => {
-                tracing::warn!(plugin = %lp.id, error = %e, "native install steps failed — registering as non-routable");
-                lp
-            }
-        };
-
-        // Persist the installation to the registry KDL file for the scope.
         self.persist_installation(&lp)?;
         Ok(lp)
     }
 
-    /// Native-plugin post-install steps. Cargo build (if `manifest.build`),
-    /// invoke `--pattern-plugin-init` to extract pubkey via PluginKeyStore.
-    /// Returns the LoadedPlugin updated with `plugin_key` set (or unchanged if
-    /// the source isn't a native Rust plugin).
-    fn install_native_steps(&self, lp: &LoadedPlugin) -> Result<LoadedPlugin, RegistryError> {
-        // Not a native rust plugin if there's no Cargo.toml at the source root.
-        if !lp.source_path.join("Cargo.toml").exists() {
-            return Ok(lp.clone());
-        }
-
-        let bin_name = if cfg!(target_os = "windows") {
-            format!("{}.exe", lp.id)
-        } else {
-            lp.id.to_string()
-        };
-        let bin_dir = lp.source_path.join("bin");
-        let bin_path = bin_dir.join(&bin_name);
-
-        // build = true (default): cargo build --release in source_path; copy
-        //     `target/release/<crate-or-bin>` into `bin/<plugin-id>[.exe]`.
-        // build = false: expect prebuilt at `bin/<plugin-id>[.exe]`, error if missing.
-        if lp.manifest.build {
-            tracing::info!(plugin = %lp.id, "running cargo build --release");
-            let output = std::process::Command::new("cargo")
-                .args(["build", "--release"])
-                .current_dir(&lp.source_path)
-                .output()
-                .map_err(|source| RegistryError::Io {
-                    path: lp.source_path.clone(),
-                    source,
-                })?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(RegistryError::Io {
-                    path: lp.source_path.clone(),
-                    source: std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("cargo build failed: {stderr}"),
-                    ),
-                });
-            }
-            // Find binary: try target/release/<plugin-id> first, then target/release/<plugin-id>[.exe].
-            // crate name = manifest name for the simple case; complex workspace TBD.
-            let target_bin = lp.source_path.join("target").join("release").join(&bin_name);
-            let target_bin_no_ext = lp.source_path.join("target").join("release").join(lp.id.as_str());
-            let src_bin = if target_bin.exists() { target_bin }
-                else if target_bin_no_ext.exists() { target_bin_no_ext }
-                else {
-                    return Err(RegistryError::Io {
-                        path: lp.source_path.clone(),
-                        source: std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            format!("built binary not found — expected target/release/{} (no manifest binary-name override yet)", bin_name),
-                        ),
-                    });
-                };
-            std::fs::create_dir_all(&bin_dir).map_err(|source| RegistryError::Io { path: bin_dir.clone(), source })?;
-            std::fs::copy(&src_bin, &bin_path).map_err(|source| RegistryError::Io { path: bin_path.clone(), source })?;
-        } else if !bin_path.exists() {
-            return Err(RegistryError::Io {
-                path: bin_path.clone(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("build = false but no prebuilt binary at {}", bin_path.display()),
-                ),
-            });
-        }
-
-        // Invoke `<bin> --pattern-plugin-init` to generate-or-load keypair + print JSON.
-        tracing::info!(plugin = %lp.id, "running --pattern-plugin-init to extract pubkey");
-        let output = std::process::Command::new(&bin_path)
-            .arg("--pattern-plugin-init")
-            .output()
-            .map_err(|source| RegistryError::Io { path: bin_path.clone(), source })?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(RegistryError::Io {
-                path: bin_path.clone(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("--pattern-plugin-init failed: {stderr}"),
-                ),
-            });
-        }
-        let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .map_err(|e| RegistryError::Io {
-                path: bin_path.clone(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("--pattern-plugin-init stdout not valid JSON: {e}"),
-                ),
-            })?;
-        let pubkey_str = json["pubkey"].as_str().ok_or_else(|| RegistryError::Io {
-            path: bin_path.clone(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "--pattern-plugin-init JSON missing pubkey field",
-            ),
-        })?;
-        let pubkey: iroh::PublicKey = pubkey_str.parse().map_err(|e: <iroh::PublicKey as std::str::FromStr>::Err| RegistryError::Io {
-            path: bin_path.clone(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("--pattern-plugin-init returned invalid pubkey: {e}"),
-            ),
-        })?;
-
-        let mut updated = lp.clone();
-        updated.plugin_key = Some(pattern_core::plugin::auth::PluginKey::Direct(pubkey));
-        Ok(updated)
-    }
-
     /// Persist a plugin installation to the appropriate registry KDL file.
     fn persist_installation(&self, plugin: &LoadedPlugin) -> Result<(), RegistryError> {
+        // Idempotency: drop any prior entry for this plugin id before appending
+        // the fresh one. Otherwise a reinstall stacks duplicate `plugin "..." { }`
+        // blocks in registry.kdl. The cache dir is already wiped per install, so
+        // the registry should mirror that.
+        self.remove_from_persisted_registry(plugin.id.as_str(), plugin.scope.clone())?;
         let reg_path = match plugin.scope {
             PluginScope::Ambient => return Ok(()), // Ambient is discovery-only.
             PluginScope::Global => self.paths.plugins_global_registry(),
@@ -672,6 +568,184 @@ impl PluginRegistry {
         }
         Ok(())
     }
+}
+
+/// Native-plugin install steps.
+///
+/// Runs at build env (where path-deps in Cargo.toml resolve), copies
+/// distribution artifacts to cache:
+/// - If `Cargo.toml` present at build env: cargo build (when manifest.build=true) OR
+///   validate prebuilt binary at `build_env/bin/<id>` (when build=false). Copy binary
+///   to `cache/bin/<id>`. Run `--pattern-plugin-init` to extract pubkey.
+/// - Always: copy `manifest.kdl` + standard layout dirs (skills/, commands/, agents/,
+///   .claude-plugin/) + declared extras from build env to cache.
+///
+/// Returns Some(plugin_key) for native plugins; None for content-only plugins
+/// (CC shape — no Cargo.toml, no binary, no pubkey).
+fn install_native_steps(
+    build_env: &std::path::Path,
+    cache_dir: &std::path::Path,
+    manifest: &PluginManifest,
+) -> Result<Option<pattern_core::plugin::auth::PluginKey>, RegistryError> {
+    // Copy manifest.kdl first (always present at build env per our invariant).
+    for fname in ["manifest.kdl", "plugin.kdl"] {
+        let src = build_env.join(fname);
+        if src.exists() {
+            let dst = cache_dir.join(fname);
+            std::fs::copy(&src, &dst).map_err(|source| RegistryError::Io { path: dst, source })?;
+        }
+    }
+
+    // Copy standard layout dirs if present at build env.
+    for dir_name in [".claude-plugin", "skills", "commands", "agents"] {
+        let src = build_env.join(dir_name);
+        if src.is_dir() {
+            let dst = cache_dir.join(dir_name);
+            copy_dir_recursive(&src, &dst)?;
+        }
+    }
+
+    // Copy declared extras.
+    for extra in &manifest.extras {
+        let src = build_env.join(extra);
+        let dst = cache_dir.join(extra);
+        if src.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+        } else if src.is_file() {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).map_err(|source| RegistryError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            std::fs::copy(&src, &dst).map_err(|source| RegistryError::Io { path: dst, source })?;
+        } else {
+            return Err(RegistryError::Io {
+                path: src.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("manifest extras references missing path: {}", src.display()),
+                ),
+            });
+        }
+    }
+
+    // Detect native plugin: Cargo.toml at build env.
+    if !build_env.join("Cargo.toml").exists() {
+        // Content-only plugin (CC adapter etc) — no binary, no pubkey.
+        return Ok(None);
+    }
+
+    let bin_name = if cfg!(target_os = "windows") {
+        format!("{}.exe", manifest.name)
+    } else {
+        manifest.name.to_string()
+    };
+    let cache_bin_dir = cache_dir.join("bin");
+    std::fs::create_dir_all(&cache_bin_dir).map_err(|source| RegistryError::Io {
+        path: cache_bin_dir.clone(),
+        source,
+    })?;
+    let cache_bin_path = cache_bin_dir.join(&bin_name);
+
+    if manifest.build {
+        tracing::info!(plugin = %manifest.name, build_env = %build_env.display(), "running cargo build --release");
+        let output = std::process::Command::new("cargo")
+            .args(["build", "--release"])
+            .current_dir(build_env)
+            .output()
+            .map_err(|source| RegistryError::Io {
+                path: build_env.to_path_buf(),
+                source,
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(RegistryError::Io {
+                path: build_env.to_path_buf(),
+                source: std::io::Error::other(format!("cargo build failed:\n{stderr}")),
+            });
+        }
+        let target_bin = build_env.join("target").join("release").join(&bin_name);
+        let target_bin_no_ext = build_env
+            .join("target")
+            .join("release")
+            .join(manifest.name.as_str());
+        let src_bin = if target_bin.exists() {
+            target_bin
+        } else if target_bin_no_ext.exists() {
+            target_bin_no_ext
+        } else {
+            return Err(RegistryError::Io {
+                path: build_env.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("built binary not found at target/release/{}", bin_name),
+                ),
+            });
+        };
+        std::fs::copy(&src_bin, &cache_bin_path).map_err(|source| RegistryError::Io {
+            path: cache_bin_path.clone(),
+            source,
+        })?;
+    } else {
+        let prebuilt = build_env.join("bin").join(&bin_name);
+        if !prebuilt.exists() {
+            return Err(RegistryError::Io {
+                path: prebuilt.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "build = false but no prebuilt binary at {}",
+                        prebuilt.display()
+                    ),
+                ),
+            });
+        }
+        std::fs::copy(&prebuilt, &cache_bin_path).map_err(|source| RegistryError::Io {
+            path: cache_bin_path.clone(),
+            source,
+        })?;
+    }
+
+    tracing::info!(plugin = %manifest.name, "running --pattern-plugin-init to extract pubkey");
+    let output = std::process::Command::new(&cache_bin_path)
+        .arg("--pattern-plugin-init")
+        .output()
+        .map_err(|source| RegistryError::Io {
+            path: cache_bin_path.clone(),
+            source,
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(RegistryError::Io {
+            path: cache_bin_path.clone(),
+            source: std::io::Error::other(format!("--pattern-plugin-init failed:\n{stderr}")),
+        });
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| RegistryError::Io {
+            path: cache_bin_path.clone(),
+            source: std::io::Error::other(format!(
+                "--pattern-plugin-init stdout not valid JSON: {e}"
+            )),
+        })?;
+    let pubkey_str = json["pubkey"].as_str().ok_or_else(|| RegistryError::Io {
+        path: cache_bin_path.clone(),
+        source: std::io::Error::other("--pattern-plugin-init JSON missing pubkey field"),
+    })?;
+    let pubkey: iroh::PublicKey =
+        pubkey_str
+            .parse()
+            .map_err(
+                |e: <iroh::PublicKey as std::str::FromStr>::Err| RegistryError::Io {
+                    path: cache_bin_path.clone(),
+                    source: std::io::Error::other(format!(
+                        "--pattern-plugin-init returned invalid pubkey: {e}"
+                    )),
+                },
+            )?;
+
+    Ok(Some(pattern_core::plugin::auth::PluginKey::Direct(pubkey)))
 }
 
 /// Build the appropriate PluginConnection based on manifest source format.

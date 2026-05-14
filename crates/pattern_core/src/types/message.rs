@@ -63,13 +63,18 @@ pub struct Message {
     /// `None` for user and tool messages.
     pub response_meta: Option<ResponseMeta>,
     /// Memory blocks to load for this message's context.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// `skip_serializing_if` deliberately omitted — Message crosses postcard wire
+    /// (via `MessageAttachment` reachable from `pattern_core::wire::ui`) and
+    /// postcard is positional, so skipping fields corrupts the decoder.
+    #[serde(default)]
     pub block_refs: Vec<BlockRef>,
     /// Pattern-level attachments. Rendered into `ChatMessage.content` at
     /// compose-time. NOT persisted in `ChatMessage` itself — keeps the
     /// conversational record clean. Only set on batch-initiating user
     /// messages; other messages have empty attachments.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// `skip_serializing_if` deliberately omitted — postcard-positional wire compat.
+    #[serde(default)]
     pub attachments: Vec<MessageAttachment>,
 }
 

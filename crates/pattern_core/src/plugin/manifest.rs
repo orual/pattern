@@ -56,6 +56,15 @@ pub struct PluginManifest {
     /// Plugin-settings overlay (future) can narrow per-install but can't widen.
     pub hook_subscriptions: Vec<String>,
 
+    /// Optional channels the plugin dials beyond the always-on plugin channel.
+    /// v1 supports `"tui"` — plugin gets a typed client for `pattern/1` ALPN
+    /// to dispatch slash commands + subscribe to daemon-level UI events
+    /// (FrontingChanged etc). KDL form: `dial-channels "tui"`.
+    /// Auth model: same pubkey allowlist as the plugin channel — plugins
+    /// requesting TUI channel are tagged in PluginRouteTable at session-open
+    /// and SessionRoutingProtocolHandler wraps `pattern/1` accepts.
+    pub dial_channels: Vec<String>,
+
     // CC-specific fields preserved from plugin.json translation.
     pub cc: Option<Cc>,
 }
@@ -86,6 +95,7 @@ impl PluginManifest {
             build: true,
             extras: Vec::new(),
             hook_subscriptions: Vec::new(),
+            dial_channels: Vec::new(),
             cc: None,
         }
     }

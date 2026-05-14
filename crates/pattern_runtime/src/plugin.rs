@@ -7,6 +7,7 @@
 pub mod cc_adapter;
 pub mod host_handler;
 pub mod manifest;
+pub mod marketplace;
 pub mod registry;
 pub mod transport;
 pub mod wire_backed_port;

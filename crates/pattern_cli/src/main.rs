@@ -53,8 +53,10 @@ async fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
     use pattern_runtime::plugin::registry::{InstallSource, PluginRegistry};
     use std::sync::Arc;
 
-    let paths = Arc::new(PatternPaths::default_paths()
-        .map_err(|e| miette::miette!("failed to resolve pattern paths: {e}"))?);
+    let paths = Arc::new(
+        PatternPaths::default_paths()
+            .map_err(|e| miette::miette!("failed to resolve pattern paths: {e}"))?,
+    );
     let project_dir = std::env::current_dir().ok();
     let reg = PluginRegistry::load(paths.clone(), project_dir)
         .map_err(|e| miette::miette!("failed to load plugin registry: {e}"))?;
@@ -67,11 +69,19 @@ async fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
             };
             // If the path looks like a git URL, clone it first.
             let path = if let Some(url) = path.to_str() {
-                if url.starts_with("https://") || url.starts_with("git@") || url.starts_with("ssh://") || url.ends_with(".git") {
+                if url.starts_with("https://")
+                    || url.starts_with("git@")
+                    || url.starts_with("ssh://")
+                    || url.ends_with(".git")
+                {
                     let cache_base = paths.plugins_cache_root();
                     std::fs::create_dir_all(&cache_base)
                         .map_err(|e| miette::miette!("failed to create cache dir: {e}"))?;
-                    let clone_name = url.rsplit('/').next().unwrap_or("plugin").trim_end_matches(".git");
+                    let clone_name = url
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("plugin")
+                        .trim_end_matches(".git");
                     let clone_path = cache_base.join(format!(".clone-{clone_name}"));
                     if clone_path.exists() {
                         std::fs::remove_dir_all(&clone_path).ok();
@@ -83,7 +93,7 @@ async fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
                         .flatten()
                         .map(|jj| jj.git_clone(url, &clone_path));
                     match jj_result {
-                        Some(Ok(())) => {},
+                        Some(Ok(())) => {}
                         _ => {
                             let output = std::process::Command::new("git")
                                 .args(["clone", "--depth=1", url, &clone_path.to_string_lossy()])
@@ -102,23 +112,83 @@ async fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
             } else {
                 path
             };
+            // Check for .pattern-plugin/marketplace.kdl first — multi-plugin repos
+            // (like pattern itself: plugins/discord, plugins/bsky-push, etc.) declare each
+            // plugin's subpath there. v1 installs all entries.
+            use pattern_runtime::plugin::marketplace;
+            if let Some(mp_path) = marketplace::discover(&path) {
+                let mp = marketplace::from_kdl_file(&mp_path)
+                    .map_err(|e| miette::miette!("failed to parse marketplace.kdl: {e}"))?;
+                println!(
+                    "Marketplace at {}: {} plugin(s) declared",
+                    mp_path.display(),
+                    mp.plugins.len()
+                );
+                let mut any_failed = false;
+                for entry in &mp.plugins {
+                    let plugin_src = path.join(&entry.path);
+                    if !plugin_src.is_dir() {
+                        eprintln!(
+                            "Warning: marketplace entry {} points at {} which is not a directory",
+                            entry.plugin_id,
+                            plugin_src.display()
+                        );
+                        any_failed = true;
+                        continue;
+                    }
+                    match reg.install(InstallSource::LocalPath(&plugin_src), scope.clone()) {
+                        Ok(lp) => {
+                            if let Some(ext) = &lp.connection {
+                                let ctx = pattern_core::traits::plugin::PluginContext {
+                                    plugin_id: lp.id.clone(),
+                                    hook_bus: std::sync::Arc::new(
+                                        pattern_core::hooks::HookBus::new(),
+                                    ),
+                                    plugin_root: lp.source_path.clone(),
+                                    memory_store: None,
+                                    scope: None,
+                                };
+                                if let Err(e) = ext.on_install(&ctx).await {
+                                    eprintln!("Warning: on_install for {}: {e}", lp.id);
+                                }
+                            }
+                            println!("Installed: {} (scope: {:?})", lp.id, lp.scope);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Failed to install {} from {}: {e}",
+                                entry.plugin_id,
+                                plugin_src.display()
+                            );
+                            any_failed = true;
+                        }
+                    }
+                }
+                if any_failed {
+                    return Err(miette::miette!(
+                        "one or more marketplace entries failed to install"
+                    ));
+                }
+                return Ok(());
+            }
+
             // Try direct install first. If no manifest found, scan subdirectories.
             match reg.install(InstallSource::LocalPath(&path), scope.clone()) {
                 Ok(lp) => {
                     // Call on_install for the extension (imports skills, etc.)
-            if let Some(ext) = &lp.connection {
-                let ctx = pattern_core::traits::plugin::PluginContext {
-                    plugin_id: lp.id.clone(),
-                    hook_bus: std::sync::Arc::new(pattern_core::hooks::HookBus::new()),
-                    plugin_root: lp.source_path.clone(),
-                    memory_store: None,
-                    scope: None,
-                };
-                if let Err(e) = ext.on_install(&ctx).await {
-                    eprintln!("Warning: on_install failed for {}: {e}", lp.id);
-                }
-            }
-            println!("Installed plugin: {} (scope: {:?})", lp.id, lp.scope);
+                    if let Some(ext) = &lp.connection {
+                        let ctx = pattern_core::traits::plugin::PluginContext {
+                            plugin_id: lp.id.clone(),
+                            hook_bus: std::sync::Arc::new(pattern_core::hooks::HookBus::new()),
+                            plugin_root: lp.source_path.clone(),
+                            memory_store: None,
+                            scope: None,
+                        };
+                        if let Err(e) = ext.on_install(&ctx).await {
+                            eprintln!("Warning: on_install failed for {}: {e}", lp.id);
+                        }
+                    }
+                    println!("Installed plugin: {} (scope: {:?})", lp.id, lp.scope);
                 }
                 Err(_) => {
                     // Scan for plugin subdirectories (multi-plugin repos).
@@ -132,7 +202,9 @@ async fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
                     if let Ok(entries) = std::fs::read_dir(&scan_dir) {
                         for entry in entries.flatten() {
                             let sub = entry.path();
-                            if !sub.is_dir() { continue; }
+                            if !sub.is_dir() {
+                                continue;
+                            }
                             // Check if this subdir has a manifest.
                             if sub.join("manifest.kdl").exists()
                                 || sub.join(".claude-plugin").join("plugin.json").exists()
@@ -142,7 +214,9 @@ async fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
                                         if let Some(ext) = &lp.connection {
                                             let ctx = pattern_core::traits::plugin::PluginContext {
                                                 plugin_id: lp.id.clone(),
-                                                hook_bus: std::sync::Arc::new(pattern_core::hooks::HookBus::new()),
+                                                hook_bus: std::sync::Arc::new(
+                                                    pattern_core::hooks::HookBus::new(),
+                                                ),
                                                 plugin_root: lp.source_path.clone(),
                                                 memory_store: None,
                                                 scope: None,
@@ -176,8 +250,12 @@ async fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
                 println!("No plugins installed.");
             } else {
                 for p in &plugins {
-                    println!("  {} (scope: {:?}, path: {})",
-                        p.id, p.scope, p.source_path.display());
+                    println!(
+                        "  {} (scope: {:?}, path: {})",
+                        p.id,
+                        p.scope,
+                        p.source_path.display()
+                    );
                 }
             }
         }

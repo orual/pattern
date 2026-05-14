@@ -77,6 +77,13 @@ pub fn from_kdl_doc(
                     .filter_map(|e| e.value().as_string().map(String::from))
                     .collect();
             }
+            "dial-channels" | "dial_channels" => {
+                manifest.dial_channels = node
+                    .entries()
+                    .iter()
+                    .filter_map(|e| e.value().as_string().map(String::from))
+                    .collect();
+            }
             _ => {
                 unknown.insert(name.to_string(), node.clone());
             }

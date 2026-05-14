@@ -181,21 +181,24 @@ impl PluginConnection for OutOfProcessPluginConnection {
         let wire_ctx = self.build_wire_context(ctx);
         self.client.rpc(pattern_core::plugin::protocol::OnInstallRequest(wire_ctx))
             .await
-            .map_err(|e| PluginError::HostCallback(format!("oop on_install rpc: {e}")))?;
+            .map_err(|e| PluginError::HostCallback(format!("oop on_install rpc: {e}")))?
+            .map_err(|e| PluginError::HostCallback(format!("oop on_install plugin: {e:?}")))?;
         Ok(())
     }
     async fn on_enable(&self, ctx: &PluginContext) -> Result<(), PluginError> {
         let wire_ctx = self.build_wire_context(ctx);
         self.client.rpc(pattern_core::plugin::protocol::OnEnableRequest(wire_ctx))
             .await
-            .map_err(|e| PluginError::HostCallback(format!("oop on_enable rpc: {e}")))?;
+            .map_err(|e| PluginError::HostCallback(format!("oop on_enable rpc: {e}")))?
+            .map_err(|e| PluginError::HostCallback(format!("oop on_enable plugin: {e:?}")))?;
         Ok(())
     }
     async fn on_disable(&self, ctx: &PluginContext) -> Result<(), PluginError> {
         let wire_ctx = self.build_wire_context(ctx);
         self.client.rpc(pattern_core::plugin::protocol::OnDisableRequest(wire_ctx))
             .await
-            .map_err(|e| PluginError::HostCallback(format!("oop on_disable rpc: {e}")))?;
+            .map_err(|e| PluginError::HostCallback(format!("oop on_disable rpc: {e}")))?
+            .map_err(|e| PluginError::HostCallback(format!("oop on_disable plugin: {e:?}")))?;
         Ok(())
     }
 
