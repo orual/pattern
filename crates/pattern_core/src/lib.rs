@@ -37,6 +37,8 @@
 
 pub mod base_instructions;
 pub mod capability;
+#[cfg(feature = "provider")]
+pub mod multimodal;
 #[cfg(feature = "mcp-client")]
 #[cfg(feature = "mcp-client")]
 pub mod mcp;

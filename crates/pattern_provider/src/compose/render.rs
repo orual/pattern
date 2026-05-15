@@ -193,9 +193,35 @@ pub fn render_attachment_content(attachment: &MessageAttachment) -> String {
             payload,
             at,
         } => render_port_event_body(port_id, payload, *at),
+        MessageAttachment::OriginHint { author, transport_hint } => {
+            render_origin_hint_body(author, transport_hint.as_deref())
+        }
         // Future variants — skip gracefully.
         _ => String::new(),
     }
+}
+
+/// Render an `OriginHint` attachment as a fenced provenance block. Author
+/// is rendered from the typed enum (trusted); transport_hint is rendered
+/// as-data with newlines stripped (untrusted surface label).
+pub fn render_origin_hint_body(
+    author: &pattern_core::types::origin::Author,
+    transport_hint: Option<&str>,
+) -> String {
+    let author_str = render_author(author);
+    let hint_str = match transport_hint {
+        Some(h) => {
+            // Strip newlines so a malicious label can't break out of the
+            // fenced block. Trim to a reasonable max length.
+            let cleaned: String = h.chars()
+                .filter(|c| *c != '\n' && *c != '\r')
+                .take(200)
+                .collect();
+            format!(" via {}", cleaned)
+        }
+        None => String::new(),
+    };
+    format!("[origin] {}{}", author_str, hint_str)
 }
 
 /// Render all attachments on a message into a single grouped
@@ -226,29 +252,16 @@ pub fn splice_text_onto_message(msg: &mut ChatMessage, text: &str) {
             let mut new_parts: Vec<ContentPart> = Vec::with_capacity(original_parts.len());
             let mut folded = false;
 
+            // Walk in reverse so we fold into the LAST ToolResponse part.
             for part in original_parts.into_iter().rev() {
                 if !folded && let ContentPart::ToolResponse(mut tr) = part {
-                    let seg3_block = serde_json::json!({"type": "text", "text": text});
-                    let folded_content = match tr.content {
-                        serde_json::Value::String(ref s) => {
-                            serde_json::json!([
-                                seg3_block,
-                                {"type": "text", "text": s},
-                            ])
-                        }
-                        serde_json::Value::Array(ref items) => {
-                            let mut arr = Vec::with_capacity(items.len() + 1);
-                            arr.push(seg3_block);
-                            arr.extend(items.iter().cloned());
-                            serde_json::Value::Array(arr)
-                        }
-                        ref other => {
-                            serde_json::json!([
-                                seg3_block,
-                                {"type": "text", "text": other.to_string()},
-                            ])
-                        }
-                    };
+                    // Prepend the spliced text as a Text ContentPart at the front of the
+                    // tool response's content vec. Order matters for Anthropic's
+                    // tool_result wire format — the spliced text (cache_control /
+                    // system-reminder context) must come before the original tool output.
+                    let mut folded_content: Vec<ContentPart> = Vec::with_capacity(tr.content.len() + 1);
+                    folded_content.push(ContentPart::Text(text.to_string()));
+                    folded_content.extend(tr.content.into_iter());
                     tr.content = folded_content;
                     new_parts.push(ContentPart::ToolResponse(tr));
                     folded = true;
@@ -1074,10 +1087,7 @@ mod tests {
     #[test]
     fn splice_onto_tool_message_folds_into_tool_response() {
         use genai::chat::{ContentPart, MessageContent, ToolResponse};
-        let tr = ToolResponse {
-            call_id: "call-1".to_string(),
-            content: serde_json::json!("tool output"),
-        };
+        let tr = ToolResponse::new("call-1", "tool output");
         let mut msg = ChatMessage {
             role: ChatRole::Tool,
             content: MessageContent::from_parts(vec![ContentPart::ToolResponse(tr)]),
@@ -1091,10 +1101,24 @@ mod tests {
             "should remain one part (folded ToolResponse)"
         );
         if let ContentPart::ToolResponse(tr) = &parts[0] {
-            let content_str = tr.content.to_string();
+            // After splice, the tool response content vec should have 2 Text parts:
+            // [spliced memory snapshot, original tool output]
+            assert_eq!(tr.content.len(), 2, "expected 2 content parts after splice");
+            let first_text = match &tr.content[0] {
+                ContentPart::Text(s) => s.clone(),
+                _ => panic!("first part should be Text(spliced)"),
+            };
+            let second_text = match &tr.content[1] {
+                ContentPart::Text(s) => s.clone(),
+                _ => panic!("second part should be Text(original)"),
+            };
             assert!(
-                content_str.contains("memory snapshot"),
-                "spliced text not folded into tool response: {content_str}"
+                first_text.contains("memory snapshot"),
+                "spliced text should be first: {first_text}"
+            );
+            assert!(
+                second_text.contains("tool output"),
+                "original tool output should be second: {second_text}"
             );
         } else {
             panic!("expected ToolResponse part");

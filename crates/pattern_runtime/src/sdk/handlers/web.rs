@@ -103,7 +103,53 @@ impl EffectHandler<SessionContext> for WebHandler {
             }
             WebReq::WebFetch(url, format) => {
                 let readable = format.as_deref() != Some("raw");
-                fetch_page(&handle, &client, &url, readable, 0, None)
+                match fetch_page_typed(&handle, &client, &url) {
+                    Ok(FetchOutcome::Text(html)) => {
+                        // Existing text path: html->markdown if readable, then paginate.
+                        let content = if readable {
+                            html_to_markdown(&html, Some(&url))
+                        } else {
+                            html
+                        };
+                        let total_len = content.len();
+                        let max_chars = 10_000usize;
+                        let start = 0usize;
+                        let end = floor_char_boundary(&content, max_chars.min(total_len));
+                        let slice = &content[start..end];
+                        let has_more = end < total_len;
+                        let result = serde_json::json!({
+                            "content": slice,
+                            "offset": start,
+                            "total_length": total_len,
+                            "has_more": has_more,
+                            "next_offset": if has_more { Some(end) } else { None::<usize> },
+                        });
+                        serde_json::to_string(&result)
+                            .map_err(|e| format!("failed to serialize: {e}"))
+                    }
+                    Ok(FetchOutcome::Binary {
+                        bytes,
+                        content_type,
+                        display_name,
+                    }) => {
+                        // Binary path: build a ContentPart::Binary via the multimodal helper,
+                        // push to the side-channel, return marker text to the agent's eval.
+                        match pattern_core::multimodal::bytes_to_binary_part(
+                            bytes,
+                            &content_type,
+                            display_name,
+                            &pattern_core::multimodal::BinaryConvertOpts::default(),
+                        ) {
+                            Ok((part, meta)) => {
+                                let marker = pattern_core::multimodal::marker_text_for(&meta);
+                                cx.user().push_pending_tool_attachment(part);
+                                Ok(marker)
+                            }
+                            Err(e) => Err(format!("multi-modal binary build failed: {e}")),
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
             }
             WebReq::WebFetchContinue(url, offset, limit) => {
                 let offset = offset as usize;
@@ -300,6 +346,74 @@ fn parse_ddg_results(html: &str, limit: usize) -> Result<String, String> {
 
 // ---- Fetch implementation ----
 
+/// Result of a single fetch — either text or binary.
+#[allow(clippy::large_enum_variant)]
+enum FetchOutcome {
+    Text(String),
+    Binary {
+        bytes: Vec<u8>,
+        content_type: String,
+        display_name: Option<String>,
+    },
+}
+
+/// Content-type-aware fetch. Inspects HTTP Content-Type before decoding body.
+fn fetch_page_typed(
+    handle: &tokio::runtime::Handle,
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<FetchOutcome, String> {
+    std::thread::scope(|s| {
+        let client = client.clone();
+        let handle = handle.clone();
+        let url = url.to_string();
+        s.spawn(move || {
+            handle.block_on(async {
+                let resp = client
+                    .get(&url)
+                    .header(
+                        "Accept",
+                        "text/html,application/xhtml+xml,image/*,application/pdf,*/*",
+                    )
+                    .send()
+                    .await
+                    .map_err(|e| format!("fetch failed: {e}"))?;
+                let content_type = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
+                    .unwrap_or_else(|| "application/octet-stream".to_string());
+                if pattern_core::multimodal::is_binary_mime(&content_type) {
+                    let bytes = resp
+                        .bytes()
+                        .await
+                        .map_err(|e| format!("binary body read failed: {e}"))?
+                        .to_vec();
+                    let display_name = url
+                        .rsplit('/')
+                        .next()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.split('?').next().unwrap_or(s).to_string());
+                    Ok(FetchOutcome::Binary {
+                        bytes,
+                        content_type,
+                        display_name,
+                    })
+                } else {
+                    let text = resp
+                        .text()
+                        .await
+                        .map_err(|e| format!("text body read failed: {e}"))?;
+                    Ok(FetchOutcome::Text(text))
+                }
+            })
+        })
+        .join()
+        .map_err(|_| "fetch thread panicked".to_string())?
+    })
+}
+
 fn fetch_page(
     handle: &tokio::runtime::Handle,
     client: &reqwest::Client,
@@ -330,7 +444,7 @@ fn fetch_page(
     })?;
 
     let content = if readable {
-        html_to_markdown(&html)
+        html_to_markdown(&html, Some(url))
     } else {
         html
     };
@@ -372,10 +486,12 @@ fn floor_char_boundary(s: &str, mut i: usize) -> usize {
 }
 
 /// Convert HTML to readable markdown.
+
 /// Preprocesses to strip scripts/styles, then uses html2md for conversion.
-fn html_to_markdown(html: &str) -> String {
+fn html_to_markdown(html: &str, base_url: Option<&str>) -> String {
     let cleaned = preprocess_html(html);
-    html2md::parse_html(&cleaned)
+    let parsed_base = base_url.and_then(|u| url::Url::parse(u).ok());
+    html2md::rewrite_html_custom_with_url(&cleaned, &None, false, &parsed_base)
 }
 
 /// Strip script, style, SVG, noscript, comments and JS event handlers

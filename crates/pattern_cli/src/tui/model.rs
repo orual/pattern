@@ -167,8 +167,7 @@ impl Section {
     }
 }
 
-/// Truncate a string to at most `max_chars` characters, appending `...`
-/// if truncated. Replaces newlines with spaces for single-line display.
+
 /// Render a short label for a [`pattern_core::types::origin::Author`] suitable
 /// for prefixing a one-line outbound-message line in the conversation view.
 fn format_sender_label(author: &pattern_core::types::origin::Author) -> String {
@@ -187,6 +186,8 @@ fn format_sender_label(author: &pattern_core::types::origin::Author) -> String {
     }
 }
 
+/// Truncate a string to at most `max_chars` characters, appending `...`
+/// if truncated. Replaces newlines with spaces for single-line display.
 fn truncate_preview(s: &str, max_chars: usize) -> String {
     let cleaned: String = s.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
     if cleaned.chars().count() <= max_chars {
@@ -216,48 +217,72 @@ pub(super) fn extract_code_preview(arguments_json: &str, max_chars: usize) -> St
 /// Tries to parse as JSON and show a meaningful summary;
 /// falls back to truncated raw text.
 pub(super) fn extract_result_preview(content: &str, max_chars: usize) -> String {
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
-        match &parsed {
-            serde_json::Value::String(s) => {
-                // Unwrapped string might be nested JSON — try to compact it
-                if let Ok(nested) = serde_json::from_str::<serde_json::Value>(s) {
-                    if let Ok(compact) = serde_json::to_string(&nested) {
-                        return truncate_preview(&compact, max_chars);
-                    }
-                }
-                truncate_preview(s, max_chars)
-            }
-            serde_json::Value::Null => "null".to_string(),
-            serde_json::Value::Bool(b) => b.to_string(),
-            serde_json::Value::Number(n) => n.to_string(),
-            _ => {
-                if let Ok(compact) = serde_json::to_string(&parsed) {
-                    truncate_preview(&compact, max_chars)
-                } else {
-                    truncate_preview(content, max_chars)
-                }
-            }
+    let parsed = match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(v) => v,
+        Err(_) => return truncate_preview(content, max_chars),
+    };
+    let unwrapped = unwrap_nested_json_strings(parsed);
+    match &unwrapped {
+        serde_json::Value::String(s) => truncate_preview(s, max_chars),
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => {
+            let compact =
+                serde_json::to_string(&unwrapped).unwrap_or_else(|_| content.to_string());
+            truncate_preview(&compact, max_chars)
         }
-    } else {
-        truncate_preview(content, max_chars)
     }
 }
 
 /// Format tool result content for display. Unescapes the wire JSON encoding,
 /// tries to pretty-print nested JSON, and unescapes \n in string values.
 pub(super) fn format_result_content(content: &str) -> String {
-    let inner = match serde_json::from_str::<serde_json::Value>(content) {
-        Ok(serde_json::Value::String(s)) => s,
-        Ok(other) => {
-            return serde_json::to_string_pretty(&other).unwrap_or_else(|_| content.to_string());
-        }
+    // Try to parse the wire content. If it's not JSON, return raw.
+    let parsed = match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(v) => v,
         Err(_) => return content.to_string(),
     };
-    if let Ok(nested) = serde_json::from_str::<serde_json::Value>(&inner) {
-        let pretty = serde_json::to_string_pretty(&nested).unwrap_or_else(|_| inner.clone());
-        pretty.replace("\\n", "\n")
-    } else {
-        inner
+    // Recursively unwrap nested JSON-encoded strings throughout the value.
+    // Common case: tool results return arrays/objects where some leaf is
+    // itself a JSON-encoded string (e.g. Shell.execute envelopes).
+    let unwrapped = unwrap_nested_json_strings(parsed);
+    // For a String leaf, return raw (no surrounding quotes). Otherwise pretty-print.
+    match &unwrapped {
+        serde_json::Value::String(s) => s.replace("\\n", "\n"),
+        other => serde_json::to_string_pretty(other)
+            .unwrap_or_else(|_| content.to_string())
+            .replace("\\n", "\n"),
+    }
+}
+
+/// Walk a Value tree; for every String leaf that itself parses as JSON,
+/// replace it with the parsed form. Recurses into arrays + objects.
+fn unwrap_nested_json_strings(v: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::String(s) => {
+            if let Ok(parsed) = serde_json::from_str::<Value>(&s) {
+                // Only unwrap if the parse produced something STRUCTURED — bare
+                // strings/numbers/bools that happen to parse as JSON shouldn't be
+                // replaced (avoid `"true"` becoming bool, etc).
+                if parsed.is_object() || parsed.is_array() {
+                    return unwrap_nested_json_strings(parsed);
+                }
+            }
+            Value::String(s)
+        }
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(unwrap_nested_json_strings).collect())
+        }
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                out.insert(k, unwrap_nested_json_strings(v));
+            }
+            Value::Object(out)
+        }
+        other => other,
     }
 }
 

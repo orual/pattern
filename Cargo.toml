@@ -80,7 +80,7 @@ dashmap = "6"
 dirs = "5.0"
 
 # HTTP/Web
-html2md = "0.2"
+html2md = { package = "fast_html2md", version = "0.0.62" }
 scraper = "0.22"
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"

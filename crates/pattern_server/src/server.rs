@@ -53,24 +53,6 @@ use crate::bridge::{EventRx, EventTx, MultiplexSink, TurnSinkBridge, new_event_c
 use crate::protocol::*;
 use pattern_db::queries::get_messages;
 
-/// RAII guard that removes a `batch_id → agent_id` entry from `batch_to_agent`
-/// when dropped.
-///
-/// Held by every spawned session task so that the entry is removed on normal
-/// completion, early return, or panic — without relying on `fan_out` to observe
-/// a `Stop` event. The `fan_out` cleanup on `Stop` is left as a defensive
-/// double-remove; `DashMap::remove` is a no-op when the key is absent.
-struct BatchGuard {
-    map: Arc<DashMap<BatchId, AgentId>>,
-    batch_id: BatchId,
-}
-
-impl Drop for BatchGuard {
-    fn drop(&mut self) {
-        self.map.remove(&self.batch_id);
-    }
-}
-
 /// Configuration for real session mode. When provided to
 /// [`DaemonServer::spawn_with_config`], the server opens
 /// [`TidepoolSession`]s instead of echoing messages.
@@ -661,11 +643,15 @@ impl DaemonServer {
                 use crate::protocol::SpawnSource;
                 let parent = match &event.source {
                     SpawnSource::Main => None,
-                    SpawnSource::Ephemeral { parent_agent_id, .. }
-                    | SpawnSource::Sibling { parent_agent_id, .. }
-                    | SpawnSource::Fork { parent_agent_id, .. } => {
-                        Some(SmolStr::from(parent_agent_id.as_str()))
+                    SpawnSource::Ephemeral {
+                        parent_agent_id, ..
                     }
+                    | SpawnSource::Sibling {
+                        parent_agent_id, ..
+                    }
+                    | SpawnSource::Fork {
+                        parent_agent_id, ..
+                    } => Some(SmolStr::from(parent_agent_id.as_str())),
                 }?;
                 self.agent_to_mount.get(&parent).map(|p| p.value().clone())
             });
@@ -684,13 +670,20 @@ impl DaemonServer {
             std::collections::HashSet::new();
         let parent_id: Option<AgentId> = match &event.source {
             SpawnSource::Main => None,
-            SpawnSource::Ephemeral { parent_agent_id, .. }
-            | SpawnSource::Sibling { parent_agent_id, .. }
-            | SpawnSource::Fork { parent_agent_id, .. } => {
-                Some(SmolStr::from(parent_agent_id.as_str()))
+            SpawnSource::Ephemeral {
+                parent_agent_id, ..
             }
+            | SpawnSource::Sibling {
+                parent_agent_id, ..
+            }
+            | SpawnSource::Fork {
+                parent_agent_id, ..
+            } => Some(SmolStr::from(parent_agent_id.as_str())),
         };
-        for key in [Some(event.agent_id.clone()), parent_id].into_iter().flatten() {
+        for key in [Some(event.agent_id.clone()), parent_id]
+            .into_iter()
+            .flatten()
+        {
             if !delivered_keys.insert(key.clone()) {
                 continue;
             }
@@ -1134,10 +1127,24 @@ impl DaemonServer {
             PatternMessage::Shutdown(req) => {
                 let WithChannels { tx, .. } = req;
                 // Respond before exiting so the client's await resolves cleanly.
-                // A brief sleep gives the response time to flush over the wire
-                // before the process exits.
                 let _ = tx.send(crate::protocol::ShutdownResponse).await;
-                tokio::spawn(async {
+                // Walk all open sessions + terminate their OOP plugin children
+                // BEFORE std::process::exit (which doesn't run Drop chains, so
+                // kill_on_drop alone won't fire for the plugin Child handles).
+                // Collected synchronously so we don't hold the DashMap iterator
+                // across awaits.
+                let plugin_regs: Vec<
+                    std::sync::Arc<pattern_runtime::plugin::registry::PluginRegistry>,
+                > = self
+                    .sessions
+                    .iter()
+                    .filter_map(|entry| entry.value().session.context().plugin_registry().cloned())
+                    .collect();
+                tokio::spawn(async move {
+                    for reg in plugin_regs {
+                        reg.shutdown_all().await;
+                    }
+                    // Brief sleep so the Shutdown response flushes cleanly.
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     std::process::exit(0);
                 });
@@ -2937,6 +2944,16 @@ fn build_turn_input(msg: &AgentMessage, session_agent_id: &str) -> TurnInput {
             .join(""),
     );
 
+    // Always attach an OriginHint so the composer can render typed
+    // provenance (Author + transport_hint) into the LLM-facing prompt as a
+    // structured fenced block. Plugin-set transport_hint (e.g. "discord:DM")
+    // is rendered as data, not as content — prompt-injection-safe.
+    let attachments = vec![
+        pattern_core::types::message::MessageAttachment::OriginHint {
+            author: msg.origin.author.clone(),
+            transport_hint: msg.origin.transport_hint.clone(),
+        },
+    ];
     let message = Message {
         chat_message: chat_msg,
         id: MessageId::from(new_id().to_string()),
@@ -2946,7 +2963,7 @@ fn build_turn_input(msg: &AgentMessage, session_agent_id: &str) -> TurnInput {
         batch: batch_id.clone(),
         response_meta: None,
         block_refs: vec![],
-        attachments: vec![],
+        attachments,
     };
 
     TurnInput {
@@ -3035,19 +3052,22 @@ fn message_to_wire_events(
         for part in chat_msg.content.parts() {
             if let Some(tr) = part.as_tool_response() {
                 // Determine success based on content structure.
-                let (success, content_json) = if tr.content.is_string() {
-                    (true, tr.content.to_string())
+                // For single-Text content, emit raw inner text (no JSON-string wrap) so
+                // TUI doesn't need to unwrap escapes. For multi-part, emit the legacy
+                // anthropic-array shape as JSON so TUI can render structurally.
+                let content_json = if matches!(
+                    tr.content.as_slice(),
+                    [ContentPart::Text(_)]
+                ) {
+                    tr.joined_text().unwrap_or_default()
                 } else {
-                    // Check if this is an error response (has "error" key).
-                    if let Some(obj) = tr.content.as_object() {
-                        if obj.contains_key("error") {
-                            (false, tr.content.to_string())
-                        } else {
-                            (true, tr.content.to_string())
-                        }
-                    } else {
-                        (true, tr.content.to_string())
-                    }
+                    tr.content_as_legacy_value().to_string()
+                };
+                let joined = tr.joined_text().unwrap_or_default();
+                let success = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&joined) {
+                    !parsed.as_object().is_some_and(|obj| obj.contains_key("error"))
+                } else {
+                    true
                 };
                 events.push(WireTurnEvent::ToolResult {
                     call_id: tr.call_id.clone(),
@@ -3330,48 +3350,6 @@ mod tests {
             batch_map.is_empty(),
             "batch_to_agent must be empty after all batches complete; has {} entries",
             batch_map.len()
-        );
-    }
-
-    /// `BatchGuard` removes the entry when a spawned task exits early, even
-    /// without emitting a `Stop` event. This tests the guard directly rather
-    /// than through the full send path: spawn a minimal task that inserts an
-    /// entry, holds a guard, then returns early. The entry must be gone.
-    #[tokio::test]
-    async fn batch_to_agent_removes_entry_when_task_exits_early() {
-        use dashmap::DashMap;
-        use std::sync::Arc;
-
-        let batch_to_agent: Arc<DashMap<BatchId, AgentId>> = Arc::new(DashMap::new());
-        let batch_id: BatchId = "early-exit-batch".into();
-        let agent_id: AgentId = "test-agent".into();
-
-        // Simulate the actor inserting the entry before spawning the task.
-        batch_to_agent.insert(batch_id.clone(), agent_id.clone());
-        assert!(
-            batch_to_agent.contains_key(&batch_id),
-            "entry should be present after insert"
-        );
-
-        // Spawn a task that holds the guard and returns early (without emitting Stop).
-        let map_clone = batch_to_agent.clone();
-        let bid_clone = batch_id.clone();
-        tokio::spawn(async move {
-            let _guard = BatchGuard {
-                map: map_clone,
-                batch_id: bid_clone,
-            };
-            // Exit without emitting Stop — guard's Drop should clean up.
-        })
-        .await
-        .unwrap();
-
-        // Yield to ensure Drop has run and the entry is removed.
-        tokio::task::yield_now().await;
-
-        assert!(
-            !batch_to_agent.contains_key(&batch_id),
-            "BatchGuard must remove the entry on task exit; entry still present"
         );
     }
 

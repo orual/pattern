@@ -258,11 +258,56 @@ impl EvalDispatcher for EvalWorker {
                 "eval worker channel closed — session shutting down or worker crashed".into(),
             );
         }
-        match reply_rx.await {
-            Ok(outcome) => outcome,
-            Err(_) => ToolOutcome::Error(
-                "eval worker dropped reply channel — the evaluation was abandoned".into(),
-            ),
+        let outcome = match reply_rx.await {
+            Ok(o) => o,
+            Err(_) => {
+                return ToolOutcome::Error(
+                    "eval worker dropped reply channel — the evaluation was abandoned".into(),
+                );
+            }
+        };
+
+        // Seam B: scan the result text for markdown image refs (`![alt](path|url)`)
+        // and promote them to multi-modal ContentPart::Binary attachments. Original
+        // text is preserved — the markdown ref still serves as the inline locator.
+        // Skipped refs (over-cap, fetch failed) get a tail-note appended so the agent
+        // knows what wasn't picked up.
+        const SEAM_B_MAX_ATTACHMENTS: usize = 8;
+        match outcome {
+            ToolOutcome::Success(mut parts) => {
+                // Collect text from existing Text parts to scan.
+                let combined_text: String = parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        genai::chat::ContentPart::Text(s) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let opts = pattern_core::multimodal::BinaryConvertOpts::default();
+                let result = pattern_core::multimodal::fetch_markdown_images(
+                    &combined_text,
+                    SEAM_B_MAX_ATTACHMENTS,
+                    &opts,
+                )
+                .await;
+                parts.extend(result.parts);
+                if !result.skipped.is_empty() {
+                    let skipped_list = result
+                        .skipped
+                        .iter()
+                        .map(|r| format!("  - ![{alt}]({target})", alt = r.alt, target = r.target))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    parts.push(genai::chat::ContentPart::Text(format!(
+                        "\n[seam-B: {} markdown image ref(s) not attached (over-cap or fetch failed); use File.read or Web.fetch to inspect them explicitly]\n{}",
+                        result.skipped.len(),
+                        skipped_list,
+                    )));
+                }
+                ToolOutcome::Success(parts)
+            }
+            other => other,
         }
     }
 }
@@ -311,6 +356,10 @@ fn run_eval(
     // compile_and_run expects.
     let include_refs: Vec<&std::path::Path> = include_paths.iter().map(|p| p.as_path()).collect();
 
+    // Reset the per-eval attachment buffer before the eval runs. Defensive —
+    // any leftover from a previous eval that crashed before draining is discarded.
+    let _ = ctx.drain_pending_tool_attachments();
+
     match tidepool_runtime::compile_and_run(
         source,
         "result",
@@ -321,10 +370,30 @@ fn run_eval(
         Ok(eval_result) => {
             // Convert the evaluated Value to JSON via tidepool's
             // renderer (which knows the DataConTable for proper
-            // constructor-name rendering).
-            ToolOutcome::Success(eval_result.to_json())
+            // constructor-name rendering), then wrap as a single Text
+            // ContentPart so ToolOutcome carries multi-modal-shape content
+            // even when the eval-worker source is text/JSON-only.
+            let json_str = serde_json::to_string(&eval_result.to_json())
+                .unwrap_or_else(|_| eval_result.to_json().to_string());
+            let mut parts: Vec<genai::chat::ContentPart> =
+                vec![genai::chat::ContentPart::Text(json_str)];
+            // Drain any multi-modal attachments handlers pushed during the eval
+            // (e.g. File.read on an image pushed a ContentPart::Binary while
+            // returning a marker text to the haskell eval).
+            let attachments = ctx.drain_pending_tool_attachments();
+            tracing::debug!(
+                attachment_count = attachments.len(),
+                "eval_worker draining pending tool attachments"
+            );
+            parts.extend(attachments);
+            ToolOutcome::Success(parts)
         }
-        Err(e) => ToolOutcome::Error(format!("haskell eval failed: {e}")),
+        Err(e) => {
+            // Drop any attachments queued before the failure — they belong
+            // to a tool result we're not going to produce.
+            let _ = ctx.drain_pending_tool_attachments();
+            ToolOutcome::Error(format!("haskell eval failed: {e}"))
+        }
     }
 }
 
@@ -442,12 +511,18 @@ mod tests {
         };
         let outcome = worker.dispatch(tc, &preamble).await;
         match outcome {
-            ToolOutcome::Success(v) => {
+            ToolOutcome::Success(parts) => {
                 // Paginated result wraps the value; the exact shape
                 // is defined by tidepool-mcp's paginateResult, but it
                 // should be non-null and contain 42 somewhere in its
-                // string form.
-                let s = v.to_string();
+                // string form. ToolOutcome::Success now carries
+                // Vec<ContentPart>; for text/JSON eval results this is
+                // a single Text part — concatenate Text parts and check.
+                use genai::chat::ContentPart;
+                let s: String = parts.iter().filter_map(|p| match p {
+                    ContentPart::Text(t) => Some(t.as_str()),
+                    _ => None,
+                }).collect::<Vec<_>>().join("");
                 assert!(
                     s.contains("42"),
                     "expected rendered JSON to contain 42, got: {s}"

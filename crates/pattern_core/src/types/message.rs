@@ -255,6 +255,25 @@ pub enum MessageAttachment {
         /// When the event was enqueued by the dispatcher's drain task.
         at: jiff::Timestamp,
     },
+    /// Provenance hint for a user message — who authored it and from which
+    /// surface. Built by `build_turn_input` from the user-message's
+    /// [`MessageOrigin`] when `transport_hint` is set (typically from
+    /// non-TUI surfaces like the discord plugin).
+    ///
+    /// Composer renders this as a structured fenced block alongside the
+    /// message content so the LLM can distinguish source (DM vs channel,
+    /// TUI vs discord, partner vs human) without prompt-injection risk
+    /// from inlining surface-supplied strings into the content itself.
+    OriginHint {
+        /// Typed author (Partner / Human / Agent / Plugin / System).
+        /// Rendered from the trusted-runtime variant; doesn't carry
+        /// surface-supplied text into the prompt.
+        author: crate::types::origin::Author,
+        /// Surface label (e.g. `"discord:DM:orual"`, `"discord:channel:123"`).
+        /// Plugin-supplied — rendered as data inside the fenced block,
+        /// not as content. Newlines stripped at render time.
+        transport_hint: Option<smol_str::SmolStr>,
+    },
 }
 
 /// Whether an external edit notification is for a file the agent has

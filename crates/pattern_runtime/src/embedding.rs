@@ -49,7 +49,9 @@ pub fn render_chat_message_for_embedding(msg: &genai::chat::ChatMessage) -> Stri
                 parts.push(format!("[tool: {}]", tc.fn_name));
             }
             ContentPart::ToolResponse(tr) => {
-                if let Some(s) = tr.content.as_str()
+                // Embedding text walks tool results for their joined text content.
+                // Binary parts are skipped — embedding semantics are text-only.
+                if let Some(s) = tr.joined_text()
                     && !s.is_empty()
                 {
                     parts.push(format!("[tool result] {s}"));

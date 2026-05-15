@@ -1103,7 +1103,12 @@ fn message_text(msg: &Message) -> String {
         match part {
             ContentPart::ToolResponse(tr) => {
                 out.push('\n');
-                out.push_str(&tr.content.to_string());
+                // Walk Vec<ContentPart> content for text representation.
+                for inner in &tr.content {
+                    if let ContentPart::Text(s) = inner {
+                        out.push_str(s);
+                    }
+                }
             }
             ContentPart::ToolCall(tc) => {
                 out.push('\n');

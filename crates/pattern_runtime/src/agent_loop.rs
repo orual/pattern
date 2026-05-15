@@ -2326,7 +2326,7 @@ mod tests {
     impl EvalDispatcher for MockSuccessDispatcher {
         async fn dispatch(&self, tool_call: ToolCall, _preamble: &str) -> ToolOutcome {
             self.calls.lock().unwrap().push(tool_call);
-            ToolOutcome::Success(serde_json::json!({"ok": true}))
+            ToolOutcome::Success(vec![genai::chat::ContentPart::Text(r#"{"ok":true}"#.to_string())])
         }
     }
 
@@ -3053,18 +3053,15 @@ mod tests {
         // must be the plain tool output, not an array with a prepended seg3 block.
         for part in turn0_tool_msg.chat_message.content.parts() {
             if let ContentPart::ToolResponse(tr) = part {
+                // The stored tool_result content (Vec<ContentPart>) must NOT have
+                // a seg3 text block prepended — that splice happens at compose time
+                // and operates on a CLONE from prior_messages, not on the stored TurnRecord.
+                let first_text = tr.content.iter().find_map(|cp| match cp {
+                    ContentPart::Text(s) => Some(s.as_str()),
+                    _ => None,
+                });
                 assert!(
-                    !tr.content.is_array() || {
-                        // If it IS an array, it must NOT have a seg3 text block as first element.
-                        // The seg3 block has the key "type" = "text" and text starting with
-                        // "[memory:current_state]".
-                        let arr = tr.content.as_array().unwrap();
-                        !arr.first()
-                            .and_then(|v| v.get("text"))
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.contains("current_state"))
-                            .unwrap_or(false)
-                    },
+                    !first_text.map(|s| s.contains("current_state")).unwrap_or(false),
                     "splice must NOT have mutated the stored tool_result content in TurnHistory; \
                      found seg3 content baked into the stored ToolResponse: {:?}",
                     tr.content
@@ -3075,99 +3072,10 @@ mod tests {
 
     // ---- Seg3 splice unit tests --------------------------------------------
     //
-    // These tests exercise the splice logic in isolation: construct a Tool-role
-    // message, apply the same fold that `compose_request_for_turn` does, and
-    // assert the resulting shape is correct.
-    //
-    // They are regression guards for the Anthropic wire-format requirement:
-    // tool_result blocks must NOT have a preceding text sibling in the same
-    // user message — instead the seg3 text is folded INTO the ToolResponse
-    // content array, matching Anthropic's documented nested-block format and
-    // claude-code's `smooshIntoToolResult` pattern.
-
-    /// Helper: apply the same fold as the production splice to a single
-    /// ToolResponse part with the given original content, returning the
-    /// rewritten content Value.
-    fn apply_seg3_fold(original_content: serde_json::Value, seg3_text: &str) -> serde_json::Value {
-        let seg3_block = serde_json::json!({"type": "text", "text": seg3_text});
-
-        match original_content {
-            serde_json::Value::String(ref s) => {
-                serde_json::json!([
-                    seg3_block,
-                    {"type": "text", "text": s},
-                ])
-            }
-            serde_json::Value::Array(ref items) => {
-                let mut arr = Vec::with_capacity(items.len() + 1);
-                arr.push(seg3_block);
-                arr.extend(items.iter().cloned());
-                serde_json::Value::Array(arr)
-            }
-            ref other => {
-                serde_json::json!([
-                    seg3_block,
-                    {"type": "text", "text": other.to_string()},
-                ])
-            }
-        }
-    }
-
-    /// When the original ToolResponse content is a plain string, the fold
-    /// should produce a two-element array: [seg3 text block, original text block].
-    #[test]
-    fn seg3_splice_string_content_produces_two_block_array() {
-        let original = serde_json::Value::String("tool output here".into());
-        let folded = apply_seg3_fold(original, "seg3 memory context");
-
-        let arr = folded.as_array().expect("folded content must be an array");
-        assert_eq!(arr.len(), 2, "must have exactly two blocks");
-
-        // First block: seg3 text.
-        assert_eq!(arr[0]["type"], "text");
-        assert_eq!(arr[0]["text"], "seg3 memory context");
-
-        // Second block: original tool output.
-        assert_eq!(arr[1]["type"], "text");
-        assert_eq!(arr[1]["text"], "tool output here");
-    }
-
-    /// When the original content is already an array of blocks, the fold
-    /// should prepend the seg3 block, preserving all existing elements.
-    #[test]
-    fn seg3_splice_array_content_prepends_seg3_block() {
-        let original = serde_json::json!([
-            {"type": "text", "text": "existing block 1"},
-            {"type": "text", "text": "existing block 2"},
-        ]);
-        let folded = apply_seg3_fold(original, "seg3 memory");
-
-        let arr = folded.as_array().expect("folded content must be an array");
-        assert_eq!(arr.len(), 3, "seg3 prepended + 2 existing");
-
-        assert_eq!(arr[0]["type"], "text");
-        assert_eq!(arr[0]["text"], "seg3 memory");
-        assert_eq!(arr[1]["text"], "existing block 1");
-        assert_eq!(arr[2]["text"], "existing block 2");
-    }
-
-    /// When the original content is a structured JSON object (fallback case),
-    /// it is stringified into a text block after the seg3 block.
-    #[test]
-    fn seg3_splice_object_content_stringifies_into_text_block() {
-        let original = serde_json::json!({"result": 42});
-        let folded = apply_seg3_fold(original, "seg3 memory");
-
-        let arr = folded.as_array().expect("folded content must be an array");
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["text"], "seg3 memory");
-        // The object is serialized to JSON string in the text field.
-        let stringified = arr[1]["text"].as_str().expect("text field must be string");
-        assert!(
-            stringified.contains("42"),
-            "stringified object must contain '42'"
-        );
-    }
+    // The seg3 splice logic now lives in pattern_provider::compose::render::
+    // splice_text_onto_message and is unit-tested there against the new
+    // Vec<ContentPart> shape. The local `apply_seg3_fold` helper and its tests
+    // were removed as redundant in the multi-modal upgrade (2026-05-15).
 
     /// Regression guard: the splice MUST NOT flip ChatRole::Tool to ChatRole::User.
     ///
@@ -3203,13 +3111,19 @@ mod tests {
         let ContentPart::ToolResponse(ref tr) = parts[0] else {
             panic!("expected ToolResponse part");
         };
-        let content_arr = tr
-            .content
-            .as_array()
-            .expect("content must be array after fold");
-        assert_eq!(content_arr.len(), 2, "seg3 block + original content block");
-        assert_eq!(content_arr[0]["text"], "seg3 memory context");
-        assert_eq!(content_arr[1]["text"], "initial tool output");
+        // After the splice, the tool response's content vec should be:
+        // [Text("seg3 memory context"), Text("initial tool output")]
+        assert_eq!(tr.content.len(), 2, "seg3 block + original content block");
+        let first = match &tr.content[0] {
+            ContentPart::Text(s) => s.clone(),
+            _ => panic!("first part should be Text(spliced)"),
+        };
+        let second = match &tr.content[1] {
+            ContentPart::Text(s) => s.clone(),
+            _ => panic!("second part should be Text(original)"),
+        };
+        assert_eq!(first, "seg3 memory context");
+        assert_eq!(second, "initial tool output");
     }
 
     // ---- Attachment + snapshot tests ----------------------------------------
@@ -3771,7 +3685,7 @@ mod tests {
                     reason: pattern_core::types::origin::SystemReason::ToolCall,
                 },
             });
-            ToolOutcome::Success(serde_json::json!({"ok": true}))
+            ToolOutcome::Success(vec![genai::chat::ContentPart::Text(r#"{"ok":true}"#.to_string())])
         }
     }
 
@@ -3971,10 +3885,17 @@ mod tests {
         let ContentPart::ToolResponse(ref tr) = msg.content.parts()[0] else {
             panic!("expected ToolResponse");
         };
-        let arr = tr.content.as_array().expect("must be array");
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["text"], "memory snapshot");
-        assert_eq!(arr[1]["text"], "result");
+        assert_eq!(tr.content.len(), 2);
+        let first = match &tr.content[0] {
+            ContentPart::Text(s) => s.clone(),
+            _ => panic!("first should be Text"),
+        };
+        let second = match &tr.content[1] {
+            ContentPart::Text(s) => s.clone(),
+            _ => panic!("second should be Text"),
+        };
+        assert_eq!(first, "memory snapshot");
+        assert_eq!(second, "result");
     }
 
     // ---- FileEdit / FileConflict render arm tests (Task 8) ------------------

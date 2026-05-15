@@ -188,7 +188,7 @@ async fn load_tool_use_turn_restores_two_records() {
     #[async_trait]
     impl EvalDispatcher for SuccessDispatcher {
         async fn dispatch(&self, _tool_call: ToolCall, _preamble: &str) -> ToolOutcome {
-            ToolOutcome::Success(serde_json::json!({"ok": true}))
+            ToolOutcome::Success(vec![genai::chat::ContentPart::Text(r#"{"ok":true}"#.to_string())])
         }
     }
 

@@ -239,6 +239,19 @@ impl PluginRegistry {
         }
     }
 
+    /// Terminate all OOP plugin connections gracefully. Called at daemon
+    /// shutdown so plugin children don't outlive the daemon.
+    pub async fn shutdown_all(&self) {
+        let connections: Vec<(smol_str::SmolStr, std::sync::Arc<dyn crate::plugin::transport::PluginConnection>)> =
+            self.inner.read().iter().filter_map(|(id, lp)| {
+                lp.connection.as_ref().map(|c| (id.clone(), c.clone()))
+            }).collect();
+        for (id, conn) in connections {
+            tracing::info!(plugin_id = %id, "terminating plugin at daemon shutdown");
+            conn.terminate().await;
+        }
+    }
+
     /// Pubkey-routable plugins in this registry: returns `(plugin_id, pubkey)` for
     /// each loaded plugin whose registry entry has a parsed `PluginKey::Direct(_)`.
     /// Atproto-keyed plugins (phase 7) are skipped — their resolution path isn't

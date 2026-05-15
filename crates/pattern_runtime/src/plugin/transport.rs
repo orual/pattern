@@ -114,6 +114,16 @@ pub trait PluginConnection: Send + Sync + std::fmt::Debug {
     /// Hook event dispatch. Returns `Some(HookResponse)` for blocking events.
     async fn on_event(&self, event: HookEvent) -> Result<Option<HookResponse>, PluginError>;
 
+    /// Gracefully terminate the plugin connection. For OOP plugins, sends
+    /// SIGTERM to the child process + waits briefly for it to exit. For
+    /// in-process plugins, default no-op (drop closes them).
+    ///
+    /// Called at daemon shutdown to ensure plugin children don't outlive
+    /// the daemon. Best-effort: errors are logged but don't propagate.
+    async fn terminate(&self) {
+        // Default no-op for in-process plugins; OOP overrides.
+    }
+
     /// Connection health snapshot. Out-of-process variants surface reconnect
     /// state here; in-process is always `Healthy`.
     fn health(&self) -> PluginHealth {

@@ -32,6 +32,11 @@ loro = { version = "1.10", features = ["counter"] }
 # AI/LLM (feature-gated: `provider`)
 genai = { workspace = true, optional = true }
 
+# Multi-modal content helpers (feature-gated: `provider` — needs genai::ContentPart)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"], optional = true }
+infer = { version = "0.16", default-features = false, optional = true }
+reqwest = { workspace = true, default-features = false, features = ["rustls-tls", "json"], optional = true }
+
 # Optional: SQLite type conversions (enabled by pattern-db)
 rusqlite = { version = "0.39", features = ["bundled-full"], optional = true }
 
@@ -88,7 +93,7 @@ memory = []
 
 # LLM provider integration (genai). Required by `pattern_core::types::{message,turn,snapshot,provider}`
 # and one `error::CoreError` variant. Plugin authors usually want this off.
-provider = ["dep:genai"]
+provider = ["dep:genai", "dep:image", "dep:infer", "dep:reqwest"]
 
 # Enable rusqlite FromSql/ToSql impls for domain enums
 sqlite = ["rusqlite"]

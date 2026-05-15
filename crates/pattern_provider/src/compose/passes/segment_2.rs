@@ -389,10 +389,7 @@ mod tests {
     fn tool_result_with_file_edit_attachment_renders_via_compose() {
         use genai::chat::{ContentPart, MessageContent, ToolResponse};
 
-        let tool_response = ToolResponse {
-            call_id: "call-123".to_string(),
-            content: serde_json::json!("file written successfully"),
-        };
+        let tool_response = ToolResponse::new("call-123", "file written successfully");
         let tool_msg = ChatMessage {
             role: genai::chat::ChatRole::Tool,
             content: MessageContent::from_parts(vec![ContentPart::ToolResponse(tool_response)]),
@@ -428,8 +425,12 @@ mod tests {
             .filter_map(|p| match p {
                 ContentPart::ToolResponse(tr) => {
                     // The spliced content lives inside the tool response's
-                    // content array as a JSON text block.
-                    Some(tr.content.to_string())
+                    // content vec — concatenate text parts for the assertion.
+                    let joined = tr.content.iter().filter_map(|cp| match cp {
+                        ContentPart::Text(s) => Some(s.clone()),
+                        _ => None,
+                    }).collect::<Vec<_>>().join(" ");
+                    Some(joined)
                 }
                 _ => None,
             })

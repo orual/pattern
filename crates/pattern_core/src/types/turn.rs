@@ -239,6 +239,8 @@ impl TurnOutput {
             .flat_map(|m| m.chat_message.content.parts().iter())
             .filter_map(|part| {
                 if let ContentPart::ToolResponse(tr) = part {
+                    // Direct vec move — Vec<ContentPart> preserves multi-modal fidelity
+                    // from wire ToolResponse through ToolOutcome and back.
                     Some(ToolResult {
                         call_id: tr.call_id.clone(),
                         outcome: ToolOutcome::Success(tr.content.clone()),

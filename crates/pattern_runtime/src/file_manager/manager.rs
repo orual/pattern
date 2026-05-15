@@ -113,6 +113,12 @@ impl FileManager {
         Ok(())
     }
 
+    pub fn check_access(&self, path: &Path) -> Result<(), FileError> {
+        self.check_capability()?;
+        self.policy.check_access(path)?;
+        Ok(())
+    }
+
     /// Acquire (creating if needed) the DirWatcher for `parent_dir` and
     /// bump its refcount. Caller (open / watch) MUST pair this with
     /// `release_dir_watcher_ref` on close / unwatch.

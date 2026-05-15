@@ -655,7 +655,15 @@ fn estimate_turn_tokens(output: &TurnOutput) -> u64 {
                         tc.fn_name.len() as u64 + tc.fn_arguments.to_string().len() as u64
                     }
                     genai::chat::ContentPart::ToolResponse(tr) => {
-                        tr.content.to_string().len() as u64
+                        // Walk the inner content vec and sum sizes per-part.
+                        tr.content.iter().map(|p| match p {
+                            genai::chat::ContentPart::Text(s) => s.len() as u64,
+                            genai::chat::ContentPart::Binary(b) => match &b.source {
+                                genai::chat::BinarySource::Url(s) => s.len() as u64,
+                                genai::chat::BinarySource::Base64(s) => s.len() as u64,
+                            },
+                            _ => 0,
+                        }).sum::<u64>()
                     }
                     genai::chat::ContentPart::ThinkingBlock(tb) => tb
                         .text

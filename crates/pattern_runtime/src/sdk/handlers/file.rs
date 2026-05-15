@@ -140,18 +140,58 @@ impl EffectHandler<SessionContext> for FileHandler {
         match req {
             FileReq::Read(path) => {
                 let fm = require_file_manager(cx.user())?;
-                let sf = fm
-                    .get_or_open(Path::new(&path))
+                let p = Path::new(&path);
+                // Sandbox + capability gate via FileManager. For binary content
+                // we bypass `get_or_open` entirely (loro doc-sync is text-only);
+                // explicit `check_access` enforces the same gate the text path
+                // would have gotten via `get_or_open`'s internals.
+                fm.check_access(p)
                     .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
-                let content = sf
-                    .read()
-                    .map_err(|e| EffectError::Handler(format!("Pattern.File.Read: {e}")))?;
+                let raw_bytes = std::fs::read(p).map_err(|e| {
+                    EffectError::Handler(format!("Pattern.File.Read: {e}"))
+                })?;
+                let mime = pattern_core::multimodal::sniff_content_type(&raw_bytes, p)
+                    .unwrap_or_else(|_| "application/octet-stream".to_string());
                 cx.user()
                     .hook_bridge()
                     .emit(pattern_core::hooks::HookEvent::notification(
                         pattern_core::hooks::tags::FILE_READ,
-                        serde_json::json!({ "path": path, "operation": "read" }),
+                        serde_json::json!({
+                            "path": path,
+                            "operation": "read",
+                            "content_type": mime,
+                        }),
                     ));
+
+                if pattern_core::multimodal::is_binary_mime(&mime) {
+                    // Binary path: bypass loro, build a multi-modal ContentPart,
+                    // push it to the per-eval attachment side-channel, return a
+                    // marker text to the agent's Haskell eval.
+                    let display = p
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(String::from);
+                    let (part, meta) = pattern_core::multimodal::bytes_to_binary_part(
+                        raw_bytes,
+                        &mime,
+                        display,
+                        &pattern_core::multimodal::BinaryConvertOpts::default(),
+                    )
+                    .map_err(|e| {
+                        EffectError::Handler(format!("Pattern.File.Read multi-modal: {e}"))
+                    })?;
+                    let marker = pattern_core::multimodal::marker_text_for(&meta);
+                    cx.user().push_pending_tool_attachment(part);
+                    return cx.respond(marker);
+                }
+
+                // Text path: existing loro-backed flow via get_or_open.
+                let sf = fm
+                    .get_or_open(p)
+                    .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                let content = sf
+                    .read()
+                    .map_err(|e| EffectError::Handler(format!("Pattern.File.Read: {e}")))?;
                 cx.respond(content)
             }
             FileReq::ListDir(path, glob) => {
@@ -904,7 +944,86 @@ mod tests {
         assert!(result.is_ok(), "read should succeed: {result:?}");
     }
 
+    /// File.Read on a PNG image returns a marker text via cx.respond AND pushes
+    /// a ContentPart::Binary onto the per-eval attachment side-channel.
+    /// End-to-end exercise of seam A's binary path.
+    #[tokio::test]
+    async fn read_png_image_returns_marker_and_pushes_binary_attachment() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pixel.png");
+
+        // Minimal valid 1x1 PNG (precomputed bytes — avoids pulling image crate
+        // into runtime test deps just to generate test fixtures).
+        let png_bytes: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+            0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
+            0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0x00,
+            0x00, 0x00, 0x03, 0x00, 0x01, 0x5e, 0xf3, 0x2a, 0x3a, 0x00, 0x00, 0x00,
+            0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(&file, png_bytes).unwrap();
+
+        let file_str = file.to_string_lossy().into_owned();
+        let dir_path = dir.path().to_path_buf();
+
+        let (user, _fm) = make_test_ctx_with_fm("agent-read-png", &dir_path);
+        let user_arc = std::sync::Arc::new(user);
+        let user_for_handler = user_arc.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let mut h = FileHandler;
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, user_for_handler.as_ref());
+            h.handle(FileReq::Read(file_str), &cx)
+        })
+        .await
+        .expect("blocking task");
+
+        let response = result.expect("File.Read on PNG should succeed");
+        // cx.respond returns Value-shaped result; coerce to a string for the marker check.
+        let response_str = match &response {
+            tidepool_eval::Value::String(s) => s.clone(),
+            other => panic!("expected Value::String marker, got: {other:?}"),
+        };
+
+        assert!(
+            response_str.starts_with("[image:"),
+            "marker should start with [image: ... — got: {response_str}"
+        );
+        assert!(
+            response_str.contains("image/png"),
+            "marker should name the MIME type — got: {response_str}"
+        );
+        assert!(
+            response_str.contains("pixel.png"),
+            "marker should include the filename — got: {response_str}"
+        );
+
+        // Drain the side-channel and assert a ContentPart::Binary landed there.
+        let attachments = user_arc.drain_pending_tool_attachments();
+        assert_eq!(
+            attachments.len(),
+            1,
+            "exactly one Binary attachment expected; got: {attachments:?}"
+        );
+        match &attachments[0] {
+            genai::chat::ContentPart::Binary(b) => {
+                assert_eq!(b.content_type, "image/png");
+                assert_eq!(b.name.as_deref(), Some("pixel.png"));
+                match &b.source {
+                    genai::chat::BinarySource::Base64(data) => {
+                        assert!(!data.is_empty(), "base64 payload must be non-empty");
+                    }
+                    other => panic!("expected Base64 source, got: {other:?}"),
+                }
+            }
+            other => panic!("expected ContentPart::Binary, got: {other:?}"),
+        }
+    }
+
     /// File.Open dispatches to FileManager and returns file content.
+
     #[tokio::test]
     async fn open_dispatches_to_file_manager() {
         let dir = tempfile::tempdir().unwrap();

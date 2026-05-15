@@ -67,7 +67,7 @@ pub use genai::chat::{
 /// use pattern_core::types::provider::ToolOutcome;
 /// use serde_json::json;
 ///
-/// let ok = ToolOutcome::Success(json!({"value": 42}));
+/// let ok = ToolOutcome::Success(vec![genai::chat::ContentPart::Text("42".to_string())]);
 /// let err = ToolOutcome::Error("invalid input".into());
 /// assert!(matches!(ok, ToolOutcome::Success(_)));
 /// assert!(matches!(err, ToolOutcome::Error(_)));
@@ -75,9 +75,12 @@ pub use genai::chat::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ToolOutcome {
-    /// Tool ran to completion; payload is the JSON result the agent
-    /// will see.
-    Success(serde_json::Value),
+    /// Tool ran to completion; payload is the multi-modal content the agent
+    /// will see. For text/JSON results this is a single ContentPart::Text
+    /// carrying the JSON-stringified output. For multi-modal tools (File.read of
+    /// an image, markdown extraction, etc) this is a mixed Vec carrying text +
+    /// Binary parts. Preserves fidelity end-to-end through pattern's abstractions.
+    Success(Vec<genai::chat::ContentPart>),
     /// Tool failed; payload is the human-readable error (sent back
     /// to the LLM as the tool_result content so it can recover).
     Error(String),
@@ -94,7 +97,21 @@ impl ToolOutcome {
     /// errors pass through as-is.
     pub fn to_content_string(&self) -> String {
         match self {
-            ToolOutcome::Success(v) => serde_json::to_string(v).unwrap_or_else(|_| v.to_string()),
+            ToolOutcome::Success(parts) => {
+                use genai::chat::ContentPart;
+                let mut buf: Vec<String> = Vec::new();
+                for part in parts {
+                    match part {
+                        ContentPart::Text(s) => buf.push(s.clone()),
+                        ContentPart::Binary(b) => {
+                            let label = b.name.clone().unwrap_or_else(|| b.content_type.clone());
+                            buf.push(format!("[attachment: {label}]"));
+                        }
+                        _ => {}
+                    }
+                }
+                buf.join("\n")
+            }
             ToolOutcome::Error(msg) => msg.clone(),
         }
     }
@@ -115,12 +132,11 @@ impl ToolOutcome {
 ///
 /// let r = ToolResult {
 ///     call_id: "call_123".into(),
-///     outcome: ToolOutcome::Success(json!({"ok": true})),
+///     outcome: ToolOutcome::Success(vec![genai::chat::ContentPart::Text(r#"{"ok":true}"#.to_string())]),
 /// };
 /// let wire = r.to_tool_response();
 /// assert_eq!(wire.call_id, "call_123");
-/// // to_tool_response wraps the JSON-stringified outcome as Value::String.
-/// let s = wire.content.as_str().unwrap();
+/// let s = wire.joined_text().unwrap();
 /// assert!(s.contains("\"ok\""));
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,7 +163,14 @@ impl ToolResult {
     /// string. When genai gains a native `is_error` field we widen
     /// this conversion.
     pub fn to_tool_response(&self) -> ToolResponse {
-        ToolResponse::new(self.call_id.clone(), self.outcome.to_content_string())
+        match &self.outcome {
+            ToolOutcome::Success(parts) => ToolResponse::from_parts(self.call_id.clone(), parts.clone()),
+            ToolOutcome::Error(msg) => {
+                // Error outcomes are text-only; wrap as a single Text part.
+                // When genai gains native is_error support we widen this further.
+                ToolResponse::new(self.call_id.clone(), msg.clone())
+            }
+        }
     }
 }
 
@@ -157,13 +180,15 @@ mod tool_result_tests {
 
     #[test]
     fn outcome_is_error_discriminates() {
-        assert!(!ToolOutcome::Success(serde_json::Value::Null).is_error());
+        assert!(!ToolOutcome::Success(vec![]).is_error());
         assert!(ToolOutcome::Error("boom".into()).is_error());
     }
 
     #[test]
     fn outcome_to_content_string_serialises_json() {
-        let outcome = ToolOutcome::Success(serde_json::json!({"x": 1, "y": [2, 3]}));
+        let outcome = ToolOutcome::Success(vec![genai::chat::ContentPart::Text(
+            r#"{"x":1,"y":[2,3]}"#.to_string()
+        )]);
         let s = outcome.to_content_string();
         assert!(s.contains("\"x\":1"));
         assert!(s.contains("[2,3]"));
@@ -179,14 +204,15 @@ mod tool_result_tests {
     fn tool_result_to_tool_response_preserves_call_id_and_content() {
         let r = ToolResult {
             call_id: "toolu_01ABC".into(),
-            outcome: ToolOutcome::Success(serde_json::json!({"result": 42})),
+            outcome: ToolOutcome::Success(vec![genai::chat::ContentPart::Text(r#"{"result":42}"#.to_string())]),
         };
         let wire = r.to_tool_response();
         assert_eq!(wire.call_id, "toolu_01ABC");
         // to_tool_response uses ToolResponse::new() which wraps the
         // JSON-stringified outcome as Value::String. Extract the string
         // and check that the serialized JSON is embedded within it.
-        let content_str = wire.content.as_str().expect("expected Value::String");
+        let content_str = wire.joined_text().expect("expected at least one Text part");
+        assert!(content_str.contains("\"result\":42"), "got: {content_str}");
         assert!(content_str.contains("\"result\":42"));
     }
 
@@ -200,14 +226,15 @@ mod tool_result_tests {
         assert_eq!(wire.call_id, "toolu_01XYZ");
         // Error outcomes are plain strings; Value::String comparison.
         assert_eq!(
-            wire.content,
-            serde_json::Value::String("eval timed out".into())
+            wire.joined_text().as_deref(),
+            Some("eval timed out"),
+            "expected a single Text content part"
         );
     }
 
     #[test]
     fn tool_outcome_serde_round_trip() {
-        let ok = ToolOutcome::Success(serde_json::json!({"a": 1}));
+        let ok = ToolOutcome::Success(vec![genai::chat::ContentPart::Text(r#"{"a":1}"#.to_string())]);
         let j = serde_json::to_string(&ok).unwrap();
         let back: ToolOutcome = serde_json::from_str(&j).unwrap();
         assert!(matches!(back, ToolOutcome::Success(_)));

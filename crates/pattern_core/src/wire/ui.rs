@@ -578,7 +578,22 @@ impl WireTurnEvent {
                 call_id: tr.call_id.clone(),
                 success: matches!(tr.outcome, ToolOutcome::Success(_)),
                 content_json: match &tr.outcome {
-                    ToolOutcome::Success(val) => val.to_string(),
+                    ToolOutcome::Success(parts) => {
+                        // Wire-side representation for TUI clients. For the common
+                        // single-Text case, emit the RAW inner text — no JSON-string
+                        // wrapping. TUI's parse-and-pretty path then sees the actual
+                        // JSON envelope (or raw text) without an outer escape layer to
+                        // strip. For multi-part content, emit the legacy anthropic-array
+                        // shape as a JSON string so TUI can render it as structured JSON.
+                        let tr_temp = genai::chat::ToolResponse::from_parts("", parts.clone());
+                        if let Some(text) = tr_temp.joined_text().filter(|_| {
+                            matches!(tr_temp.content.as_slice(), [genai::chat::ContentPart::Text(_)])
+                        }) {
+                            text
+                        } else {
+                            tr_temp.content_as_legacy_value().to_string()
+                        }
+                    }
                     ToolOutcome::Error(msg) => msg.clone(),
                 },
             }),
@@ -665,6 +680,11 @@ pub fn attachments_to_wire(attachments: &[MessageAttachment]) -> Vec<WireMessage
                 payload: payload.to_string(),
                 at: at.clone(),
             }),
+            // OriginHint is daemon-side composer metadata — never crosses
+            // wire to clients (TUI doesn't need to render provenance; the
+            // composer renders it inline with the user message for the LLM).
+            MessageAttachment::OriginHint { .. } => None,
+            // Future variants — drop silently.
         })
         .collect::<Vec<_>>()
 }

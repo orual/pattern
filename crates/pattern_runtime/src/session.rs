@@ -383,6 +383,13 @@ pub struct SessionContext {
     /// handler-originated attachments at turn close).
     async_reminder_queue:
         Arc<std::sync::Mutex<Vec<pattern_core::types::message::MessageAttachment>>>,
+    /// Per-eval-scope buffer for multi-modal `ContentPart` attachments pushed by
+    /// effect handlers during a single tool-call eval (e.g. File.read of an image
+    /// produces a marker Text via `cx.respond` AND pushes a `ContentPart::Binary`
+    /// onto this vec). The eval_worker drains this vec after each `compile_and_run`
+    /// success and chains the parts into the `ToolOutcome::Success` content vec.
+    /// Cleared at eval start, drained at eval end — single-threaded per session.
+    pending_tool_attachments: Arc<std::sync::Mutex<Vec<genai::chat::ContentPart>>>,
     /// Per-session file manager. `None` until session open constructs it
     /// from the mount config's `file_policy`. Wired via
     /// [`Self::with_file_manager`] inside [`TidepoolSession::open_with_agent_loop`]
@@ -847,6 +854,7 @@ impl SessionContext {
             current_dispatch_origin: Arc::new(std::sync::RwLock::new(None)),
             // v3-sandbox-io I/O subsystems (Phases 2-5).
             async_reminder_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+            pending_tool_attachments: Arc::new(std::sync::Mutex::new(Vec::new())),
             file_manager: None,
             process_manager: Arc::new(crate::process_manager::ProcessManager::new(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
@@ -1076,6 +1084,18 @@ impl SessionContext {
     ) -> &Arc<std::sync::Mutex<Vec<pattern_core::types::message::MessageAttachment>>> {
         &self.async_reminder_queue
     }
+
+    /// Push a multi-modal ContentPart onto the per-eval attachment buffer.
+    /// Drained by eval_worker after the current eval completes.
+    pub fn push_pending_tool_attachment(&self, part: genai::chat::ContentPart) {
+        self.pending_tool_attachments.lock().unwrap().push(part);
+    }
+
+    /// Drain (and reset) the per-eval attachment buffer. Called by eval_worker.
+    pub fn drain_pending_tool_attachments(&self) -> Vec<genai::chat::ContentPart> {
+        std::mem::take(&mut *self.pending_tool_attachments.lock().unwrap())
+    }
+
 
     /// Drain all pending async reminders. Called by `compose_request_for_turn`
     /// to splice attachments onto the next turn's first user message.
@@ -1317,6 +1337,7 @@ impl SessionContext {
             // A cleaner design would be `Option<Arc<...>>` populated only
             // when the child has the relevant capability.
             async_reminder_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+            pending_tool_attachments: Arc::new(std::sync::Mutex::new(Vec::new())),
             file_manager: self.file_manager.clone(),
             process_manager: Arc::new(crate::process_manager::ProcessManager::new(
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),

@@ -283,13 +283,37 @@ impl PluginConnection for OutOfProcessPluginConnection {
 
     fn health(&self) -> PluginHealth { self.health.lock().clone() }
 
+    async fn terminate(&self) {
+        // Take the Child handle out of the slot; sending it kill_on_drop is
+        // not enough during runtime teardown. Send SIGTERM explicitly so the
+        // plugin gets a chance to flush its serenity gateway + drop its iroh
+        // endpoint cleanly; then wait briefly. If still alive after the grace
+        // period, kill_on_drop on the dropped Child will SIGKILL.
+        let child_opt = self._child.lock().take();
+        let Some(mut child) = child_opt else { return };
+        let pid = child.id();
+        tracing::info!(plugin_id = %self.plugin_id, ?pid, "sending SIGTERM to OOP plugin");
+        #[cfg(unix)]
+        if let Some(pid) = pid {
+            use nix::sys::signal::{kill, Signal};
+            use nix::unistd::Pid;
+            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+        }
+        // Wait up to 2s for graceful exit. If still running, drop Child →
+        // kill_on_drop fires SIGKILL.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            child.wait(),
+        ).await;
+    }
+
     async fn port_call(
         &self,
         port_id: &pattern_core::types::port::PortId,
         method: &str,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value, pattern_core::types::port::PortError> {
-        use pattern_core::traits::plugin::wire::{WireJson, WirePortCallRequest, WirePortError};
+        use pattern_core::traits::plugin::wire::{WireJson, WirePortCallRequest};
         let req = WirePortCallRequest {
             port_id: port_id.clone(),
             method: method.into(),
