@@ -524,11 +524,48 @@ impl App {
                 }
             }
             Event::Paste(text) => {
-                // Bracketed paste: insert the pasted text into the input
-                // textarea. This preserves newlines instead of treating
-                // each line as a separate Enter keypress.
-                if self.focus == Focus::Input {
-                    self.input.insert_text(&text);
+                // Bracketed paste handling. Tries three things in order:
+                //   1. Clipboard image (via arboard) — paste of an image copied
+                //      from outside the terminal; bytes never reach the
+                //      bracketed-paste payload but live in the OS clipboard.
+                //   2. Path paste — pasted text is a file path that resolves to
+                //      a binary file (drag-drop pattern). Builds a Binary part.
+                //   3. Plain text — insert into textarea as before.
+                if self.focus != Focus::Input {
+                    return;
+                }
+                // (1) Try clipboard image first.
+                let mut attached_via_clipboard = false;
+                if let Some(clipboard) = &self.clipboard
+                    && let Ok(mut guard) = clipboard.lock()
+                    && let Ok(img) = guard.get_image()
+                {
+                    let opts = pattern_core::multimodal::BinaryConvertOpts::default();
+                    match pattern_core::multimodal::rgba_to_binary_part(
+                        img.width as u32,
+                        img.height as u32,
+                        &img.bytes,
+                        Some(format!("clipboard-{}x{}.png", img.width, img.height)),
+                        &opts,
+                    ) {
+                        Ok((part, meta)) => {
+                            self.input.push_pending_attachment(part);
+                            self.status_bar.set_notification(format!(
+                                "attached: {}",
+                                pattern_core::multimodal::marker_text_for(&meta)
+                            ));
+                            attached_via_clipboard = true;
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "clipboard image encode failed");
+                        }
+                    }
+                }
+                if !attached_via_clipboard {
+                    // (2) + (3) try_paste tries path-paste then falls through to text.
+                    if let Some(marker) = self.input.try_paste(&text) {
+                        self.status_bar.set_notification(format!("attached: {marker}"));
+                    }
                 }
             }
             _ => {}
@@ -1875,16 +1912,26 @@ fn render_input_area(area: Rect, buf: &mut Buffer, focus: Focus, input: &InputHa
         Color::DarkGray
     };
 
-    // Render prompt glyph in first column.
-    let prompt_line = Line::from(vec![Span::styled("❯ ", Style::default().fg(prompt_colour))]);
+    // Build the prompt: ❯ glyph + optional attachment-count badge.
+    let mut spans: Vec<Span<'_>> = vec![Span::styled("❯ ", Style::default().fg(prompt_colour))];
+    let attachment_count = input.pending_attachment_count();
+    let prompt_width: u16 = if attachment_count > 0 {
+        let badge = format!("⧉{attachment_count} ");
+        let badge_width = badge.chars().count() as u16 + 1;
+        spans.push(Span::styled(badge, Style::default().fg(Color::Yellow)));
+        2 + badge_width
+    } else {
+        2
+    };
+    let prompt_line = Line::from(spans);
     buf.set_line(area.x, area.y, &prompt_line, area.width);
 
-    // Render the textarea to the right of the prompt.
-    if area.width > 2 {
+    // Render the textarea to the right of the prompt + badge.
+    if area.width > prompt_width {
         let textarea_area = Rect {
-            x: area.x + 2,
+            x: area.x + prompt_width,
             y: area.y,
-            width: area.width.saturating_sub(2),
+            width: area.width.saturating_sub(prompt_width),
             height: area.height,
         };
         input.widget().render(textarea_area, buf);

@@ -43,6 +43,11 @@ pub struct InputHandler {
     max_history: usize,
     /// Current input stashed when the user starts browsing history.
     stashed_input: Option<String>,
+    /// Multi-modal attachments queued for the next submit. Path-paste
+    /// (drag-drop or pasted text that's a valid binary file path) builds a
+    /// `ContentPart::Binary` and pushes it here; the next submit includes
+    /// these alongside the typed text.
+    pending_attachments: Vec<pattern_core::types::provider::ContentPart>,
 }
 
 impl Default for InputHandler {
@@ -66,6 +71,7 @@ impl InputHandler {
             history_index: None,
             max_history: 50,
             stashed_input: None,
+            pending_attachments: Vec::new(),
         }
     }
 
@@ -122,9 +128,98 @@ impl InputHandler {
         self.textarea.lines().join("\n")
     }
 
-    /// Insert text at the cursor position. Used for bracketed paste.
+    /// Handle a bracketed-paste payload.
+    ///
+    /// If the pasted text is a single line that resolves to an existing local
+    /// file with a binary MIME (image/pdf/etc), it's intercepted and converted
+    /// into a `ContentPart::Binary` queued for the next submit — this is the
+    /// drag-drop-a-file-onto-the-terminal path.
+    ///
+    /// Returns `Some(marker)` if intercepted (caller may surface to status bar),
+    /// `None` if the paste was treated as plain text and inserted into the
+    /// textarea.
+    pub fn try_paste(&mut self, text: &str) -> Option<String> {
+        // Strip surrounding whitespace + single/double quotes (some terminals
+        // quote dragged file paths).
+        let candidate = text.trim().trim_matches(|c| c == '\'' || c == '"');
+        // Multi-line or empty paste: not a file path. Fall through to text insert.
+        if candidate.is_empty() || candidate.contains('\n') {
+            self.textarea.insert_str(text);
+            return None;
+        }
+        let path = std::path::Path::new(candidate);
+        if !path.exists() || !path.is_file() {
+            self.textarea.insert_str(text);
+            return None;
+        }
+        // Probe content-type: read a small peek + sniff via the multimodal helper.
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => {
+                self.textarea.insert_str(text);
+                return None;
+            }
+        };
+        let mime = match pattern_core::multimodal::sniff_content_type(&bytes, path) {
+            Ok(m) => m,
+            Err(_) => {
+                self.textarea.insert_str(text);
+                return None;
+            }
+        };
+        if !pattern_core::multimodal::is_binary_mime(&mime) {
+            // Text-shaped path — let user paste-edit if they want, don't auto-attach.
+            self.textarea.insert_str(text);
+            return None;
+        }
+        // It's a binary file. Build the ContentPart::Binary + stash.
+        let display = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(String::from);
+        match pattern_core::multimodal::bytes_to_binary_part(
+            bytes,
+            &mime,
+            display.clone(),
+            &pattern_core::multimodal::BinaryConvertOpts::default(),
+        ) {
+            Ok((part, meta)) => {
+                self.pending_attachments.push(part);
+                Some(pattern_core::multimodal::marker_text_for(&meta))
+            }
+            Err(_) => {
+                self.textarea.insert_str(text);
+                None
+            }
+        }
+    }
+
+    /// Legacy direct insert (no path-paste interception). Used for non-paste
+    /// text-injection callers (e.g. autocomplete completion).
     pub fn insert_text(&mut self, text: &str) {
         self.textarea.insert_str(text);
+    }
+
+    /// Number of attachments queued for the next submit.
+    pub fn pending_attachment_count(&self) -> usize {
+        self.pending_attachments.len()
+    }
+
+    /// Push a multi-modal attachment directly onto the pending queue. Used
+    /// for clipboard-image paste where the binary doesn't come through bracketed
+    /// paste text.
+    pub fn push_pending_attachment(
+        &mut self,
+        part: pattern_core::types::provider::ContentPart,
+    ) {
+        self.pending_attachments.push(part);
+    }
+
+    /// Drain (and reset) the pending attachments. Called by submit.
+    pub fn drain_pending_attachments(
+        &mut self,
+    ) -> Vec<pattern_core::types::provider::ContentPart> {
+        std::mem::take(&mut self.pending_attachments)
     }
 
     /// Number of lines in the textarea content. Used for dynamic input height.
@@ -191,7 +286,9 @@ impl InputHandler {
             };
         }
 
-        InputAction::Submit(vec![ContentPart::Text(text)])
+        let mut parts = vec![ContentPart::Text(text)];
+        parts.extend(self.drain_pending_attachments());
+        InputAction::Submit(parts)
     }
 
     /// Cycle backward through history (older entries).

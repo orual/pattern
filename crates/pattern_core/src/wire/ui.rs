@@ -156,11 +156,14 @@ pub enum WireTurnEvent {
         function_name: String,
         arguments_json: String,
     },
-    /// Tool result. Content is JSON-stringified.
+    /// Tool result. Content is a `Vec<ContentPart>` so multi-modal results
+    /// (text + binary attachments) pass through to TUI clients natively without
+    /// going through a JSON-string intermediary. ContentPart roundtrips through
+    /// postcard as confirmed by the existing `send_message` client path.
     ToolResult {
         call_id: String,
         success: bool,
-        content_json: String,
+        content: Vec<ContentPart>,
     },
     /// Agent display output (chunk/final/note).
     Display { kind: DisplayKind, text: String },
@@ -577,24 +580,9 @@ impl WireTurnEvent {
             TurnEvent::ToolResult(tr) => Some(Self::ToolResult {
                 call_id: tr.call_id.clone(),
                 success: matches!(tr.outcome, ToolOutcome::Success(_)),
-                content_json: match &tr.outcome {
-                    ToolOutcome::Success(parts) => {
-                        // Wire-side representation for TUI clients. For the common
-                        // single-Text case, emit the RAW inner text — no JSON-string
-                        // wrapping. TUI's parse-and-pretty path then sees the actual
-                        // JSON envelope (or raw text) without an outer escape layer to
-                        // strip. For multi-part content, emit the legacy anthropic-array
-                        // shape as a JSON string so TUI can render it as structured JSON.
-                        let tr_temp = genai::chat::ToolResponse::from_parts("", parts.clone());
-                        if let Some(text) = tr_temp.joined_text().filter(|_| {
-                            matches!(tr_temp.content.as_slice(), [genai::chat::ContentPart::Text(_)])
-                        }) {
-                            text
-                        } else {
-                            tr_temp.content_as_legacy_value().to_string()
-                        }
-                    }
-                    ToolOutcome::Error(msg) => msg.clone(),
+                content: match &tr.outcome {
+                    ToolOutcome::Success(parts) => parts.clone(),
+                    ToolOutcome::Error(msg) => vec![ContentPart::Text(msg.clone())],
                 },
             }),
             TurnEvent::Display { kind, text } => Some(Self::Display {

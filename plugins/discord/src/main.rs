@@ -233,12 +233,43 @@ impl EventHandler for DiscordHandler {
             BatchState { channel_id: msg.channel_id, sphere, events: Vec::new(), pending_text: String::new() },
         );
 
-        let parts = vec![ContentPart::Text(msg.content.clone())];
+        let mut parts: Vec<ContentPart> = vec![ContentPart::Text(msg.content.clone())];
+
+        // Attach binary Discord attachments (images, PDFs, etc) as multi-modal
+        // ContentPart::Binary alongside the text. Filter on Discord's reported
+        // content_type to avoid fetching text/* attachments that should stay text;
+        // for binary attachments, fetch via url_to_binary_part which sniffs the
+        // actual MIME post-fetch and skips ones the helper can't handle.
+        let opts = pattern_core::multimodal::BinaryConvertOpts::default();
+        for attachment in &msg.attachments {
+            let ct = attachment.content_type.as_deref().unwrap_or("");
+            if !ct.is_empty() && !pattern_core::multimodal::is_binary_mime(ct) {
+                tracing::debug!(filename = %attachment.filename, content_type = ct, "skipping non-binary attachment");
+                continue;
+            }
+            match pattern_core::multimodal::url_to_binary_part(&attachment.url, &opts).await {
+                Ok((part, meta)) => {
+                    tracing::info!(
+                        filename = %attachment.filename,
+                        content_type = %meta.content_type,
+                        size = meta.final_size,
+                        was_resized = meta.was_resized,
+                        "attached discord attachment as ContentPart::Binary",
+                    );
+                    parts.push(part);
+                }
+                Err(e) => {
+                    tracing::warn!(filename = %attachment.filename, error = %e, "discord attachment fetch failed; skipped");
+                }
+            }
+        }
+
         tracing::info!(
             %batch_id,
             channel_id = ch_u64,
             parts_count = parts.len(),
             first_text_len = msg.content.len(),
+            attachment_count = msg.attachments.len(),
             "submitting user-message to daemon",
         );
         if let Err(e) = self.client

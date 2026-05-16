@@ -54,7 +54,7 @@ pub enum SectionKind {
     ToolResult {
         call_id: String,
         success: bool,
-        content: String,
+        content: Vec<pattern_core::types::provider::ContentPart>,
     },
     /// Agent display output (chunk, final, or note).
     Display {
@@ -216,44 +216,91 @@ pub(super) fn extract_code_preview(arguments_json: &str, max_chars: usize) -> St
 /// Extract a readable preview from tool result content.
 /// Tries to parse as JSON and show a meaningful summary;
 /// falls back to truncated raw text.
-pub(super) fn extract_result_preview(content: &str, max_chars: usize) -> String {
-    let parsed = match serde_json::from_str::<serde_json::Value>(content) {
-        Ok(v) => v,
-        Err(_) => return truncate_preview(content, max_chars),
-    };
-    let unwrapped = unwrap_nested_json_strings(parsed);
-    match &unwrapped {
-        serde_json::Value::String(s) => truncate_preview(s, max_chars),
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        _ => {
-            let compact =
-                serde_json::to_string(&unwrapped).unwrap_or_else(|_| content.to_string());
-            truncate_preview(&compact, max_chars)
+pub(super) fn extract_result_preview(
+    content: &[pattern_core::types::provider::ContentPart],
+    max_chars: usize,
+) -> String {
+    use pattern_core::types::provider::ContentPart;
+    // Build a single-line preview: concat Text parts, substitute Binary parts
+    // with `[image:name]` or `[binary:name]` placeholders so the agent can see
+    // attachments exist without dumping base64.
+    let mut buf = String::new();
+    for part in content {
+        match part {
+            ContentPart::Text(s) => {
+                // Try JSON-pretty unwrap for nested-JSON strings (e.g. shell envelopes).
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
+                    let unwrapped = unwrap_nested_json_strings(parsed);
+                    if let Ok(compact) = serde_json::to_string(&unwrapped) {
+                        buf.push_str(&compact);
+                        continue;
+                    }
+                }
+                buf.push_str(s);
+            }
+            ContentPart::Binary(b) => {
+                let kind = if b.content_type.starts_with("image/") {
+                    "image"
+                } else if b.content_type == "application/pdf" {
+                    "document"
+                } else {
+                    "binary"
+                };
+                let name = b.name.as_deref().unwrap_or("<unnamed>");
+                buf.push_str(&format!("[{kind}: {name}, {}]", b.content_type));
+            }
+            _ => {}
         }
     }
+    truncate_preview(&buf, max_chars)
 }
 
 /// Format tool result content for display. Unescapes the wire JSON encoding,
 /// tries to pretty-print nested JSON, and unescapes \n in string values.
-pub(super) fn format_result_content(content: &str) -> String {
-    // Try to parse the wire content. If it's not JSON, return raw.
-    let parsed = match serde_json::from_str::<serde_json::Value>(content) {
-        Ok(v) => v,
-        Err(_) => return content.to_string(),
-    };
-    // Recursively unwrap nested JSON-encoded strings throughout the value.
-    // Common case: tool results return arrays/objects where some leaf is
-    // itself a JSON-encoded string (e.g. Shell.execute envelopes).
-    let unwrapped = unwrap_nested_json_strings(parsed);
-    // For a String leaf, return raw (no surrounding quotes). Otherwise pretty-print.
-    match &unwrapped {
-        serde_json::Value::String(s) => s.replace("\\n", "\n"),
-        other => serde_json::to_string_pretty(other)
-            .unwrap_or_else(|_| content.to_string())
-            .replace("\\n", "\n"),
+pub(super) fn format_result_content(
+    content: &[pattern_core::types::provider::ContentPart],
+) -> String {
+    use pattern_core::types::provider::ContentPart;
+    let mut buf = String::new();
+    for (i, part) in content.iter().enumerate() {
+        if i > 0 {
+            buf.push('\n');
+        }
+        match part {
+            ContentPart::Text(s) => {
+                // Pretty-print if it's nested JSON; otherwise show raw text.
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
+                    let unwrapped = unwrap_nested_json_strings(parsed);
+                    match &unwrapped {
+                        serde_json::Value::String(inner) => {
+                            buf.push_str(&inner.replace("\\n", "\n"));
+                        }
+                        other => {
+                            let pretty = serde_json::to_string_pretty(other)
+                                .unwrap_or_else(|_| s.clone())
+                                .replace("\\n", "\n");
+                            buf.push_str(&pretty);
+                        }
+                    }
+                } else {
+                    buf.push_str(s);
+                }
+            }
+            ContentPart::Binary(b) => {
+                let kind = if b.content_type.starts_with("image/") {
+                    "image"
+                } else if b.content_type == "application/pdf" {
+                    "document"
+                } else {
+                    "binary"
+                };
+                let name = b.name.as_deref().unwrap_or("<unnamed>");
+                buf.push_str(&format!("[{kind}: {name}, {}]", b.content_type));
+            }
+            _ => {}
+        }
     }
+    buf
 }
 
 /// Walk a Value tree; for every String leaf that itself parses as JSON,
@@ -408,12 +455,12 @@ impl RenderBatch {
             WireTurnEvent::ToolResult {
                 call_id,
                 success,
-                content_json,
+                content,
             } => {
                 self.sections.push(Section::new(SectionKind::ToolResult {
                     call_id: call_id.clone(),
                     success: *success,
-                    content: content_json.clone(),
+                    content: content.clone(),
                 }));
             }
             WireTurnEvent::Display { kind, text } => {

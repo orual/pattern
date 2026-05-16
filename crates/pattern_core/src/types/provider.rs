@@ -44,9 +44,10 @@ use smol_str::SmolStr;
 // Pattern does not define parallel types for these — the gateway consumes
 // genai types directly.
 pub use genai::chat::{
-    CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatResponse, ChatRole, ChatStream,
-    ChatStreamEvent, ChatStreamResponse, ContentPart, ReasoningEffort, StreamChunk, StreamEnd,
-    SystemBlock, Tool, ToolCall, ToolChunk, ToolResponse, Usage,
+    Binary, BinarySource, CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatResponse,
+    ChatRole, ChatStream, ChatStreamEvent, ChatStreamResponse, ContentPart, MessageContent,
+    ReasoningEffort, StreamChunk, StreamEnd, SystemBlock, Tool, ToolCall, ToolChunk, ToolResponse,
+    Usage,
 };
 
 // ---- ToolOutcome / ToolResult (Pattern-side tool-eval bookkeeping) ----

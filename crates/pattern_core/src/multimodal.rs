@@ -444,3 +444,32 @@ pub async fn fetch_markdown_images(
     }
     MarkdownImageFetchResult { parts, skipped }
 }
+
+// ---- Raw RGBA → PNG → Binary (clipboard paste path) ----
+
+/// Convert raw RGBA8 pixel data into a `ContentPart::Binary` PNG.
+///
+/// Used by the TUI clipboard-image-paste path: arboard returns an
+/// `ImageData { width, height, bytes }` with bytes in RGBA8 layout;
+/// this helper encodes that as PNG and routes through `bytes_to_binary_part`
+/// so the standard resize/marker pipeline applies.
+pub fn rgba_to_binary_part(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    display_name: Option<String>,
+    opts: &BinaryConvertOpts,
+) -> Result<(ContentPart, BinaryMeta), MultimodalError> {
+    // Build an image::ImageBuffer from raw RGBA, then encode as PNG.
+    let buf = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, rgba.to_vec())
+        .ok_or_else(|| MultimodalError::ImageDecode(image::ImageError::Parameter(
+            image::error::ParameterError::from_kind(
+                image::error::ParameterErrorKind::DimensionMismatch,
+            ),
+        )))?;
+    let mut png_bytes: Vec<u8> = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut png_bytes);
+    image::DynamicImage::ImageRgba8(buf)
+        .write_to(&mut cursor, image::ImageFormat::Png)?;
+    bytes_to_binary_part(png_bytes, "image/png", display_name, opts)
+}

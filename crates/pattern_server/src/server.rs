@@ -2933,15 +2933,11 @@ fn build_turn_input(msg: &AgentMessage, session_agent_id: &str) -> TurnInput {
     // "pattern-default").
     let agent_id = CoreAgentId::from(session_agent_id.to_string());
 
+    // Preserve the full Vec<ContentPart> (Text + Binary) end-to-end —
+    // MessageContent::from_parts keeps multi-modal content intact rather than
+    // flattening to text and silently dropping attachments.
     let chat_msg = ChatMessage::user(
-        msg.parts
-            .iter()
-            .filter_map(|p| match p {
-                ContentPart::Text(s) => Some(s.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join(""),
+        pattern_core::types::provider::MessageContent::from_parts(msg.parts.clone()),
     );
 
     // Always attach an OriginHint so the composer can render typed
@@ -3051,18 +3047,8 @@ fn message_to_wire_events(
     if db_msg.role == MessageRole::Tool {
         for part in chat_msg.content.parts() {
             if let Some(tr) = part.as_tool_response() {
-                // Determine success based on content structure.
-                // For single-Text content, emit raw inner text (no JSON-string wrap) so
-                // TUI doesn't need to unwrap escapes. For multi-part, emit the legacy
-                // anthropic-array shape as JSON so TUI can render structurally.
-                let content_json = if matches!(
-                    tr.content.as_slice(),
-                    [ContentPart::Text(_)]
-                ) {
-                    tr.joined_text().unwrap_or_default()
-                } else {
-                    tr.content_as_legacy_value().to_string()
-                };
+                // Pass Vec<ContentPart> through natively to the TUI — postcard handles
+                // ContentPart roundtrip via the existing send_message client path.
                 let joined = tr.joined_text().unwrap_or_default();
                 let success = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&joined) {
                     !parsed.as_object().is_some_and(|obj| obj.contains_key("error"))
@@ -3072,7 +3058,7 @@ fn message_to_wire_events(
                 events.push(WireTurnEvent::ToolResult {
                     call_id: tr.call_id.clone(),
                     success,
-                    content_json,
+                    content: tr.content.clone(),
                 });
             }
         }
@@ -3107,9 +3093,21 @@ fn estimate_batch_tokens(user_message: &Option<String>, events: &[WireTurnEvent]
                 total_chars += function_name.len();
                 total_chars += arguments_json.len();
             }
-            // ToolResult: count the full JSON content string
-            WireTurnEvent::ToolResult { content_json, .. } => {
-                total_chars += content_json.len();
+            // ToolResult: count text part lengths; binary parts contribute their
+            // base64-encoded byte size as a coarse proxy (will overcount slightly
+            // vs server-side token shaping, fine for heuristic).
+            WireTurnEvent::ToolResult { content, .. } => {
+                for p in content {
+                    match p {
+                        ContentPart::Text(s) => total_chars += s.len(),
+                        ContentPart::Binary(b) => {
+                            if let pattern_core::types::provider::BinarySource::Base64(data) = &b.source {
+                                total_chars += data.len();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
             WireTurnEvent::Display { text, .. } => total_chars += text.len(),
             WireTurnEvent::MessageSent {
