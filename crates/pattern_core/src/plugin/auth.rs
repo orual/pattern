@@ -144,7 +144,7 @@ mod tests {
 use std::sync::Arc;
 
 use iroh::endpoint::Connection;
-use iroh::protocol::{AcceptError, ProtocolHandler};
+use iroh::protocol::{AcceptError, DynProtocolHandler, ProtocolHandler};
 
 /// Error returned when an incoming connection's pubkey isn't in the daemon's allow-list.
 /// Wrapped into `AcceptError::User` because `AcceptError::NotAllowed`'s constructor is
@@ -336,41 +336,72 @@ impl PluginRouteTable {
     }
 }
 
-/// iroh `ProtocolHandler` wrapper that consults [`PluginRouteTable`] at accept-time.
-/// Replacement for [`AuthGatedProtocolHandler`] when the allow-list is session-scoped
-/// rather than static. V1 dispatches all allowed connections to the same inner handler;
-/// later phases will route to per-session host handlers via the route entry's session_id.
-#[derive(Debug, Clone)]
-pub struct SessionRoutingProtocolHandler<H> {
+/// iroh `ProtocolHandler` wrapper that consults [`PluginRouteTable`] at accept-time
+/// and dispatches to the per-session host handler registered by `TidepoolSession`.
+///
+/// Sessions register their host handler (carrying their `HostApiContext`) at session-open;
+/// the routing handler looks up by `RouteSessionId` from the route entry. If no handler
+/// is registered for that session_id (race between plugin dial + session open / close),
+/// the connection is rejected. Pre-A.2 the inner handler was a single daemon-wide stub;
+/// post-A.2 each session owns its own handler with full HostApiContext access.
+#[derive(Debug, Default, Clone)]
+pub struct SessionRoutingProtocolHandler {
     routes: Arc<PluginRouteTable>,
-    inner: H,
+    handlers: Arc<dashmap::DashMap<RouteSessionId, Arc<dyn DynProtocolHandler>>>,
 }
 
-impl<H> SessionRoutingProtocolHandler<H> {
-    pub fn new(routes: Arc<PluginRouteTable>, inner: H) -> Self {
-        Self { routes, inner }
+impl SessionRoutingProtocolHandler {
+    pub fn new(routes: Arc<PluginRouteTable>) -> Self {
+        Self {
+            routes,
+            handlers: Arc::new(dashmap::DashMap::new()),
+        }
     }
 
     pub fn routes(&self) -> &PluginRouteTable {
         &self.routes
     }
+
+    /// Register a per-session protocol handler. Called by `TidepoolSession::open`
+    /// after spawning the session's host_handler with its HostApiContext.
+    pub fn register_handler(&self, session_id: RouteSessionId, handler: Arc<dyn DynProtocolHandler>) {
+        self.handlers.insert(session_id, handler);
+    }
+
+    /// Remove a session's handler. Called on session drop.
+    pub fn unregister_handler(&self, session_id: &RouteSessionId) {
+        self.handlers.remove(session_id);
+    }
 }
 
-impl<H> ProtocolHandler for SessionRoutingProtocolHandler<H>
-where
-    H: ProtocolHandler,
-{
+impl ProtocolHandler for SessionRoutingProtocolHandler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let remote = conn.remote_id();
         match self.routes.lookup(&remote) {
             Some(entry) => {
-                tracing::debug!(
-                    plugin_id = %entry.plugin_id,
-                    session_id = %entry.session_id,
-                    remote = %remote,
-                    "plugin route: allowed"
-                );
-                self.inner.accept(conn).await
+                let handler = self.handlers.get(&entry.session_id).map(|h| h.clone());
+                match handler {
+                    Some(h) => {
+                        tracing::debug!(
+                            plugin_id = %entry.plugin_id,
+                            session_id = %entry.session_id,
+                            remote = %remote,
+                            "plugin route: allowed, dispatching to per-session handler"
+                        );
+                        h.accept(conn).await
+                    }
+                    None => {
+                        tracing::warn!(
+                            plugin_id = %entry.plugin_id,
+                            session_id = %entry.session_id,
+                            remote = %remote,
+                            "plugin route: rejected (session_id in route table but no handler registered \
+                             — race between dial + session open/close, or session drop without unregister)"
+                        );
+                        conn.close(1u32.into(), b"session handler not registered");
+                        Err(AcceptError::from_err(PluginAuthRejected { pubkey: remote }))
+                    }
+                }
             }
             None => {
                 tracing::warn!(
@@ -384,7 +415,11 @@ where
     }
 
     async fn shutdown(&self) {
-        self.inner.shutdown().await
+        // Shut down each registered per-session handler.
+        let handlers: Vec<_> = self.handlers.iter().map(|e| e.value().clone()).collect();
+        for h in handlers {
+            h.shutdown().await;
+        }
     }
 }
 

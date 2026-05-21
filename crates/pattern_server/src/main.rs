@@ -197,26 +197,15 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
         .expect("freshly-spawned server client must be local");
     let handler = PatternProtocol::remote_handler(local);
 
-    // Plugin-host accept (Phase 6 Task 5b). v1 stub handler — returns
-    // Unimplemented for all 17 PluginHostProtocol variants until 5c+ wires
-    // real dispatch into the runtime plugin registry.
+    // Plugin-host accept (Phase A.2 — per-session dispatch). Sessions register
+    // their own host_handler at open time, carrying a HostApiContext bundle for
+    // dispatch into the session's runtime state. Daemon main just constructs the
+    // routing handler + route table; sessions populate the per-session lookup.
     use pattern_core::plugin::auth::SessionRoutingProtocolHandler;
-    use pattern_core::plugin::protocol::{PLUGIN_HOST_ALPN, PluginHostProtocol};
+    use pattern_core::plugin::protocol::PLUGIN_HOST_ALPN;
     use std::sync::Arc;
 
-    let host_client = pattern_runtime::plugin::host_handler::spawn();
-    let host_local = host_client
-        .as_local()
-        .expect("freshly-spawned host client must be local");
-    let host_handler = PluginHostProtocol::remote_handler(host_local);
-
-    // Session-routing handler wraps host handler with the daemon-shared
-    // route table (built earlier + passed into SessionConfig so sessions populate
-    // it at open).
-    let gated_host = SessionRoutingProtocolHandler::new(
-        Arc::clone(&plugin_routes),
-        irpc_iroh::IrohProtocol::new(host_handler),
-    );
+    let gated_host = SessionRoutingProtocolHandler::new(Arc::clone(&plugin_routes));
 
     // Multi-ALPN router. pattern/1 carries the TUI/client protocol;
     // pattern-plugin-host/1 carries Plugin→Runtime callbacks + memory ops,

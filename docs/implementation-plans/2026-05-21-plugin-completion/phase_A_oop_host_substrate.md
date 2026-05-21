@@ -51,7 +51,19 @@ All 17 host-side variants dispatch into the runtime registry + return real value
 - Commit: `chore(plugin): Result-wrap Vec-returning host protocol variants`
 
 ### A.2 — Wire real dispatch into host_handler
-Each variant gets a real implementation. Handler needs access to runtime state (memory store, task graph, agent registry, skill loader). Currently `spawn()` takes no args; needs to accept a `HostApiContext { memory, tasks, skills, registry, ... }` or equivalent.
+
+Each variant gets a real implementation. Handler needs access to runtime state (memory store, task graph, agent registry, skill loader).
+
+**Design decision (2026-05-21, orual confirmed option a):** per-session host_handler, not daemon-wide. Each `TidepoolSession` spawns its own host_handler instance with its own `HostApiContext { memory, tasks, skills, agent_registry, ... }` bundle. `SessionRoutingProtocolHandler` looks up the right handler by `session_id` from the route entry on each accept.
+
+Rationale: state is session-scoped (each session has its own AgentRegistry, memory store, etc). Trying to centralize would require a registry-of-registries with cross-mount lookup that doesn't match the session-aware-routing decision from phase 6.
+
+Implementation shape:
+- `pattern_core::plugin::auth`: extend `SessionRoutingProtocolHandler` from `inner: H` to a per-session lookup. Add a `HashMap<RouteSessionId, Arc<dyn ProtocolHandler + Send + Sync>>` or factory closure. The doc-comment in `pattern_core/src/plugin/auth.rs` already anticipates this ("V1 dispatches all allowed connections to the same inner handler; later phases will route to per-session host handlers via the route entry's session_id").
+- `pattern_runtime::plugin::host_handler::spawn`: accept a `HostApiContext`. Handler closes over the bundle for dispatch.
+- `pattern_runtime::session::TidepoolSession::open`: spawn the session's host_handler at open time + register it with the daemon-shared SessionRoutingProtocolHandler. Unregister on session drop.
+- `pattern_server::main`: stop constructing a single daemon-wide host_handler. The SessionRoutingProtocolHandler is now session-handler-aware; daemon main just constructs the routing handler + route table, sessions populate from there.
+
 
 Sub-tasks (one per variant group, each a commit):
 - **A.2a HostSendMessage**: dispatch into `agent_registry.send_to(agent_id, ...)`

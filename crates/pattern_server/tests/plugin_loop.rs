@@ -104,9 +104,11 @@ impl Harness {
             .as_local()
             .expect("freshly-spawned host client is local");
         let host_handler_proto = PluginHostProtocol::remote_handler(host_local);
-        let gated_host = SessionRoutingProtocolHandler::new(
-            Arc::clone(&plugin_routes),
-            IrohProtocol::new(host_handler_proto),
+        // Per-session dispatch: register the test session's handler with the routing handler.
+        let gated_host = SessionRoutingProtocolHandler::new(Arc::clone(&plugin_routes));
+        gated_host.register_handler(
+            "test-session".into(),
+            Arc::new(IrohProtocol::new(host_handler_proto)),
         );
         let daemon_router = Router::builder(daemon_endpoint.clone())
             .accept(PLUGIN_HOST_ALPN, gated_host)
