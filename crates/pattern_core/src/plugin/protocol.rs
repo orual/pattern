@@ -107,7 +107,7 @@ pub enum PluginHostProtocol {
     HostTaskTransition(WireTaskTransition),
     #[rpc(tx = oneshot::Sender<Result<(), WirePluginError>>)]
     HostTaskLink(WireTaskLink),
-    #[rpc(tx = oneshot::Sender<Vec<WireTaskItem>>)]
+    #[rpc(tx = oneshot::Sender<Result<Vec<WireTaskItem>, WirePluginError>>)]
     HostTaskQuery(WireTaskQuery),
     #[rpc(tx = oneshot::Sender<Result<WireSkillInvocation, WirePluginError>>)]
     HostSkillInvoke(WireSkillInvoke),
@@ -121,11 +121,11 @@ pub enum PluginHostProtocol {
     #[wrap(MemoryDeleteBlockRequest)]
     MemoryDeleteBlock(BlockAddr),
     /// FTS5 / vector memory search.
-    #[rpc(tx = oneshot::Sender<Vec<WireSearchResult>>)]
+    #[rpc(tx = oneshot::Sender<Result<Vec<WireSearchResult>, WireMemoryError>>)]
     #[wrap(MemorySearchRequest)]
     MemorySearch(WireSearchQuery),
     /// Enumerate blocks matching the filter.
-    #[rpc(tx = oneshot::Sender<Vec<BlockMetadata>>)]
+    #[rpc(tx = oneshot::Sender<Result<Vec<BlockMetadata>, WireMemoryError>>)]
     MemoryListBlocks(BlockFilter),
     /// Persist a block to disk (explicit flush).
     #[rpc(tx = oneshot::Sender<Result<(), WireMemoryError>>)]
@@ -148,7 +148,7 @@ pub enum PluginHostProtocol {
     #[rpc(tx = oneshot::Sender<Result<(), WireMemoryError>>)]
     MemoryInsertArchival(ArchivalEntry),
     /// Search archival entries by content.
-    #[rpc(tx = oneshot::Sender<Vec<ArchivalEntry>>)]
+    #[rpc(tx = oneshot::Sender<Result<Vec<ArchivalEntry>, WireMemoryError>>)]
     #[wrap(MemorySearchArchivalRequest)]
     MemorySearchArchival(WireSearchQuery),
     /// Delete a single archival entry by id.

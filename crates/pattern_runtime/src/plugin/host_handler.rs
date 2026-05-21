@@ -40,18 +40,18 @@ async fn handle(msg: PluginHostMessage) {
         HostTaskCreate(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(pe("HostTaskCreate"))).await; }
         HostTaskTransition(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(pe("HostTaskTransition"))).await; }
         HostTaskLink(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(pe("HostTaskLink"))).await; }
-        HostTaskQuery(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Vec::new()).await; }
+        HostTaskQuery(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(pe("HostTaskQuery"))).await; }
         HostSkillInvoke(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(pe("HostSkillInvoke"))).await; }
         MemoryCreateBlock(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(me("MemoryCreateBlock"))).await; }
         MemoryDeleteBlock(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(me("MemoryDeleteBlock"))).await; }
-        MemorySearch(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Vec::new()).await; }
-        MemoryListBlocks(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Vec::new()).await; }
+        MemorySearch(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(me("MemorySearch"))).await; }
+        MemoryListBlocks(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(me("MemoryListBlocks"))).await; }
         MemoryPersist(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(me("MemoryPersist"))).await; }
         MemoryUpdateMetadata(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(me("MemoryUpdateMetadata"))).await; }
         MemoryUndoRedo(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(me("MemoryUndoRedo"))).await; }
         MemoryGetSharedBlock(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(me("MemoryGetSharedBlock"))).await; }
         MemoryInsertArchival(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(me("MemoryInsertArchival"))).await; }
-        MemorySearchArchival(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Vec::new()).await; }
+        MemorySearchArchival(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(me("MemorySearchArchival"))).await; }
         MemoryDeleteArchival(req) => { let WithChannels { tx, .. } = req; let _ = tx.send(Err(me("MemoryDeleteArchival"))).await; }
     }
 }
