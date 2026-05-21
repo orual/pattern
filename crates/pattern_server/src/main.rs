@@ -86,6 +86,9 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
     // (SessionRoutingProtocolHandler) so accept-time pubkey lookup hits the
     // same table.
     let plugin_routes = Arc::new(pattern_core::plugin::auth::PluginRouteTable::new());
+    let gated_host_arc = Arc::new(pattern_core::plugin::auth::SessionRoutingProtocolHandler::new(
+        Arc::clone(&plugin_routes),
+    ));
 
     // Bind iroh endpoint FIRST so SessionConfig can hold it for native-plugin
     // OOP spawn at session-open. Phase 6 Task 5 — replaces noq-cert-pinning
@@ -184,6 +187,7 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
             provider,
             port_registry,
             plugin_routes: Some(Arc::clone(&plugin_routes)),
+            plugin_routing_handler: Some(Arc::clone(&gated_host_arc)),
             daemon_endpoint: Some(endpoint.clone()),
         };
 
@@ -199,13 +203,13 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
 
     // Plugin-host accept (Phase A.2 — per-session dispatch). Sessions register
     // their own host_handler at open time, carrying a HostApiContext bundle for
-    // dispatch into the session's runtime state. Daemon main just constructs the
-    // routing handler + route table; sessions populate the per-session lookup.
-    use pattern_core::plugin::auth::SessionRoutingProtocolHandler;
+    // dispatch into the session's runtime state. Daemon main constructed the
+    // routing handler above + threaded it into SessionConfig; here we clone the
+    // struct (cheap — internal Arcs) to attach to the iroh Router.
     use pattern_core::plugin::protocol::PLUGIN_HOST_ALPN;
     use std::sync::Arc;
 
-    let gated_host = SessionRoutingProtocolHandler::new(Arc::clone(&plugin_routes));
+    let gated_host = (*gated_host_arc).clone();
 
     // Multi-ALPN router. pattern/1 carries the TUI/client protocol;
     // pattern-plugin-host/1 carries Plugin→Runtime callbacks + memory ops,

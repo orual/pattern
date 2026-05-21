@@ -31,6 +31,7 @@ fn make_config() -> SessionConfig {
         provider: Arc::new(NopProviderClient),
         port_registry,
         plugin_routes: None,
+        plugin_routing_handler: None,
         daemon_endpoint: None,
     }
 }

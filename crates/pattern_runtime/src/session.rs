@@ -419,6 +419,11 @@ pub struct SessionContext {
     /// Daemon-shared plugin route table (pubkey → session_id). Populated at
     /// session-open from the registry; entries removed at session drop.
     plugin_routes: Option<Arc<pattern_core::plugin::auth::PluginRouteTable>>,
+    /// Daemon-shared session-routing protocol handler. Sessions register their
+    /// per-session host handler at open (carrying their HostApiContext bundle)
+    /// and unregister on drop. None disables OOP plugin host-callback dispatch
+    /// for this session.
+    plugin_routing_handler: Option<Arc<pattern_core::plugin::auth::SessionRoutingProtocolHandler>>,
     /// Daemon iroh endpoint used to dial spawned plugin processes for the
     /// guest-side `pattern-plugin-guest/1` ALPN. Required to construct
     /// `OutOfProcessPluginConnection` for native plugins at session-open.
@@ -783,6 +788,16 @@ impl Drop for SessionContext {
                 );
             }
         }
+        // Phase A.2b: unregister this session's host_handler so the routing
+        // handler stops dispatching to a dropped session.
+        if let Some(routing_handler) = self.plugin_routing_handler.as_ref() {
+            let session_id: smol_str::SmolStr = self.agent_id.to_string().into();
+            routing_handler.unregister_handler(&session_id);
+            tracing::debug!(
+                session = %session_id,
+                "unregistered per-session host_handler on session-context drop"
+            );
+        }
     }
 }
 
@@ -821,6 +836,7 @@ impl SessionContext {
         Self {
             plugin_registry: None,
             plugin_routes: None,
+            plugin_routing_handler: None,
             daemon_endpoint: None,
             agent_id,
             default_scope,
@@ -1044,6 +1060,23 @@ impl SessionContext {
         routes: Arc<pattern_core::plugin::auth::PluginRouteTable>,
     ) -> Self {
         self.plugin_routes = Some(routes);
+        self
+    }
+
+    /// Daemon-shared session-routing protocol handler. Sessions register their
+    /// per-session host handler with this at open time.
+    pub fn plugin_routing_handler(
+        &self,
+    ) -> Option<&Arc<pattern_core::plugin::auth::SessionRoutingProtocolHandler>> {
+        self.plugin_routing_handler.as_ref()
+    }
+
+    /// Set the session-routing protocol handler (daemon-shared).
+    pub fn with_plugin_routing_handler(
+        mut self,
+        handler: Arc<pattern_core::plugin::auth::SessionRoutingProtocolHandler>,
+    ) -> Self {
+        self.plugin_routing_handler = Some(handler);
         self
     }
 
@@ -1353,6 +1386,7 @@ impl SessionContext {
             hook_bridge: self.hook_bridge.clone(),
             plugin_registry: self.plugin_registry.clone(),
             plugin_routes: self.plugin_routes.clone(),
+            plugin_routing_handler: self.plugin_routing_handler.clone(),
             daemon_endpoint: self.daemon_endpoint.clone(),
             // Each ephemeral child gets a fresh session_id (so its
             // PortHandler subscription channels don't collide with the
@@ -1999,6 +2033,10 @@ pub struct SessionRegistries {
     /// SessionRoutingProtocolHandler can route incoming OOP plugin connections
     /// to this session. None leaves OOP plugins unreachable for this session.
     pub plugin_routes: Option<Arc<pattern_core::plugin::auth::PluginRouteTable>>,
+    /// Optional daemon-shared session-routing handler. Sessions register their
+    /// per-session host handler into this at open so plugin dials get dispatched
+    /// to the right session. None leaves OOP plugin host-callbacks disabled.
+    pub plugin_routing_handler: Option<Arc<pattern_core::plugin::auth::SessionRoutingProtocolHandler>>,
     /// Optional daemon iroh endpoint. Required to spawn native (OOP) plugins
     /// at session-open. `None` disables native plugin spawn (CC plugins work).
     pub daemon_endpoint: Option<iroh::Endpoint>,
@@ -2491,6 +2529,14 @@ impl TidepoolSession {
                 ctx
             };
 
+            // Wire daemon-shared session-routing handler if supplied. Sessions
+            // register their per-session host handler with this at open + unregister on drop.
+            let ctx = if let Some(h) = regs.plugin_routing_handler {
+                ctx.with_plugin_routing_handler(h)
+            } else {
+                ctx
+            };
+
             // Wire daemon iroh endpoint for OOP plugin spawn at session-open.
             let ctx = if let Some(endpoint) = regs.daemon_endpoint {
                 ctx.with_daemon_endpoint(endpoint)
@@ -2780,6 +2826,52 @@ impl TidepoolSession {
                             "plugin route registered",
                         );
                     }
+                }
+            }
+
+            // Phase A.2b: register a per-session host_handler with the daemon-shared
+            // routing handler. v1 the handler is a stub (returns Unimplemented for all
+            // PluginHostProtocol variants); A.2c will thread real dispatch via HostApiContext.
+            // Drop side: unregister in TidepoolSession::Drop (below).
+            if let Some(routing_handler) = session.ctx.plugin_routing_handler() {
+                use irpc::rpc::RemoteService;
+                use pattern_core::plugin::protocol::PluginHostProtocol;
+                let session_id: smol_str::SmolStr = session.ctx.agent_id().to_string().into();
+                // Build the HostApiContext from the session's runtime registries.
+                // agent_registry is Option<…>; skip handler registration if absent
+                // (test paths without an AgentRegistry shouldn't register a handler
+                // that can't dispatch HostSendMessage anyway).
+                let host_ctx = session.ctx.agent_registry().map(|reg| {
+                    crate::plugin::host_handler::HostApiContext {
+                        memory_store: session.ctx.memory_store(),
+                        agent_registry: Arc::clone(reg),
+                        session_agent_id: pattern_core::AgentId::from(session.ctx.agent_id()),
+                        default_scope: session.ctx.default_scope().clone(),
+                        db: Arc::clone(session.ctx.db()),
+                    }
+                });
+                let host_client = if let Some(ctx) = host_ctx {
+                    Some(crate::plugin::host_handler::spawn(ctx))
+                } else {
+                    tracing::warn!(
+                        session = %session_id,
+                        "no agent_registry on session ctx — skipping per-session host_handler registration",
+                    );
+                    None
+                };
+                if let Some(host_client) = host_client
+                    && let Some(host_local) = host_client.as_local() {
+                    let host_proto = PluginHostProtocol::remote_handler(host_local);
+                    routing_handler.register_handler(
+                        session_id.clone(),
+                        std::sync::Arc::new(irpc_iroh::IrohProtocol::new(host_proto)),
+                    );
+                    tracing::debug!(session = %session_id, "per-session host_handler registered");
+                } else {
+                    tracing::warn!(
+                        session = %session_id,
+                        "freshly-spawned host client unexpectedly remote — host_handler not registered",
+                    );
                 }
             }
 

@@ -99,7 +99,22 @@ impl Harness {
             plugin_id.clone(),
             "test-session".into(),
         ).expect("register fixture route");
-        let host_client = host_handler::spawn();
+        // Build a minimal HostApiContext for the test session. The fixture plugin
+        // doesn't actually exercise host callbacks (it only handles guest-side lifecycle),
+        // but the handler needs valid context to spawn. In-memory primitives suffice.
+        let test_db = Arc::new(
+            pattern_db::ConstellationDb::open_in_memory().expect("open in-memory db"),
+        );
+        let test_cache = Arc::new(pattern_memory::cache::MemoryCache::new(Arc::clone(&test_db)));
+        let test_agent_registry = Arc::new(pattern_runtime::agent_registry::AgentRegistry::new());
+        let host_api_ctx = pattern_runtime::plugin::host_handler::HostApiContext {
+            memory_store: test_cache as Arc<dyn pattern_core::traits::memory_store::MemoryStore>,
+            agent_registry: test_agent_registry,
+            session_agent_id: pattern_core::AgentId::from("test-session"),
+            default_scope: pattern_core::types::memory_types::Scope::Global("test-session".into()),
+            db: test_db,
+        };
+        let host_client = host_handler::spawn(host_api_ctx);
         let host_local = host_client
             .as_local()
             .expect("freshly-spawned host client is local");
