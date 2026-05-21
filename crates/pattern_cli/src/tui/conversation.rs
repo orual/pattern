@@ -469,11 +469,19 @@ fn render_section(
             let header = Line::from(format!(" {arrow} attachments"));
             buf.set_line(area.x, y, &header, area.width);
             y += 1;
-            for attachment in a {
-                let text = ratatui::text::Text::styled(attachment, style);
-                let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
-                let inner = indented_area(area);
-                y = render_paragraph_lines(&paragraph, inner, buf, y, viewport_bottom, skip_lines);
+            // Only render attachment bodies when the section is expanded.
+            // Each attachment is a (potentially 16KB) string that goes through
+            // Paragraph wrap iteration every frame; doing this for a collapsed
+            // section is pure overhead, and post-compaction memory-dump
+            // snapshots are big enough to make scrolling laggy when they're
+            // anywhere near the viewport.
+            if !section.collapsed {
+                for attachment in a {
+                    let text = ratatui::text::Text::styled(attachment, style);
+                    let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
+                    let inner = indented_area(area);
+                    y = render_paragraph_lines(&paragraph, inner, buf, y, viewport_bottom, skip_lines);
+                }
             }
             y
         }

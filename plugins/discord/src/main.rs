@@ -33,7 +33,7 @@ use pattern_plugin_sdk::{
     PortEvent, PortId, PortMetadata,
 };
 use serde::Deserialize;
-use serenity::all::{ChannelId, GatewayIntents, Http, Message, Ready};
+use serenity::all::{Channel, ChannelId, GatewayIntents, Http, Message, Ready};
 use serenity::client::{Client, Context, EventHandler};
 use smol_str::SmolStr;
 use tokio::sync::{Mutex, OnceCell};
@@ -101,8 +101,78 @@ struct DiscordPort {
     state: Arc<DiscordState>,
 }
 
+/// Resolve subscription match: direct channel ID or any-ancestor (parent walked one level).
+/// Forum channels in discord don't dispatch messages themselves — only their child threads do.
+/// Subscribing to a forum parent should still catch thread-in-forum messages; we accomplish that
+/// by checking msg.channel_id first, then the thread's parent_id.
+///
+/// Cache lookup path: serenity stores guild text channels in Guild::channels and active threads
+/// in Guild::threads (post-MessageCreate, the thread is guaranteed cached). For DMs guild_id is
+/// None and we just check direct-match; DMs have no parent.
+async fn channel_or_parent_active(
+    state: &DiscordState,
+    ctx: &Context,
+    channel_id: ChannelId,
+    guild_id: Option<serenity::all::GuildId>,
+) -> bool {
+    let ch_u64: u64 = channel_id.into();
+    {
+        let active = state.active_channels.lock().await;
+        if active.contains(&ch_u64) { return true; }
+    }
+    // No guild means DM — no parent to walk.
+    let Some(gid) = guild_id else {
+        tracing::info!(channel_id = ch_u64, "channel_or_parent_active: no guild_id (DM)");
+        return false;
+    };
+    // Cache lookup (sync, borrow guard); extract parent_id (Copy field) before any await.
+    let (cache_hit, parent_from_cache): (bool, Option<u64>) = ctx.cache.guild(gid).map(|g| {
+        let from_channels = g.channels.get(&channel_id).and_then(|c| c.parent_id);
+        let from_threads = g.threads.iter().find(|c| c.id == channel_id).and_then(|c| c.parent_id);
+        let n_threads = g.threads.len();
+        let n_channels = g.channels.len();
+        tracing::info!(channel_id = ch_u64, n_channels, n_threads, has_in_channels = from_channels.is_some(), has_in_threads = from_threads.is_some(), "channel_or_parent_active: cache lookup");
+        (true, from_channels.or(from_threads).map(|p| p.into()))
+    }).unwrap_or_else(|| {
+        tracing::info!(channel_id = ch_u64, guild_id = u64::from(gid), "channel_or_parent_active: guild not in cache");
+        (false, None)
+    });
+    let parent_u64 = match parent_from_cache {
+        Some(p) => Some(p),
+        None => {
+            tracing::info!(channel_id = ch_u64, cache_hit, "channel_or_parent_active: falling back to http.get_channel");
+            match ctx.http.get_channel(channel_id).await {
+                Ok(Channel::Guild(gc)) => {
+                    let p = gc.parent_id.map(|p| p.into());
+                    tracing::info!(channel_id = ch_u64, parent_id = ?p, "channel_or_parent_active: http returned guild channel");
+                    p
+                }
+                Ok(other) => {
+                    tracing::info!(channel_id = ch_u64, ?other, "channel_or_parent_active: http returned non-guild channel");
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(channel_id = ch_u64, error = %e, "channel_or_parent_active: http.get_channel failed");
+                    None
+                }
+            }
+        }
+    };
+    let result = match parent_u64 {
+        Some(p) => {
+            let active = state.active_channels.lock().await;
+            let matched = active.contains(&p);
+            tracing::info!(channel_id = ch_u64, parent_id = p, matched, "channel_or_parent_active: parent check");
+            matched
+        }
+        None => false,
+    };
+    result
+}
+
 #[derive(Debug, Deserialize)]
 struct SubscribeConfig {
+
     /// Discord channel IDs (snowflake strings).
     #[serde(default)]
     channels: Vec<String>,
@@ -192,7 +262,7 @@ impl EventHandler for DiscordHandler {
         let _ = self.state.http.set(ctx.http.clone());
     }
 
-    async fn message(&self, _ctx: Context, msg: Message) {
+    async fn message(&self, ctx: Context, msg: Message) {
         tracing::info!(
             author = %msg.author.name,
             is_bot = msg.author.bot,
@@ -204,11 +274,10 @@ impl EventHandler for DiscordHandler {
         );
         if msg.author.bot { return; }
         let ch_u64: u64 = msg.channel_id.into();
-        let active = self.state.active_channels.lock().await;
-        let in_active = active.contains(&ch_u64);
-        tracing::info!(channel_id = ch_u64, in_active, active_size = active.len(), "active-channel check");
+        // Direct-match OR thread-in-subscribed-forum (parent_id walk).
+        let in_active = channel_or_parent_active(&self.state, &ctx, msg.channel_id, msg.guild_id).await;
+        tracing::info!(channel_id = ch_u64, in_active, "active-channel check");
         if !in_active { return; }
-        drop(active);
 
         let is_dm = msg.guild_id.is_none();
         let user_id: u64 = msg.author.id.into();

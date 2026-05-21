@@ -43,7 +43,9 @@
 //! 4. **TTL ordering** — walks the wire-format sequence (system blocks
 //!    → messages) and rejects short-TTL-before-long-TTL patterns.
 
-use genai::chat::{CacheControl, ChatMessage, MessageOptions, SystemBlock};
+use genai::chat::{
+    CacheControl, ChatMessage, ContentPart, MessageContent, MessageOptions, SystemBlock,
+};
 use pattern_core::error::ProviderError;
 use pattern_core::types::provider::CompletionRequest;
 use smol_str::SmolStr;
@@ -167,6 +169,19 @@ pub fn finalize(partial: PartialRequest) -> Result<CompletionRequest, ProviderEr
                         idx,
                     }
                 })?;
+                // Anthropic rejects cache_control on `thinking` / `redacted_thinking`
+                // blocks (400 `Extra inputs are not permitted`). If a message's
+                // content is exclusively thinking blocks, the adapter has nothing
+                // eligible to attach the marker to and the request will fail.
+                // Skip the placement in that case rather than emit an invalid request.
+                if message_has_only_thinking_content(msg) {
+                    tracing::warn!(
+                        idx,
+                        placed_by = %placement.placed_by_pass,
+                        "skipping cache_control placement: message content is exclusively thinking blocks (anthropic rejects cache_control on thinking)"
+                    );
+                    continue;
+                }
                 let opts = msg.options.get_or_insert_with(MessageOptions::default);
                 opts.cache_control = Some(placement.control.clone());
             }
@@ -194,7 +209,14 @@ pub fn finalize(partial: PartialRequest) -> Result<CompletionRequest, ProviderEr
     // still emits the marker as a no-op for defence in depth when
     // the beta flag is configured).
 
-    // 4. TTL ordering (Anthropic wire-format constraint).
+    // 4. Strip Binary content parts whose media_type is not accepted by the
+    //    provider. Defence-in-depth against earlier seams that may have
+    //    routed an unsupported type (e.g. image/svg+xml) into the Binary
+    //    path — sending these unmodified produces a wire-level 400 from
+    //    Anthropic at both `/v1/messages` and `/v1/messages/count_tokens`.
+    strip_unsupported_binary_parts(&mut messages);
+
+    // 5. TTL ordering (Anthropic wire-format constraint).
     validate_ttl_ordering(&system_blocks, &messages, &breakpoints)?;
 
     // Assemble the final ChatRequest.
@@ -214,7 +236,93 @@ pub fn finalize(partial: PartialRequest) -> Result<CompletionRequest, ProviderEr
     })
 }
 
+/// Returns true iff every content part of `msg` is a `ThinkingBlock`.
+///
+/// Anthropic rejects `cache_control` on `thinking` and `redacted_thinking`
+/// blocks. Messages whose content is exclusively thinking have no cache-eligible
+/// target for the marker, so placement must be skipped (or the wire request will
+/// 400). An empty content vec returns false (no parts → no thinking-only).
+fn message_has_only_thinking_content(msg: &genai::chat::ChatMessage) -> bool {
+    let parts = msg.content.parts();
+    !parts.is_empty() && parts.iter().all(|p| matches!(p, ContentPart::ThinkingBlock(_)))
+}
+
+/// Set of binary media types Anthropic accepts on the wire.
+///
+/// - Vision: `image/jpeg`, `image/png`, `image/gif`, `image/webp`.
+/// - Documents: `application/pdf` (PDF feature).
+///
+/// Anything outside this set — notably `image/svg+xml`, which slips past
+/// earlier `image/*` checks but is rejected at the wire — must be stripped
+/// before the request hits `/v1/messages` or `/v1/messages/count_tokens`.
+fn is_provider_supported_binary_mime(content_type: &str) -> bool {
+    let ct = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim();
+    matches!(
+        ct,
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "application/pdf"
+    )
+}
+
+/// Walk every message, dropping `ContentPart::Binary` parts whose
+/// `content_type` is not in the provider's supported set. Recurses into
+/// `ContentPart::ToolResponse.content` so binaries nested inside tool
+/// results are also filtered.
+///
+/// Stripped parts are logged at `warn` so the operator can see what went
+/// away; the accompanying text marker (when present) survives and gives
+/// the agent enough context to know an attachment was elided.
+fn strip_unsupported_binary_parts(messages: &mut [ChatMessage]) {
+    for (msg_idx, msg) in messages.iter_mut().enumerate() {
+        // Pull parts out, filter, put back. MessageContent does not expose a
+        // retain-style API directly.
+        let old = std::mem::take(&mut msg.content);
+        let kept: Vec<ContentPart> = old
+            .into_parts()
+            .into_iter()
+            .filter_map(|part| match part {
+                ContentPart::Binary(ref b)
+                    if !is_provider_supported_binary_mime(&b.content_type) =>
+                {
+                    tracing::warn!(
+                        msg_idx,
+                        content_type = %b.content_type,
+                        name = b.name.as_deref().unwrap_or("<unnamed>"),
+                        "stripping unsupported binary part from outbound request"
+                    );
+                    None
+                }
+                ContentPart::ToolResponse(mut tr) => {
+                    tr.content.retain(|p| match p {
+                        ContentPart::Binary(b) => {
+                            let supported = is_provider_supported_binary_mime(&b.content_type);
+                            if !supported {
+                                tracing::warn!(
+                                    msg_idx,
+                                    call_id = %tr.call_id,
+                                    content_type = %b.content_type,
+                                    name = b.name.as_deref().unwrap_or("<unnamed>"),
+                                    "stripping unsupported binary part from tool_result"
+                                );
+                            }
+                            supported
+                        }
+                        _ => true,
+                    });
+                    Some(ContentPart::ToolResponse(tr))
+                }
+                other => Some(other),
+            })
+            .collect();
+        msg.content = MessageContent::from_parts(kept);
+    }
+}
+
 /// Returns true if the given `CacheControl` is a "short" TTL (5m-class).
+
 fn is_short_ttl(cc: &CacheControl) -> bool {
     matches!(
         cc,
@@ -726,5 +834,89 @@ mod tests {
             }
             other => panic!("expected CacheBreakpointBudgetExceeded, got {other:?}"),
         }
+    }
+
+    // ---- Unsupported-binary stripping ---------------------------------
+
+    fn binary_part(content_type: &str) -> ContentPart {
+        use genai::chat::{Binary, BinarySource};
+        use std::sync::Arc;
+        ContentPart::Binary(Binary {
+            content_type: content_type.to_string(),
+            source: BinarySource::Base64(Arc::from("BASE64DATA")),
+            name: Some(format!("test.{content_type}")),
+        })
+    }
+
+    #[test]
+    fn strip_drops_unsupported_top_level_binary_part() {
+        use genai::chat::{ChatMessage, MessageContent};
+
+        let mut msgs = vec![ChatMessage::user(MessageContent::from_parts(vec![
+            ContentPart::Text("hello".to_string()),
+            binary_part("image/svg+xml"),
+            binary_part("image/png"),
+        ]))];
+        strip_unsupported_binary_parts(&mut msgs);
+
+        let parts = msgs[0].content.parts();
+        assert_eq!(parts.len(), 2, "svg should be stripped, text + png remain");
+        assert!(matches!(parts[0], ContentPart::Text(_)));
+        match &parts[1] {
+            ContentPart::Binary(b) => assert_eq!(b.content_type, "image/png"),
+            other => panic!("expected png binary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strip_drops_unsupported_binary_in_nested_tool_response() {
+        use genai::chat::{ChatMessage, MessageContent, ToolResponse};
+
+        let tr = ToolResponse::from_parts(
+            "call_x",
+            vec![
+                ContentPart::Text("marker text".to_string()),
+                binary_part("image/svg+xml"),
+                binary_part("image/jpeg"),
+            ],
+        );
+        let mut msgs = vec![ChatMessage::tool(tr)];
+        strip_unsupported_binary_parts(&mut msgs);
+
+        let parts = msgs[0].content.parts();
+        assert_eq!(parts.len(), 1, "still one ToolResponse part");
+        let ContentPart::ToolResponse(tr) = &parts[0] else {
+            panic!("expected ToolResponse, got {:?}", parts[0]);
+        };
+        assert_eq!(tr.content.len(), 2, "svg stripped from nested content");
+        match &tr.content[1] {
+            ContentPart::Binary(b) => assert_eq!(b.content_type, "image/jpeg"),
+            other => panic!("expected jpeg binary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strip_keeps_pdf_documents() {
+        use genai::chat::{ChatMessage, MessageContent};
+
+        let mut msgs = vec![ChatMessage::user(MessageContent::from_parts(vec![
+            binary_part("application/pdf"),
+        ]))];
+        strip_unsupported_binary_parts(&mut msgs);
+        assert_eq!(msgs[0].content.parts().len(), 1, "pdf must pass through");
+    }
+
+    #[test]
+    fn strip_drops_unknown_application_octet_stream() {
+        use genai::chat::{ChatMessage, MessageContent};
+
+        let mut msgs = vec![ChatMessage::user(MessageContent::from_parts(vec![
+            ContentPart::Text("doc".to_string()),
+            binary_part("application/octet-stream"),
+        ]))];
+        strip_unsupported_binary_parts(&mut msgs);
+        let parts = msgs[0].content.parts();
+        assert_eq!(parts.len(), 1, "octet-stream is not supported by Anthropic");
+        assert!(matches!(parts[0], ContentPart::Text(_)));
     }
 }

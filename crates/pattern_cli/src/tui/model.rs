@@ -335,7 +335,107 @@ fn unwrap_nested_json_strings(v: serde_json::Value) -> serde_json::Value {
 
 /// Extract the display-ready code text from a code tool's arguments JSON.
 /// Returns the code (and optional helpers/imports) as a markdown fenced block.
+// ---------------------------------------------------------------------------
+// TUI render-cost guardrails
+//
+// Conversation sections store WireTurnEvent payloads as Vec<ContentPart>
+// (for tool results) and strings (for attachments). Without bounds, a
+// large item — a 2.2MB PDF binary, a full memory-snapshot attachment —
+// makes the visible-section render path slow per-frame. We truncate at
+// the wire→model boundary so the Section model stores cheap-to-render
+// content. The daemon retains canonical full-fidelity copies.
+// ---------------------------------------------------------------------------
+
+/// Max base64-encoded byte length of a Binary part before we substitute a
+/// short text placeholder in the TUI's Section model. Above this size,
+/// rendering pressure shows up even though the placeholder text itself is
+/// short — clones and selection paths still iterate the bytes.
+const TUI_BINARY_MAX_ENCODED: usize = 32 * 1024;
+
+/// Max character count of an attachment string before truncation in the
+/// TUI's Section model. ~half a 200x80 terminal's worth — generous enough
+/// that normal memory-snapshots survive, small enough that the post-
+/// compaction full-dump doesn't lag the renderer when expanded.
+const TUI_ATTACHMENT_MAX_BYTES: usize = 16 * 1024;
+
+/// Walk a Vec<ContentPart>, substituting any Binary parts above
+/// `TUI_BINARY_MAX_ENCODED` with a short Text placeholder describing the
+/// binary (name, mime, encoded size). Returns a fresh vec sized to be
+/// cheap for the TUI to clone/render.
+pub(super) fn tui_truncate_parts(
+    parts: &[pattern_core::types::provider::ContentPart],
+) -> Vec<pattern_core::types::provider::ContentPart> {
+    use pattern_core::types::provider::{Binary, BinarySource, ContentPart};
+    parts
+        .iter()
+        .map(|p| match p {
+            ContentPart::Binary(b) => {
+                let encoded_len = match &b.source {
+                    BinarySource::Base64(s) => s.len(),
+                    _ => 0,
+                };
+                if encoded_len > TUI_BINARY_MAX_ENCODED {
+                    let name = b.name.as_deref().unwrap_or("<unnamed>");
+                    let mime = b.content_type.as_str();
+                    let placeholder = format!(
+                        "[binary: {name}, {mime}, {encoded_len} encoded bytes — truncated for TUI display, canonical copy retained in daemon]"
+                    );
+                    ContentPart::Text(placeholder)
+                } else {
+                    ContentPart::Binary(b.clone())
+                }
+            }
+            ContentPart::Text(s) => {
+                // Also guard against giant Text parts. Most commonly this is a
+                // legacy back-compat deserializer path where an old tool result
+                // stored as a single JSON-stringified blob (with embedded base64)
+                // comes back as `Text(stringified_json)` rather than
+                // `[Text(marker), Binary(bytes)]`. Truncate at the same byte
+                // threshold using byte-bounded char-boundary-safe truncation.
+                if s.len() <= TUI_BINARY_MAX_ENCODED {
+                    ContentPart::Text(s.clone())
+                } else {
+                    let total_bytes = s.len();
+                    let mut cutoff = TUI_BINARY_MAX_ENCODED;
+                    while cutoff > 0 && !s.is_char_boundary(cutoff) {
+                        cutoff -= 1;
+                    }
+                    let kept = &s[..cutoff];
+                    let omitted_bytes = total_bytes - cutoff;
+                    ContentPart::Text(format!(
+                        "{kept}\n\n[... truncated for TUI display: {omitted_bytes} more bytes omitted of {total_bytes} total. Canonical copy retained in daemon.]"
+                    ))
+                }
+            }
+            other => other.clone(),
+        })
+        .collect()
+}
+
+/// Truncate an attachment string above `TUI_ATTACHMENT_MAX_BYTES`,
+/// appending a brief note that explains the truncation. Uses byte-bounded
+/// truncation with a char-boundary walk-back, so total cost is O(1) plus
+/// at most 3 bytes for the boundary — no full-string char iteration.
+pub(super) fn tui_truncate_attachment_text(text: String) -> String {
+    let total_bytes = text.len();
+    if total_bytes <= TUI_ATTACHMENT_MAX_BYTES {
+        return text;
+    }
+    // Walk back from the byte cap to the nearest char boundary so we don't
+    // split a multi-byte UTF-8 sequence. At most 3 bytes back.
+    let mut cutoff = TUI_ATTACHMENT_MAX_BYTES;
+    while cutoff > 0 && !text.is_char_boundary(cutoff) {
+        cutoff -= 1;
+    }
+    let kept = &text[..cutoff];
+    let omitted_bytes = total_bytes - cutoff;
+    format!(
+        "{kept}\n\n[... truncated for TUI display: {omitted_bytes} more bytes omitted of {total_bytes} total. Canonical copy retained in daemon.]"
+    )
+}
+
 pub(super) fn render_code_tool_body(arguments: &str) -> String {
+
     let code_str = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(arguments) {
         let mut parts = Vec::new();
         if let Some(code) = parsed.get("code").and_then(|v| v.as_str()) {
@@ -460,7 +560,7 @@ impl RenderBatch {
                 self.sections.push(Section::new(SectionKind::ToolResult {
                     call_id: call_id.clone(),
                     success: *success,
-                    content: content.clone(),
+                    content: tui_truncate_parts(content),
                 }));
             }
             WireTurnEvent::Display { kind, text } => {
@@ -606,6 +706,7 @@ impl RenderBatch {
                             // Future variants — skip gracefully.
                             _ => String::new(),
                         })
+                        .map(tui_truncate_attachment_text)
                         .collect(),
                 )));
             }

@@ -207,6 +207,10 @@ pub fn is_binary_mime(content_type: &str) -> bool {
     if ct.starts_with("text/") {
         return false;
     }
+    // SVG is XML — text-shaped, not a binary image format.
+    if ct == "image/svg+xml" || ct == "image/svg" {
+        return false;
+    }
     matches!(
         ct,
         "application/json" | "application/xml" | "application/javascript" | "application/x-yaml"
@@ -350,6 +354,24 @@ mod tests {
             "[document: report.pdf, application/pdf, 2.0MB]"
         );
     }
+
+    #[test]
+    fn is_binary_mime_classifies_svg_as_text() {
+        // SVG is XML; routing it through the binary path lands an
+        // `image/svg+xml` media_type on the wire and Anthropic rejects
+        // it (only jpeg/png/gif/webp are accepted).
+        assert!(!is_binary_mime("image/svg+xml"));
+        assert!(!is_binary_mime("image/svg"));
+        assert!(!is_binary_mime("image/svg+xml; charset=utf-8"));
+    }
+
+    #[test]
+    fn is_binary_mime_still_accepts_real_image_types() {
+        assert!(is_binary_mime("image/png"));
+        assert!(is_binary_mime("image/jpeg"));
+        assert!(is_binary_mime("image/gif"));
+        assert!(is_binary_mime("image/webp"));
+    }
 }
 
 // ---- Markdown image extraction (seam B) -------------------------------
@@ -423,7 +445,7 @@ pub async fn fetch_markdown_images(
                     fetched += 1;
                 }
                 Err(e) => {
-                    tracing::warn!(target = %r.target, error = %e, "seam B: url fetch failed");
+                    tracing::warn!(target = %r.target, error = %e, "url fetch failed during markdown image fetch");
                     skipped.push(r);
                 }
             }
@@ -436,7 +458,7 @@ pub async fn fetch_markdown_images(
                     fetched += 1;
                 }
                 Err(e) => {
-                    tracing::warn!(target = %r.target, error = %e, "seam B: local file read failed");
+                    tracing::warn!(target = %r.target, error = %e, "local file read failed during markdown image fetch");
                     skipped.push(r);
                 }
             }
@@ -462,14 +484,15 @@ pub fn rgba_to_binary_part(
 ) -> Result<(ContentPart, BinaryMeta), MultimodalError> {
     // Build an image::ImageBuffer from raw RGBA, then encode as PNG.
     let buf = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, rgba.to_vec())
-        .ok_or_else(|| MultimodalError::ImageDecode(image::ImageError::Parameter(
-            image::error::ParameterError::from_kind(
-                image::error::ParameterErrorKind::DimensionMismatch,
-            ),
-        )))?;
+        .ok_or_else(|| {
+            MultimodalError::ImageDecode(image::ImageError::Parameter(
+                image::error::ParameterError::from_kind(
+                    image::error::ParameterErrorKind::DimensionMismatch,
+                ),
+            ))
+        })?;
     let mut png_bytes: Vec<u8> = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut png_bytes);
-    image::DynamicImage::ImageRgba8(buf)
-        .write_to(&mut cursor, image::ImageFormat::Png)?;
+    image::DynamicImage::ImageRgba8(buf).write_to(&mut cursor, image::ImageFormat::Png)?;
     bytes_to_binary_part(png_bytes, "image/png", display_name, opts)
 }
