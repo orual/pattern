@@ -102,7 +102,7 @@ mcp-client = ["dep:rmcp"]       # MCP client for tool invocation
 # Plugin transport (iroh + irpc protocol enums + ALPN consts + auth primitives).
 # Required by pattern_runtime + pattern_server + pattern_plugin_sdk. Plain consumers
 # (pattern_cli depending only on domain types) don't need this — it pulls in iroh + irpc.
-plugin-transport = ["dep:iroh", "dep:irpc", "dep:irpc-iroh", "dep:postcard", "dep:keyring", "dep:nix", "dep:dashmap"]
+plugin-transport = ["dep:iroh", "dep:irpc", "dep:irpc-iroh", "dep:postcard", "dep:keyring", "dep:nix", "dep:dashmap", "provider"]
 
 
 [lints]

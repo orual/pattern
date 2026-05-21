@@ -41,6 +41,13 @@ use crate::types::memory_types::{
 /// collision bug (project named "pattern" vs. persona named "@pattern"
 /// sharing a single keyspace) is resolved by the type system.
 pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
+    /// Cross-block memory event broadcast for observers (MemorySync, etc).
+    /// Concrete impls that emit raw loro update bytes + origin info return
+    /// `Some(&observer)`; impls that don't support cross-block observation
+    /// (in-memory test stubs, future plugin-side proxies whose observability
+    /// is upstream-driven) default to `None`.
+    fn observer(&self) -> Option<&crate::observer::MemoryObserver> { None }
+
     // ========== Block CRUD ==========
 
     /// Create a new memory block, returning the document ready for editing.

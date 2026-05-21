@@ -387,7 +387,7 @@ pub fn handle_search(
 
     // Collect the result IDs (memory_blocks.id UUIDs) so we can correlate.
     // Results are already ordered by BM25 score (descending) from the store.
-    let result_ids: Vec<&str> = search_results.iter().map(|r| r.id.as_str()).collect();
+    let result_ids: Vec<&str> = search_results.iter().map(|r| r.display_id()).collect();
 
     // Enumerate all Skill blocks visible to this scope to build a label↔id mapping.
     // Use an unscoped filter so that MemoryScope (if present) can apply its

@@ -11,7 +11,7 @@
 //! - `DbError` → `MemoryError` mapping helpers.
 
 use pattern_core::error::MemoryError;
-use pattern_core::types::memory_types::{MemorySearchResult, SearchContentType};
+use pattern_core::types::memory_types::{MemorySearchResult, SearchContentType, SearchHit};
 use pattern_db::DbError;
 use pattern_db::search::{
     SearchContentType as DbSearchContentType, SearchResult as DbSearchResult,
@@ -39,11 +39,37 @@ pub fn db_search_type_to_core(ct: DbSearchContentType) -> SearchContentType {
 
 // ── MemorySearchResult from DbSearchResult ──────────────────────────────────
 
-/// Convert a db `SearchResult` to a core `MemorySearchResult`.
-pub fn db_search_result_to_core(result: DbSearchResult) -> MemorySearchResult {
+/// Convert a db `SearchResult` to a core `MemorySearchResult`, using `resolve_block`
+/// to translate a block-hit's DB row id into its (scope, label) address. Caller
+/// (typically `MemoryCache::search_impl`) provides the resolver from its in-memory
+/// block index; if the block isn't cached the resolver may return `None`, in which
+/// case the hit is rendered as `SearchHit::Block` with a fallback empty scope+label
+/// (caller should warn — this indicates a cold-search hit on an uncached block).
+pub fn db_search_result_to_core(
+    result: DbSearchResult,
+    resolve_block: impl Fn(&str) -> Option<(pattern_core::types::memory_types::Scope, smol_str::SmolStr)>,
+) -> MemorySearchResult {
+    let content_type = db_search_type_to_core(result.content_type);
+    let hit = match content_type {
+        SearchContentType::Blocks => {
+            if let Some((scope, label)) = resolve_block(&result.id) {
+                SearchHit::Block { scope, label }
+            } else {
+                // Cold hit — block isn't in cache. Caller logs; we emit an empty
+                // addr that round-trips but won't resolve client-side. Better than
+                // panicking; downstream display can still show snippet+score.
+                SearchHit::Block {
+                    scope: pattern_core::types::memory_types::Scope::global(""),
+                    label: smol_str::SmolStr::from(result.id.as_str()),
+                }
+            }
+        }
+        SearchContentType::Archival => SearchHit::Archival { entry_id: result.id },
+        SearchContentType::Messages => SearchHit::Message { message_id: result.id },
+    };
     MemorySearchResult {
-        id: result.id,
-        content_type: db_search_type_to_core(result.content_type),
+        hit,
+        content_type,
         content: result.content,
         score: result.score,
     }

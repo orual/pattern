@@ -71,13 +71,14 @@ Sub-tasks (one per variant group, each a commit):
 - **A.2c HostSkillInvoke**: load + invoke via skill registry
 - **A.2d Memory\*** (Create/Delete/Search/ListBlocks/Persist/UpdateMetadata/UndoRedo/GetSharedBlock/InsertArchival/SearchArchival/DeleteArchival): dispatch into memory store
 
-### A.3 — Wire daemon-side `OutOfProcessPluginConnection` methods
-Counterpart of A.2 from the daemon-dialing-the-plugin side. Each `PluginGuestProtocol` method beyond `DeclarePorts`/`GetLibrary` needs real wire dispatch + PluginContext conversion.
+### A.3 — Wire daemon-side `OutOfProcessPluginConnection` methods (PARTIAL, NOT FULLY LANDED)
+Counterpart of A.2 from the daemon-dialing-the-plugin side. Status as of 2026-05-22:
 
-Sub-tasks:
-- **A.3a Lifecycle**: OnInstall/OnEnable/OnDisable — convert PluginContext → WirePluginContext + dial
-- **A.3b Hooks**: OnHookEvent (fire-forget) + OnHookEventBlocking (await WireHookResponse)
-- **A.3c Ports**: PortCall (oneshot), PortSubscribe (stream with Done), PortUnsubscribe
+- **A.3a Lifecycle**: on_install/on_enable/on_disable code present; install + enable exercised by plugin_loop tests; on_disable wired but UNTESTED.
+- **A.3b Hooks**: on_event code present for both semantics; Notification exercised by plugin_loop; Blocking wired but UNTESTED.
+- **A.3c Ports**: port_call + port_subscribe code present but UNTESTED via plugin_loop. **port_unsubscribe MISSING entirely from out_of_process.rs.**
+
+Not done until: (a) port_unsubscribe wired, (b) on_disable + on_event-blocking + port_call + port_subscribe exercised end-to-end (likely via the A.4 fixture suite).
 
 ### A.4 — Integration suite at `crates/pattern_runtime/tests/plugin_transport.rs`
 Build the existing-but-deferred Task 8. Fixture plugin that:

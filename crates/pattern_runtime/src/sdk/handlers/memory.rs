@@ -355,7 +355,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                 let results = adapter
                     .search(&query, options, search_scope)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Search: {e}")))?;
-                let handles: Vec<String> = results.iter().map(|r| r.id.clone()).collect();
+                let handles: Vec<String> = results.iter().map(|r| r.display_id().to_string()).collect();
                 cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
                     pattern_core::hooks::tags::MEMORY_READ,
                     serde_json::json!({ "label": query, "scope": scope.to_string(), "operation": "search" }),

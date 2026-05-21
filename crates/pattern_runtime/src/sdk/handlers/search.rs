@@ -134,7 +134,7 @@ impl EffectHandler<SessionContext> for SearchHandler {
                     })?;
                 for r in results {
                     hits.push(serde_json::json!({
-                        "id": r.id,
+                        "id": r.display_id(),
                         "agentId": target_agent,
                         "content": r.content,
                         "contentType": format!("{:?}", r.content_type),
@@ -153,7 +153,7 @@ impl EffectHandler<SessionContext> for SearchHandler {
                     })?;
                 for r in results {
                     hits.push(serde_json::json!({
-                        "id": r.id,
+                        "id": r.display_id(),
                         "agentId": target_agent,
                         "content": r.content,
                         "contentType": format!("{:?}", r.content_type),

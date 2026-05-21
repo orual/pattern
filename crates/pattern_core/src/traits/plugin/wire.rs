@@ -6,8 +6,9 @@
 //! 1. **Postcard-compatible**: `serde_json::Value` cannot serialize through
 //!    postcard (no static schema), so dynamic JSON fields use [`WireJson`].
 //! 2. **Natural-keyed addressing**: blocks are addressed by
-//!    `(agent_id, label, scope)` via [`BlockAddr`] — no internal uuid
-//!    `block_id: String` ever crosses the wire.
+//!    `(scope, label)` via [`BlockAddr`] — `Scope` already encodes the
+//!    ownership boundary (Global(agent_id) or Local(project_id)). No
+//!    internal uuid `block_id: String` ever crosses the wire.
 //!
 //! Forward-compat: payload types (`SnapshotPayload`, `DeltaPayload`) carry
 //! both `Inline` and `Chunked` variants in v1 even though v1 only emits
@@ -72,25 +73,10 @@ pub enum DeltaPayload {
     },
 }
 
-/// Natural-keyed block addressing for wire ops.
-///
-/// Runtime resolves `(agent_id, label, scope)` → block_id server-side via
-/// the MemoryCache index. Internal uuid block_ids never cross the wire.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct BlockAddr {
-    pub agent_id: SmolStr,
-    pub label: SmolStr,
-    pub scope: WireMemoryScope,
-}
-
-/// Wire-side mirror of `types::memory_types::Scope` (without crate-internal
-/// metadata). Plugins request blocks at a scope; runtime resolves.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum WireMemoryScope {
-    Personal,
-    Shared,
-    Constellation,
-}
+// Re-export of canonical, non-feature-gated BlockAddr. Lives here for
+// back-compat with wire-side callers; the source of truth is
+// `crate::types::memory_types::BlockAddr`.
+pub use crate::types::memory_types::BlockAddr;
 
 // ── Plugin lifecycle wire types ──────────────────────────────────────────────
 
@@ -112,6 +98,11 @@ pub struct WirePluginContext {
     /// [`crate::traits::plugin::PluginContext::mount_path`].
     #[serde(default)]
     pub mount_path: Option<std::path::PathBuf>,
+    /// Project id derived from `.pattern.kdl` in `mount_path`. Plugins use this
+    /// to construct `Scope::Local(project_id)` for shared-block addressing without
+    /// re-parsing the mount config.
+    #[serde(default)]
+    pub project_id: Option<SmolStr>,
     pub user_config: WireJson,
     pub effective_capabilities: CapabilitySet,
 }
@@ -209,12 +200,57 @@ pub enum BlockGoneReason {
     FilterMismatch,
 }
 
+/// Loro `VersionVector` in wire-friendly form (loro's encode/decode bytes).
+///
+/// Used in [`SyncRequest`] for resume-from-version semantics: plugin remembers
+/// each block's VV across restarts, and on next sync sends them so host can
+/// stream only the missing deltas instead of re-snapshotting everything.
+///
+/// Construct via [`Self::from_loro`] / decode via [`Self::to_loro`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireVersionVector(pub Vec<u8>);
+
+impl WireVersionVector {
+    pub fn from_loro(vv: &loro::VersionVector) -> Self { Self(vv.encode()) }
+    pub fn to_loro(&self) -> Result<loro::VersionVector, loro::LoroError> {
+        loro::VersionVector::decode(&self.0)
+    }
+}
+
+/// Initialization payload for a [`crate::plugin::protocol::MemorySyncProtocol::Sync`] session.
+///
+/// Plugin picks one of two subscription shapes; both carry optional per-addr
+/// version vectors so host can skip re-snapshotting blocks the plugin already has.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SyncRequest {
+    /// Subscribe to all blocks matching `filter`. Newly-created blocks that
+    /// match the filter auto-stream as `BlockAvailable` events.
+    Filter {
+        filter: crate::types::memory_types::BlockFilter,
+        /// Optional per-addr version vectors. For any addr present here, host
+        /// emits only deltas since that VV; for addrs not present (or new),
+        /// host sends a fresh BlockAvailable snapshot.
+        #[serde(default)]
+        known: Vec<(BlockAddr, WireVersionVector)>,
+    },
+    /// Subscribe to a specific set of addresses. Use
+    /// [`crate::traits::plugin::wire::WireMemoryEdit::Subscribe`] /
+    /// `Unsubscribe` to mutate the watched set mid-session.
+    Addrs {
+        addrs: Vec<BlockAddr>,
+        /// Optional per-addr version vectors (same semantics as Filter.known).
+        #[serde(default)]
+        known: Vec<(BlockAddr, WireVersionVector)>,
+    },
+}
+
 /// Runtime → plugin event on the memory-sync bidi stream.
 ///
-/// Plugin opens [`crate::traits::plugin::wire::SyncRequest`] (TODO Task 3
-/// step 8 — needs `WireBlockFilter`), receives an initial set of
-/// `BlockAvailable` events with snapshots, then `Delta` events as the
-/// runtime observes loro changes on the watched blocks.
+/// Plugin opens [`crate::plugin::protocol::MemorySyncProtocol::Sync`] with a
+/// [`SyncRequest`], receives an initial set of `BlockAvailable` events with
+/// snapshots (or `Delta` events for blocks the plugin already had per VV),
+/// then `Delta` events as the runtime observes loro changes on the watched blocks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum WireMemoryEvent {
@@ -229,6 +265,13 @@ pub enum WireMemoryEvent {
         addr: BlockAddr,
         payload: DeltaPayload,
     },
+    /// Block metadata changed host-side (pinned / type / schema / description).
+    /// These fields live outside the loro CRDT so Delta events don't carry them;
+    /// plugins observing metadata need this distinct signal.
+    MetadataChanged {
+        addr: BlockAddr,
+        metadata: crate::types::memory_types::BlockMetadata,
+    },
     BlockGone {
         addr: BlockAddr,
         reason: BlockGoneReason,
@@ -242,7 +285,7 @@ pub enum WireMemoryEvent {
     },
 }
 
-/// Plugin → runtime edit on the memory-sync bidi stream.
+/// Plugin → runtime edit-or-control message on the memory-sync bidi stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum WireMemoryEdit {
@@ -251,6 +294,19 @@ pub enum WireMemoryEdit {
     Delta {
         addr: BlockAddr,
         payload: DeltaPayload,
+    },
+    /// Add addrs to the watched set without re-opening the session. Host
+    /// responds with `BlockAvailable` for each newly-watched addr (or `Delta`
+    /// since `known` VV if provided).
+    Subscribe {
+        addrs: Vec<BlockAddr>,
+        #[serde(default)]
+        known: Vec<(BlockAddr, WireVersionVector)>,
+    },
+    /// Drop addrs from the watched set. Host sends `BlockGone { reason: OutOfScope }`
+    /// for each, then stops emitting events for them.
+    Unsubscribe {
+        addrs: Vec<BlockAddr>,
     },
     /// Plugin signals graceful end-of-stream on its edit channel.
     Done {
@@ -291,26 +347,15 @@ pub enum WirePortError {
     RateLimited { retry_after_secs: u32 },
 }
 
-/// Memory-operation error returned from the db-poking memory variants.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum WireMemoryError {
-    BlockNotFound { addr: BlockAddr },
-    ScopeDenied { addr: BlockAddr, reason: SmolStr },
-    CapabilityDenied { reason: SmolStr },
-    PersistenceFailed { addr: BlockAddr, message: SmolStr },
-    /// V1 stub: method received but not yet dispatched. Removed when 5c+ lands.
-    Unimplemented { method: SmolStr },
-    Other { message: SmolStr },
-}
-
 /// Plugin → runtime memory search request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireSearchQuery {
     /// Free-text query (matched against block content via FTS5).
     pub query: String,
-    /// Optional per-agent filter (defaults to plugin's declared scope).
-    pub agent_id_filter: Option<SmolStr>,
+    /// Search scope. `None` defaults to the session's default scope (single scope).
+    /// `Some(MemorySearchScope::Scope(...))` targets one specific scope; `Some(Constellation)`
+    /// iterates across every scope visible to the session.
+    pub scope: Option<crate::types::memory_types::MemorySearchScope>,
     /// Cap on returned results.
     pub limit: u32,
 }
@@ -327,90 +372,35 @@ pub struct WireSearchResult {
 
 // ── Host-callback wire types ─────────────────────────────────────────────────
 
-/// Plugin → runtime outbound message (delivered to an agent's mailbox).
+/// Plugin → runtime outbound message. Same shape as [`crate::wire::ui::AgentMessage`]
+/// for everything EXCEPT origin: the plugin self-reports `plugin_id` +
+/// `partner_authority`, and the daemon constructs `Author::Plugin {...}` server-side.
+/// Plugins literally cannot encode Partner/Human/Agent/System authorship via this
+/// wire — the type doesn't expose those variants. Use the TUI protocol
+/// (`pattern/1` ALPN) for callers that need full origin control.
+#[cfg(feature = "plugin-transport")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireHostMessage {
-    /// Target agent ("local:pattern", etc).
-    pub target_agent_id: SmolStr,
-    /// Message body. Often plain text; plugins can also pass structured
-    /// payloads via JSON.
-    pub body: String,
-    /// Optional metadata (origin hints, attachments, etc) as JSON.
-    pub metadata: Option<WireJson>,
+pub struct PluginAgentMessage {
+    /// Client-minted batch ID (snowflake) for correlating TurnEvents.
+    pub batch_id: crate::types::ids::BatchId,
+    /// Routing directive (Direct/Auto/Address).
+    pub recipient: crate::wire::ui::Recipient,
+    /// Message content parts (multi-modal capable).
+    pub parts: Vec<crate::types::provider::ContentPart>,
+    /// Plugin authoring this message. Daemon constructs
+    /// `Author::Plugin { plugin_id, partner_authority }` server-side.
+    pub plugin_id: SmolStr,
+    /// Whether the plugin is acting with partner-level authority.
+    /// Plugins installed by the partner default to true; remote/untrusted false.
+    #[serde(default)]
+    pub partner_authority: bool,
+    /// Sphere for this message. Defaults to Internal (plugin→agent channel).
+    #[serde(default = "default_plugin_sphere")]
+    pub sphere: crate::types::origin::Sphere,
+    /// Optional transport hint for display/attribution (e.g. "discord:channel:xxx").
+    #[serde(default)]
+    pub transport_hint: Option<SmolStr>,
 }
 
-// ── Task ops wire types ──────────────────────────────────────────────────────
-//
-// Plugins use these to create/transition/link/query tasks on the agent's
-// TaskList block via Tasks effect parity over the wire.
-
-use crate::types::memory_types::TaskStatus;
-
-/// Plugin-driven task creation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireTaskCreate {
-    /// TaskList block address.
-    pub block: BlockAddr,
-    /// Human-readable task subject.
-    pub subject: SmolStr,
-    /// Optional description / details.
-    pub description: Option<String>,
-    /// Optional initial status (defaults to Pending).
-    pub initial_status: Option<TaskStatus>,
-}
-
-/// Status-only transition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireTaskTransition {
-    pub block: BlockAddr,
-    pub task_id: SmolStr,
-    pub to: TaskStatus,
-}
-
-/// Link/unlink between two task nodes (forms the task graph).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireTaskLink {
-    pub block: BlockAddr,
-    pub from_task: SmolStr,
-    pub to_task: SmolStr,
-    /// `true` to link, `false` to unlink.
-    pub link: bool,
-}
-
-/// Task list / filter query.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireTaskQuery {
-    pub block: Option<BlockAddr>,
-    pub status_filter: Option<TaskStatus>,
-}
-
-/// Single task surfaced to the plugin.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireTaskItem {
-    pub block: BlockAddr,
-    pub task_id: SmolStr,
-    pub subject: SmolStr,
-    pub description: Option<String>,
-    pub status: TaskStatus,
-}
-
-// ── Skill invocation wire types ──────────────────────────────────────────────
-
-/// Plugin asks the runtime to invoke a skill (Skill block) on its behalf.
-/// The skill body runs in the agent's eval context, not the plugin's.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireSkillInvoke {
-    /// Skill block address (label is the skill name).
-    pub addr: BlockAddr,
-    /// Free-form invocation payload (passed to skill body).
-    pub payload: WireJson,
-}
-
-/// Result of a skill invocation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireSkillInvocation {
-    /// Returned value from the skill body.
-    pub output: WireJson,
-    /// Optional supplementary text the skill emitted (for logging / display).
-    pub log: Option<String>,
-}
+#[cfg(feature = "plugin-transport")]
+fn default_plugin_sphere() -> crate::types::origin::Sphere { crate::types::origin::Sphere::Internal }

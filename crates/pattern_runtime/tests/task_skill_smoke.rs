@@ -777,22 +777,20 @@ fn smoke_cross_schema_fts() {
     );
 
     // All three blocks must appear in results (AC10.8).
-    // MemorySearchResult.id is the memory_blocks DB UUID. To check which
-    // block labels are present, we look up the block metadata by id via list_blocks.
-    // Use an encoded scope key so the filter matches blocks stored with
-    // agent_id = Scope::global(AGENT).to_db_key() (i.e. "global:<AGENT>").
+    // SearchHit::Block carries (scope, label) directly. Extract labels.
     let all_metas = cache
         .list_blocks(BlockFilter::by_scope(&agent_scope))
         .expect("smoke_cross_schema_fts: list_blocks must succeed");
-    let id_to_label: std::collections::HashMap<&str, &str> = all_metas
+    use pattern_core::types::memory_types::SearchHit;
+    let result_labels: Vec<String> = results
         .iter()
-        .map(|m| (m.id.as_str(), m.label.as_str()))
+        .filter_map(|r| match &r.hit {
+            SearchHit::Block { label, .. } => Some(label.to_string()),
+            _ => None,
+        })
         .collect();
-
-    let result_labels: Vec<&str> = results
-        .iter()
-        .filter_map(|r| id_to_label.get(r.id.as_str()).copied())
-        .collect();
+    let result_labels_refs: Vec<&str> = result_labels.iter().map(String::as_str).collect();
+    let result_labels = result_labels_refs;
 
     assert!(
         result_labels.contains(&"text-hydration"),

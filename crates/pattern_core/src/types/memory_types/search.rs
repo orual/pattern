@@ -3,7 +3,7 @@
 
 
 /// Search mode configuration
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SearchMode {
     /// Only use FTS5 keyword search
     Fts,
@@ -23,7 +23,7 @@ impl SearchMode {
 }
 
 /// Content types for search
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SearchContentType {
     Blocks,
     Archival,
@@ -110,8 +110,7 @@ impl Default for SearchOptions {
 /// `Scope(Scope)` searches a single ownership boundary (e.g. one
 /// project's blocks or one persona's blocks). `Constellation` searches
 /// across every scope visible to the caller.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MemorySearchScope {
     /// Search a single scope's blocks.
     Scope(super::Scope),
@@ -119,17 +118,48 @@ pub enum MemorySearchScope {
     Constellation,
 }
 
-/// Search result from memory operations
-#[derive(Debug, Clone)]
+/// Address of a search hit. Distinguishes block vs archival vs message hits
+/// since the underlying row-id type differs, and gives callers what they need
+/// to read the hit's content via the normal MemoryStore paths.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub enum SearchHit {
+    /// Hit on a memory block. Addressable via (scope, label).
+    Block {
+        scope: super::Scope,
+        label: smol_str::SmolStr,
+    },
+    /// Hit on an archival entry. Addressable via entry id.
+    Archival { entry_id: String },
+    /// Hit on a stored message.
+    Message { message_id: String },
+}
+
+/// Search result from memory operations.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemorySearchResult {
-    /// Content ID
-    pub id: String,
-    /// Content type
+    /// Addressable target of this hit.
+    pub hit: SearchHit,
+    /// Content type (kept for compatibility with consumers that switch on it;
+    /// redundant with `hit`'s variant).
     pub content_type: SearchContentType,
-    /// The actual content text
+    /// The actual content text (snippet or full body, impl-defined).
     pub content: Option<String>,
-    /// Relevance score (0-1, higher is better)
+    /// Relevance score (0-1, higher is better).
     pub score: f64,
+}
+
+impl MemorySearchResult {
+    /// String identifier for display / correlation. For block hits this is the
+    /// block label; for archival / message hits it's the entry / message id.
+    /// Callers that need typed addressing should match on `self.hit` directly.
+    pub fn display_id(&self) -> &str {
+        match &self.hit {
+            SearchHit::Block { label, .. } => label.as_str(),
+            SearchHit::Archival { entry_id } => entry_id.as_str(),
+            SearchHit::Message { message_id } => message_id.as_str(),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -54,6 +54,7 @@ pub mod paths;
 
 #[cfg(feature = "plugin-transport")]
 pub mod daemon_state;
+pub mod observer;
 pub mod permission;
 pub mod spawn;
 pub mod traits;

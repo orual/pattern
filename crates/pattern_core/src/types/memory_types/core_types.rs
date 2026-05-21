@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use super::BlockSchema;
 
 /// Errors that can occur during document operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum DocumentError {
     #[error("failed to import document: {0}")]
@@ -146,6 +146,22 @@ impl Display for IsolatePolicy {
 // `MemoryError` and `MemoryResult` are defined in `crate::error::memory` and
 // re-exported here for backward compatibility with existing import paths.
 pub use crate::error::memory::{MemoryError, MemoryResult};
+
+/// Natural-keyed block addressing.
+///
+/// `Scope` already encodes the ownership boundary (Global(agent_id) for
+/// persona-scoped, Local(project_id) for project-scoped). Consumers resolve
+/// `(scope, label)` to a backing document via their store's index. Internal
+/// uuid block_ids never appear in this addressing layer.
+///
+/// Lives here (not in `traits::plugin::wire`) so it's available wherever
+/// `MemoryStore` is — the memory-event broadcast on the trait references
+/// it, and that broadcast must not require plugin-transport feature flags.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct BlockAddr {
+    pub scope: crate::types::memory_types::Scope,
+    pub label: smol_str::SmolStr,
+}
 
 // ========== Consolidation types (v3-memory-rework Phase 3) ==========
 

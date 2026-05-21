@@ -135,6 +135,12 @@ pub struct MemoryCache {
     /// the agent's mailbox in response.
     block_change_notifier: crate::subscriber::BlockChangeNotifier,
 
+    /// Cross-block memory event observer. Concrete-cache impls publish on
+    /// this; MemorySync handlers (and other future cross-block observers)
+    /// subscribe to get raw loro update bytes + origin metadata as edits
+    /// happen. See `pattern_core::observer::MemoryObserver`.
+    observer: pattern_core::observer::MemoryObserver,
+
     /// Reverse mapping from canonical file path to block_id. Populated
     /// when subscribers are spawned; used by `BlockFanoutRouter` to
     /// resolve file-change events back to their block_id.
@@ -169,6 +175,7 @@ impl MemoryCache {
             supervisor_state: Arc::new(SupervisorState::new()),
             supervisor_task: None,
             block_change_notifier: crate::subscriber::BlockChangeNotifier::new(),
+            observer: pattern_core::observer::MemoryObserver::new(),
             path_to_block_id: Arc::new(DashMap::new()),
         }
     }
@@ -194,6 +201,7 @@ impl MemoryCache {
             supervisor_state: Arc::new(SupervisorState::new()),
             supervisor_task: None,
             block_change_notifier: crate::subscriber::BlockChangeNotifier::new(),
+            observer: pattern_core::observer::MemoryObserver::new(),
             path_to_block_id: Arc::new(DashMap::new()),
         }
     }
@@ -204,6 +212,11 @@ impl MemoryCache {
     /// callbacks via [`crate::subscriber::BlockChangeNotifier::subscribe`]
     /// and receive a [`crate::subscriber::Subscription`] guard whose
     /// `Drop` unsubscribes.
+    /// Access the cross-block memory observer for this cache.
+    pub fn memory_observer(&self) -> &pattern_core::observer::MemoryObserver {
+        &self.observer
+    }
+
     pub fn block_change_notifier(&self) -> &crate::subscriber::BlockChangeNotifier {
         &self.block_change_notifier
     }
@@ -297,6 +310,7 @@ impl MemoryCache {
                 let respawn_reembed_tx = reembed_tx;
                 let respawn_heartbeat_tx = heartbeat_tx;
                 let respawn_block_change_notifier = self.block_change_notifier.clone();
+                let respawn_observer = self.observer.clone();
                 let respawn_path_to_block_id = Arc::clone(&self.path_to_block_id);
 
                 let respawn_fn: Arc<dyn Fn(&str) + Send + Sync> =
@@ -337,6 +351,7 @@ impl MemoryCache {
                             Arc::clone(&respawn_db),
                             Arc::clone(&respawn_subscribers),
                             respawn_block_change_notifier.clone(),
+                            respawn_observer.clone(),
                             Arc::clone(&respawn_path_to_block_id),
                         );
                     });
@@ -646,7 +661,7 @@ impl MemoryCache {
                     scope: Scope::from_db_key(agent_id)
                         .unwrap_or_else(|| Scope::Global(agent_id.into())),
                     label: label.to_string(),
-                    op: "persist_block",
+                    op: "persist_block".to_string(),
                 });
             }
         };
@@ -658,7 +673,7 @@ impl MemoryCache {
                 scope: Scope::from_db_key(agent_id)
                     .unwrap_or_else(|| Scope::Global(agent_id.into())),
                 label: label.to_string(),
-                op: "persist_block",
+                op: "persist_block".to_string(),
             })?;
 
         // Extract data we need before releasing the entry lock.
@@ -730,7 +745,7 @@ impl MemoryCache {
                     scope: Scope::from_db_key(agent_id)
                         .unwrap_or_else(|| Scope::Global(agent_id.into())),
                     label: label.to_string(),
-                    op: "persist_block",
+                    op: "persist_block".to_string(),
                 })?;
 
         if let Some(seq) = new_seq {
@@ -813,7 +828,7 @@ impl MemoryCache {
             None => Err(MemoryError::WriteToMissingBlock {
                 scope: scope.clone(),
                 label: label.to_string(),
-                op: "mark_dirty",
+                op: "mark_dirty".to_string(),
             }),
         }
     }
@@ -1035,6 +1050,7 @@ impl MemoryCache {
             Arc::clone(&self.db),
             Arc::clone(&self.subscribers),
             self.block_change_notifier.clone(),
+            self.observer.clone(),
             Arc::clone(&self.path_to_block_id),
         );
     }
@@ -1458,9 +1474,17 @@ impl MemoryCache {
             });
             all_results.truncate(options.limit);
 
+            let resolve = |block_id: &str| {
+                self.blocks.get(block_id).map(|cb| {
+                    let agent_key = cb.doc.agent_id().to_string();
+                    let scope = pattern_core::types::memory_types::Scope::from_db_key(&agent_key)
+                        .unwrap_or_else(|| pattern_core::types::memory_types::Scope::global(&agent_key));
+                    (scope, smol_str::SmolStr::from(cb.doc.label()))
+                })
+            };
             return Ok(all_results
                 .into_iter()
-                .map(db_search_result_to_core)
+                .map(|r| db_search_result_to_core(r, &resolve))
                 .collect());
         }
 
@@ -1479,7 +1503,15 @@ impl MemoryCache {
             tracing::debug!("search_impl result: {:?}", r);
         }
 
-        Ok(results.into_iter().map(db_search_result_to_core).collect())
+        let resolve = |block_id: &str| {
+            self.blocks.get(block_id).map(|cb| {
+                let agent_key = cb.doc.agent_id().to_string();
+                let scope = pattern_core::types::memory_types::Scope::from_db_key(&agent_key)
+                    .unwrap_or_else(|| pattern_core::types::memory_types::Scope::global(&agent_key));
+                (scope, smol_str::SmolStr::from(cb.doc.label()))
+            })
+        };
+        Ok(results.into_iter().map(|r| db_search_result_to_core(r, &resolve)).collect())
     }
 }
 
@@ -1753,6 +1785,7 @@ pub(crate) fn spawn_subscriber_for_block(
     db: Arc<ConstellationDb>,
     subscribers: Arc<DashMap<String, SubscriberHandle>>,
     block_change_notifier: crate::subscriber::BlockChangeNotifier,
+    observer: pattern_core::observer::MemoryObserver,
     path_to_block_id: Arc<DashMap<PathBuf, String>>,
 ) {
     // Don't double-spawn.
@@ -1856,14 +1889,35 @@ pub(crate) fn spawn_subscriber_for_block(
     let block_id_owned = block_id.to_string();
     let tx_clone = event_tx.clone();
     let paused_flag = Arc::clone(&paused);
+    // Observer-side: build the BlockAddr from the doc's scope + label so
+    // cross-block observers (MemorySync handlers etc) can filter and route
+    // by stable wire-side addressing. Cloning the observer is cheap (Arc'd
+    // internally); the closure owns its own handle to publish on.
+    let observer_for_closure = observer.clone();
+    let block_addr_for_closure = pattern_core::types::memory_types::BlockAddr {
+        scope: doc_scope.clone(),
+        label: doc.label().into(),
+    };
     let subscription = doc
         .inner()
         .subscribe_local_update(Box::new(move |update_bytes| {
             if !paused_flag.load(std::sync::atomic::Ordering::Acquire) {
+                // Persistence path (per-block crossbeam, bounded-blocking, no drops).
                 let _ = tx_clone.try_send(crate::subscriber::event::CommitEvent {
                     block_id: block_id_owned.clone(),
                     update_bytes: update_bytes.clone(),
                 });
+                // Observer path (tokio broadcast, drop-on-lag, origin=None for
+                // local agent edits). Imported plugin deltas don't fire this
+                // callback (loro's subscribe_local_update is local-only) so
+                // origin=None is the right default here.
+                observer_for_closure.publish(
+                    pattern_core::observer::MemoryEvent::Delta {
+                        addr: block_addr_for_closure.clone(),
+                        update_bytes: update_bytes.clone(),
+                        origin: None,
+                    },
+                );
             }
             true // Keep subscription active.
         }));
@@ -2171,6 +2225,10 @@ fn db_archival_to_archival(entry: &pattern_db::models::ArchivalEntry) -> Archiva
 }
 
 impl MemoryStore for MemoryCache {
+    fn observer(&self) -> Option<&pattern_core::observer::MemoryObserver> {
+        Some(&self.observer)
+    }
+
     fn create_block(&self, scope: &Scope, create: BlockCreate) -> MemoryResult<StructuredDocument> {
         let BlockCreate {
             label,
@@ -2807,7 +2865,7 @@ impl MemoryStore for MemoryCache {
         let block = block.ok_or_else(|| MemoryError::WriteToMissingBlock {
             scope: scope.clone(),
             label: label.to_string(),
-            op: "update_block_metadata",
+            op: "update_block_metadata".to_string(),
         })?;
 
         // Apply pinned update.
@@ -2903,7 +2961,7 @@ impl MemoryStore for MemoryCache {
         let block = block.ok_or_else(|| MemoryError::WriteToMissingBlock {
             scope: scope.clone(),
             label: label.to_string(),
-            op: "undo_redo",
+            op: "undo_redo".to_string(),
         })?;
 
         match op {
@@ -2989,7 +3047,7 @@ impl MemoryStore for MemoryCache {
         let block = block.ok_or_else(|| MemoryError::WriteToMissingBlock {
             scope: scope.clone(),
             label: label.to_string(),
-            op: "history_depth",
+            op: "history_depth".to_string(),
         })?;
 
         let undo = pattern_db::queries::count_undo_steps(&*self.db.get().mem()?, &block.id).mem()?
@@ -4447,6 +4505,7 @@ mod tests {
             Arc::clone(&db),
             Arc::clone(&subscribers),
             notifier.clone(),
+            pattern_core::observer::MemoryObserver::new(),
             Arc::new(DashMap::new()),
         );
         assert!(
@@ -4483,6 +4542,7 @@ mod tests {
             Arc::clone(&db),
             Arc::clone(&subscribers),
             notifier,
+            pattern_core::observer::MemoryObserver::new(),
             Arc::new(DashMap::new()),
         );
         assert!(
@@ -4710,6 +4770,7 @@ mod tests {
             Arc::clone(&db),
             Arc::clone(&subscribers),
             crate::subscriber::BlockChangeNotifier::new(),
+            pattern_core::observer::MemoryObserver::new(),
             Arc::new(DashMap::new()),
         );
 
@@ -4844,6 +4905,7 @@ mod tests {
             Arc::clone(&db),
             Arc::clone(&subscribers),
             crate::subscriber::BlockChangeNotifier::new(),
+            pattern_core::observer::MemoryObserver::new(),
             Arc::new(DashMap::new()),
         );
 

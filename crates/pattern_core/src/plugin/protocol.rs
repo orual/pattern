@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use irpc::channel::{mpsc, oneshot};
 
+use crate::error::MemoryError;
 use crate::traits::plugin::wire::*;
 use crate::types::block::BlockCreate;
 use crate::types::memory_types::{
@@ -99,62 +100,60 @@ pub enum PluginHostProtocol {
     // ═══ host callbacks ══════════════════════════════════════════════════════
     /// Plugin sends a message to an agent's mailbox.
     #[rpc(tx = oneshot::Sender<Result<(), WirePluginError>>)]
-    HostSendMessage(WireHostMessage),
-    /// Plugin creates a task. Returns the new task_id.
-    #[rpc(tx = oneshot::Sender<Result<SmolStr, WirePluginError>>)]
-    HostTaskCreate(WireTaskCreate),
-    #[rpc(tx = oneshot::Sender<Result<(), WirePluginError>>)]
-    HostTaskTransition(WireTaskTransition),
-    #[rpc(tx = oneshot::Sender<Result<(), WirePluginError>>)]
-    HostTaskLink(WireTaskLink),
-    #[rpc(tx = oneshot::Sender<Result<Vec<WireTaskItem>, WirePluginError>>)]
-    HostTaskQuery(WireTaskQuery),
-    #[rpc(tx = oneshot::Sender<Result<WireSkillInvocation, WirePluginError>>)]
-    HostSkillInvoke(WireSkillInvoke),
+    HostSendMessage(crate::traits::plugin::wire::PluginAgentMessage),
 
     // ═══ db-poking memory ops ════════════════════════════════════════════════
     /// Create a new memory block. Returns the freshly-minted metadata.
-    #[rpc(tx = oneshot::Sender<Result<BlockMetadata, WireMemoryError>>)]
-    MemoryCreateBlock(BlockCreate),
+    #[rpc(tx = oneshot::Sender<Result<BlockAddr, MemoryError>>)]
+    MemoryCreateBlock(MemoryCreateBlockArgs),
     /// Soft-delete a block (idempotent if Memory.create later reactivates).
-    #[rpc(tx = oneshot::Sender<Result<(), WireMemoryError>>)]
+    #[rpc(tx = oneshot::Sender<Result<(), MemoryError>>)]
     #[wrap(MemoryDeleteBlockRequest)]
     MemoryDeleteBlock(BlockAddr),
     /// FTS5 / vector memory search.
-    #[rpc(tx = oneshot::Sender<Result<Vec<WireSearchResult>, WireMemoryError>>)]
+    #[rpc(tx = oneshot::Sender<Result<Vec<WireSearchResult>, MemoryError>>)]
     #[wrap(MemorySearchRequest)]
     MemorySearch(WireSearchQuery),
     /// Enumerate blocks matching the filter.
-    #[rpc(tx = oneshot::Sender<Result<Vec<BlockMetadata>, WireMemoryError>>)]
+    #[rpc(tx = oneshot::Sender<Result<Vec<BlockMetadata>, MemoryError>>)]
     MemoryListBlocks(BlockFilter),
     /// Persist a block to disk (explicit flush).
-    #[rpc(tx = oneshot::Sender<Result<(), WireMemoryError>>)]
+    #[rpc(tx = oneshot::Sender<Result<(), MemoryError>>)]
     #[wrap(MemoryPersistRequest)]
     MemoryPersist(BlockAddr),
     /// Update block metadata (pinned, type, schema, description).
-    #[rpc(tx = oneshot::Sender<Result<(), WireMemoryError>>)]
+    #[rpc(tx = oneshot::Sender<Result<(), MemoryError>>)]
     #[wrap(MemoryUpdateMetadataRequest)]
     MemoryUpdateMetadata(MemoryUpdateMetadataArgs),
     /// Undo/redo the last persisted change. Returns whether the op moved the
     /// document (false if nothing to undo/redo).
-    #[rpc(tx = oneshot::Sender<Result<bool, WireMemoryError>>)]
+    #[rpc(tx = oneshot::Sender<Result<bool, MemoryError>>)]
     #[wrap(MemoryUndoRedoRequest)]
     MemoryUndoRedo(MemoryUndoRedoArgs),
     /// Get a block shared by another agent (via `share` permission).
-    #[rpc(tx = oneshot::Sender<Result<Option<BlockMetadata>, WireMemoryError>>)]
+    #[rpc(tx = oneshot::Sender<Result<Option<BlockAddr>, MemoryError>>)]
     #[wrap(MemoryGetSharedBlockRequest)]
     MemoryGetSharedBlock(MemoryGetSharedBlockArgs),
     /// Insert an archival entry.
-    #[rpc(tx = oneshot::Sender<Result<(), WireMemoryError>>)]
+    #[rpc(tx = oneshot::Sender<Result<(), MemoryError>>)]
     MemoryInsertArchival(ArchivalEntry),
     /// Search archival entries by content.
-    #[rpc(tx = oneshot::Sender<Result<Vec<ArchivalEntry>, WireMemoryError>>)]
+    #[rpc(tx = oneshot::Sender<Result<Vec<ArchivalEntry>, MemoryError>>)]
     #[wrap(MemorySearchArchivalRequest)]
     MemorySearchArchival(WireSearchQuery),
     /// Delete a single archival entry by id.
-    #[rpc(tx = oneshot::Sender<Result<(), WireMemoryError>>)]
+    #[rpc(tx = oneshot::Sender<Result<(), MemoryError>>)]
     #[wrap(MemoryDeleteArchivalRequest)]
     MemoryDeleteArchival(SmolStr),
+
+    /// Create-or-replace a block (system-level upsert: removes any existing block
+    /// at the same label first, then creates). Returns the new block's address.
+    #[rpc(tx = oneshot::Sender<Result<BlockAddr, MemoryError>>)]
+    #[wrap(MemoryCreateOrReplaceBlockRequest)]
+    MemoryCreateOrReplaceBlock(MemoryCreateBlockArgs),
+    /// List all scopes in the constellation (for Constellation-wide search resolution).
+    #[rpc(tx = oneshot::Sender<Result<Vec<crate::types::memory_types::Scope>, MemoryError>>)]
+    MemoryListConstellationScopes(MemoryListConstellationScopesArgs),
 }
 
 /// Memory delta-sync protocol. Single bidi-streaming method on the
@@ -168,17 +167,25 @@ pub enum PluginHostProtocol {
 #[rpc_requests(message = MemorySyncMessage)]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum MemorySyncProtocol {
-    /// Open a bidi delta-sync session. Runtime sends `WireMemoryEvent`s
-    /// (initial BlockAvailable + ongoing Delta + final BlockGone) on `tx`;
-    /// plugin pushes local edits as `WireMemoryEdit`s on `rx`. Drop either
-    /// side closes the session.
+    /// Open a bidi delta-sync session. Plugin sends a [`SyncRequest`] to
+    /// initialize (Filter or Addrs + optional per-addr known VVs for resume).
+    /// Runtime sends `WireMemoryEvent`s (BlockAvailable / Delta / BlockGone /
+    /// Done) on `tx`; plugin pushes local edits + control messages as
+    /// `WireMemoryEdit`s on `rx` (Delta / Subscribe / Unsubscribe / Done).
+    /// Drop either side closes the session.
     #[rpc(tx = mpsc::Sender<WireMemoryEvent>, rx = mpsc::Receiver<WireMemoryEdit>)]
-    Sync(BlockFilter),
+    Sync(SyncRequest),
 }
 
 // ── Multi-field argument structs ─────────────────────────────────────────────
 // irpc's `#[rpc_requests]` wants tuple-style variants with a single field.
 // Multi-field variants are expressed by wrapping their args in named structs.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryCreateBlockArgs {
+    pub scope: crate::types::memory_types::Scope,
+    pub create: BlockCreate,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryUpdateMetadataArgs {
@@ -194,9 +201,31 @@ pub struct MemoryUndoRedoArgs {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryGetSharedBlockArgs {
-    pub owner: SmolStr,
+    pub owner: crate::types::memory_types::Scope,
     pub label: SmolStr,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryGetBlockMetadataArgs {
+    pub scope: crate::types::memory_types::Scope,
+    pub label: SmolStr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryGetRenderedContentArgs {
+    pub scope: crate::types::memory_types::Scope,
+    pub label: SmolStr,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryListConstellationScopesArgs;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryHasSharedBlocksWithArgs {
+    pub caller: crate::types::memory_types::Scope,
+    pub target: crate::types::memory_types::Scope,
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -224,9 +253,8 @@ mod tests {
     #[test]
     fn block_addr_roundtrips() {
         let addr = BlockAddr {
-            agent_id: "local:pattern".into(),
+            scope: crate::types::memory_types::Scope::global("pattern"),
             label: "scratchpad".into(),
-            scope: WireMemoryScope::Personal,
         };
         let back = roundtrip(&addr);
         assert_eq!(back, addr);
@@ -261,6 +289,7 @@ mod tests {
             plugin_id: "discord".into(),
             plugin_root: std::path::PathBuf::from("/plugins/discord"),
             mount_path: None,
+            project_id: None,
             user_config: WireJson("{}".into()),
             effective_capabilities: CapabilitySet::default(),
         };
@@ -278,9 +307,8 @@ mod tests {
     #[test]
     fn wire_memory_event_with_metadata_and_snapshot_roundtrips() {
         let addr = BlockAddr {
-            agent_id: "local:pattern".into(),
+            scope: crate::types::memory_types::Scope::global("pattern"),
             label: "persona".into(),
-            scope: WireMemoryScope::Personal,
         };
         let meta = BlockMetadata::standalone(BlockSchema::text());
         let ev = WireMemoryEvent::BlockAvailable {
@@ -296,9 +324,8 @@ mod tests {
         // MemoryUpdateMetadataArgs is the canonical multi-field wrapper.
         let args = MemoryUpdateMetadataArgs {
             addr: BlockAddr {
-                agent_id: "local:pattern".into(),
+                scope: crate::types::memory_types::Scope::global("pattern"),
                 label: "x".into(),
-                scope: WireMemoryScope::Personal,
             },
             patch: BlockMetadataPatch::default().pinned(true),
         };

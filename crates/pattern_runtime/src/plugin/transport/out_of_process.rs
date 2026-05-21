@@ -7,9 +7,13 @@
 //! For remote plugins (phase 7), the address-via-state.json step is skipped — we'll
 //! dial by pubkey alone through the iroh relay. Localhost v1 only writes/reads state.json.
 //!
-//! V1 wires declare_ports + library end-to-end (smallest payloads, no PluginContext
-//! conversion needed) and leaves the rest as `Unimplemented` returns. Full method
-//! dispatch lands when the integration test fixture plugin exists (tasks 7-8).
+//! Most `PluginConnection` methods are wired: lifecycle (on_install/on_enable/on_disable),
+//! metadata (declare_ports/library), hooks (on_event for both Notification and Blocking
+//! semantics), and ports (port_call oneshot, port_subscribe with Done-variant stream
+//! handling). PluginContext → WirePluginContext conversion happens in `build_wire_context`.
+//!
+//! UNTESTED via integration suite: on_disable, on_event-Blocking, port_call, port_subscribe,
+//! port_unsubscribe — see A.4.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -184,10 +188,17 @@ impl OutOfProcessPluginConnection {
         &self,
         ctx: &PluginContext,
     ) -> pattern_core::traits::plugin::wire::WirePluginContext {
+        // Derive project_id from the session's scope when it's a Local(project_id).
+        // Global scopes have no project association; plugin gets None.
+        let project_id = ctx.scope.as_ref().and_then(|s| match s {
+            pattern_core::types::memory_types::Scope::Local(id) => Some(id.clone()),
+            pattern_core::types::memory_types::Scope::Global(_) => None,
+        });
         pattern_core::traits::plugin::wire::WirePluginContext {
             plugin_id: ctx.plugin_id.clone(),
             plugin_root: self.plugin_root.clone(),
             mount_path: ctx.mount_path.clone(),
+            project_id,
             user_config: pattern_core::traits::plugin::wire::WireJson::from_value(&self.user_config)
                 .unwrap_or_else(|_| pattern_core::traits::plugin::wire::WireJson("null".to_string())),
             effective_capabilities: self.effective_capabilities.clone(),
@@ -389,6 +400,24 @@ impl PluginConnection for OutOfProcessPluginConnection {
             }
         });
         Ok(Box::pin(stream))
+    }
+
+    async fn port_unsubscribe(
+        &self,
+        port_id: &pattern_core::types::port::PortId,
+    ) -> Result<(), pattern_core::types::port::PortError> {
+        use pattern_core::traits::plugin::wire::WirePortUnsubscribeRequest;
+        let req = WirePortUnsubscribeRequest { port_id: port_id.clone() };
+        let resp = self.client.rpc(req).await.map_err(|e| {
+            pattern_core::types::port::PortError::CallFailed(
+                port_id.clone(),
+                format!("oop port_unsubscribe rpc: {e}"),
+            )
+        })?;
+        match resp {
+            Ok(()) => Ok(()),
+            Err(wire_err) => Err(wire_port_error_to_port_error(port_id, "unsubscribe", wire_err)),
+        }
     }
 }
 

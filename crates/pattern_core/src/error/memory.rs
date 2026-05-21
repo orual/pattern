@@ -43,7 +43,7 @@ use crate::types::memory_types::{DocumentError, IsolatePolicy, Scope};
 /// This is the unified error type for all memory operations. The
 /// `MemoryResult<T>` type alias uses this as the error variant.
 #[non_exhaustive]
-#[derive(Debug, Error, Diagnostic)]
+#[derive(Debug, Error, Diagnostic, serde::Serialize, serde::Deserialize)]
 pub enum MemoryError {
     /// The requested memory block does not exist (typed-handle lookup).
     ///
@@ -109,7 +109,7 @@ pub enum MemoryError {
         label: String,
         /// The mutating operation that raised the error
         /// (e.g. `"persist_block"`, `"update_block_metadata"`).
-        op: &'static str,
+        op: String,
     },
 
     /// The block is read-only and cannot be modified.

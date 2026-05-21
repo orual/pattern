@@ -239,7 +239,7 @@ impl MemoryStore for InMemoryMemoryStore {
                 pattern_core::types::memory_types::MemoryError::WriteToMissingBlock {
                     scope: scope.clone(),
                     label: label.to_string(),
-                    op: "update_block_metadata",
+                    op: "update_block_metadata".to_string(),
                 },
             ),
         }

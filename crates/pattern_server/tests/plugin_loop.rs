@@ -259,3 +259,27 @@ async fn progress_on_event_reaches_plugin() {
     // plugin's on_event subscriber path.
     let _ = conn.on_event(event).await.expect("on_event");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn progress_on_disable_reaches_plugin() {
+    // Exercises the daemon-→-plugin on_disable wire path. Fixture's default
+    // on_disable returns Ok; this test pins that the wire round-trip succeeds.
+    let harness = Harness::new().await;
+    let conn = harness.spawn_plugin().await;
+    let ctx = make_real_plugin_context();
+    conn.on_disable(&ctx).await.expect("on_disable");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn progress_on_event_blocking_returns_response() {
+    // Exercises the OnHookEventBlocking wire path (distinct from OnHookEvent
+    // Notification). Fixture returns Some(Continue) for tool.before; this asserts
+    // the response round-trips back through WireHookResponse decode.
+    use pattern_core::hooks::{HookEvent, HookResponse, tags};
+    let harness = Harness::new().await;
+    let conn = harness.spawn_plugin().await;
+    let event = HookEvent::blocking(tags::TOOL_BEFORE, serde_json::Value::Null);
+    let resp = conn.on_event(event).await.expect("on_event blocking");
+    assert!(matches!(resp, Some(HookResponse::Continue)),
+        "expected Some(Continue), got {:?}", resp);
+}

@@ -24,6 +24,10 @@ impl PluginExtension for MinimalPlugin {
         if event.tag == tags::TURN_BEFORE {
             tracing::debug!(tag = ?event.tag, "minimal plugin saw turn.before");
         }
+        // For blocking-test: respond Continue when daemon sends tool.before as blocking.
+        if event.tag == tags::TOOL_BEFORE {
+            return Some(HookResponse::Continue);
+        }
         None
     }
 }

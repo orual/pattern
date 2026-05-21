@@ -55,7 +55,7 @@ pub struct ArchivalEntry {
 }
 
 /// Information about a block shared with an agent.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SharedBlockInfo {
     pub block_id: String,
     pub owner_agent_id: String,
