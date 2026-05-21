@@ -48,7 +48,6 @@ nix = { version = "0.29", features = ["signal", "process"] }
 # discriminant), and those restrictions are load-bearing for irpc correctness.
 postcard = { version = "1", features = ["alloc"] }
 tempfile = { workspace = true }
-anyhow = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 # Test fixtures (NopProviderClient, InMemoryMemoryStore, etc.) live behind
 # the `test-support` feature in pattern_runtime.

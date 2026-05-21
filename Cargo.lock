@@ -7073,7 +7073,6 @@ dependencies = [
 name = "pattern-server"
 version = "0.4.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "clap",
  "dashmap",

@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use iroh::{Endpoint, PublicKey, SecretKey};
@@ -47,8 +46,8 @@ struct Harness {
 }
 
 impl Harness {
-    async fn new() -> Result<Self> {
-        let tmp = TempDir::new().context("tempdir")?;
+    async fn new() -> Self {
+        let tmp = TempDir::new().expect("tempdir");
 
         // SAFETY: nextest runs each test in its own subprocess by default, so env
         // mutation here doesn't race with other tests.
@@ -68,7 +67,7 @@ impl Harness {
         // SAME key because both see the same PATTERN_HOME.
         let plugin_id: PluginId = FIXTURE_PLUGIN_ID.into();
         let plugin_sk = PluginKeyStore::load_or_generate(&plugin_id)
-            .context("load_or_generate plugin keypair")?;
+            .expect("load_or_generate plugin keypair");
         let plugin_pubkey = plugin_sk.public();
 
         // Daemon endpoint + DaemonState.save so the fixture can dial back.
@@ -77,18 +76,18 @@ impl Harness {
             .secret_key(daemon_sk.clone())
             .bind()
             .await
-            .map_err(|e| anyhow::anyhow!("daemon endpoint bind: {e}"))?;
+            .unwrap_or_else(|e| panic!("daemon endpoint bind: {e}"));
         let daemon_addr = daemon_endpoint
             .bound_sockets()
             .into_iter()
             .next()
-            .context("daemon has no bound socket")?;
+            .expect("daemon has no bound socket");
         let daemon_state = DaemonState {
             pid: std::process::id(),
             addr: daemon_addr,
             node_id: daemon_sk.public().to_string(),
         };
-        daemon_state.save(&daemon_sk.to_bytes())?;
+        daemon_state.save(&daemon_sk.to_bytes()).expect("save daemon state");
 
         // Session-aware route table + gated host handler — matches main.rs.
         // Register the fixture's pubkey under a test session id so the iroh accept
@@ -129,20 +128,20 @@ impl Harness {
             .accept(PLUGIN_HOST_ALPN, gated_host)
             .spawn();
 
-        let fixture_binary = build_fixture()?;
+        let fixture_binary = build_fixture();
 
-        Ok(Self {
+        Self {
             _tmp: tmp,
             plugin_id,
             plugin_pubkey,
             daemon_endpoint,
             _daemon_router: daemon_router,
             fixture_binary,
-        })
+        }
     }
 
-    async fn spawn_plugin(&self) -> Result<OutOfProcessPluginConnection> {
-        Ok(OutOfProcessPluginConnection::spawn(
+    async fn spawn_plugin(&self) -> OutOfProcessPluginConnection {
+        OutOfProcessPluginConnection::spawn(
             self.plugin_id.clone(),
             self.fixture_binary.clone(),
             self.plugin_pubkey,
@@ -151,11 +150,12 @@ impl Harness {
             serde_json::Value::Null, // empty user_config
             pattern_core::CapabilitySet::all(), // permissive for tests
         )
-        .await?)
+        .await
+        .expect("spawn plugin")
     }
 }
 
-fn build_fixture() -> Result<PathBuf> {
+fn build_fixture() -> PathBuf {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let fixture_manifest = manifest_dir
         .join("..")
@@ -168,40 +168,37 @@ fn build_fixture() -> Result<PathBuf> {
         .args(["build", "--manifest-path"])
         .arg(&fixture_manifest)
         .status()
-        .context("cargo build minimal_plugin")?;
-    anyhow::ensure!(status.success(), "minimal_plugin failed to build");
+        .expect("cargo build minimal_plugin");
+    assert!(status.success(), "minimal_plugin failed to build");
     let fixture_dir = fixture_manifest.parent().unwrap();
     let binary = fixture_dir.join("target/debug/minimal_plugin");
-    anyhow::ensure!(binary.exists(), "binary not found at {}", binary.display());
-    Ok(binary)
+    assert!(binary.exists(), "binary not found at {}", binary.display());
+    binary
 }
 
 // ── regression: pinned behavior ───────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn regression_declare_ports_round_trips_to_fixture() -> Result<()> {
-    let harness = Harness::new().await?;
-    let conn = harness.spawn_plugin().await?;
-    let ports = conn.declare_ports().await?;
+async fn regression_declare_ports_round_trips_to_fixture() {
+    let harness = Harness::new().await;
+    let conn = harness.spawn_plugin().await;
+    let ports = conn.declare_ports().await.expect("declare_ports");
     assert!(ports.is_empty(), "minimal_plugin declares no ports");
-    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn regression_library_round_trips_to_fixture() -> Result<()> {
-    let harness = Harness::new().await?;
-    let conn = harness.spawn_plugin().await?;
-    let lib = conn.library().await?;
+async fn regression_library_round_trips_to_fixture() {
+    let harness = Harness::new().await;
+    let conn = harness.spawn_plugin().await;
+    let lib = conn.library().await.expect("library");
     assert!(lib.is_none(), "minimal_plugin ships no library");
-    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn regression_connection_reports_healthy() -> Result<()> {
-    let harness = Harness::new().await?;
-    let conn = harness.spawn_plugin().await?;
+async fn regression_connection_reports_healthy() {
+    let harness = Harness::new().await;
+    let conn = harness.spawn_plugin().await;
     assert!(matches!(conn.health(), PluginHealth::Healthy));
-    Ok(())
 }
 
 // ── progress: currently FAIL, each marks a stubbed path ───────────────────
@@ -235,33 +232,30 @@ fn make_real_plugin_context() -> pattern_core::traits::plugin::PluginContext {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn progress_on_install_reaches_plugin() -> Result<()> {
+async fn progress_on_install_reaches_plugin() {
     // Today: returns Err(Lifecycle("oop on_install: PluginContext->wire conversion not yet wired (v1)")).
     // Eventual: invokes MinimalPlugin::on_install on the fixture side, returns Ok(()).
-    let harness = Harness::new().await?;
-    let conn = harness.spawn_plugin().await?;
+    let harness = Harness::new().await;
+    let conn = harness.spawn_plugin().await;
     let ctx = make_real_plugin_context();
-    conn.on_install(&ctx).await?;
-    Ok(())
+    conn.on_install(&ctx).await.expect("on_install");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn progress_on_enable_reaches_plugin() -> Result<()> {
-    let harness = Harness::new().await?;
-    let conn = harness.spawn_plugin().await?;
+async fn progress_on_enable_reaches_plugin() {
+    let harness = Harness::new().await;
+    let conn = harness.spawn_plugin().await;
     let ctx = make_real_plugin_context();
-    conn.on_enable(&ctx).await?;
-    Ok(())
+    conn.on_enable(&ctx).await.expect("on_enable");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn progress_on_event_reaches_plugin() -> Result<()> {
+async fn progress_on_event_reaches_plugin() {
     use pattern_core::hooks::{HookEvent, tags};
-    let harness = Harness::new().await?;
-    let conn = harness.spawn_plugin().await?;
+    let harness = Harness::new().await;
+    let conn = harness.spawn_plugin().await;
     let event = HookEvent::notification(tags::TURN_BEFORE, serde_json::Value::Null);
     // Today: returns Err(Lifecycle("...not yet wired (v1)")). Eventual: fires the
     // plugin's on_event subscriber path.
-    let _ = conn.on_event(event).await?;
-    Ok(())
+    let _ = conn.on_event(event).await.expect("on_event");
 }
