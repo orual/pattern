@@ -28,6 +28,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 smol_str = { workspace = true }
 dashmap = { workspace = true }
+loro = "1.10"
+crossbeam-channel = "0.5"
 futures = { workspace = true }
 
 [features]

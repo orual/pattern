@@ -76,6 +76,9 @@ pub use registration::{register_plugin, PluginHandle, RegisterError};
 pub mod memory_sync_client;
 pub use memory_sync_client::{MemorySyncClient, MemorySyncError};
 
+pub mod plugin_memory_store;
+pub use plugin_memory_store::PluginMemoryStore;
+
 // ── TUI channel (opt-in via `tui-channel` feature) ──
 //
 // Plugins that want to dispatch slash commands or listen to daemon-level

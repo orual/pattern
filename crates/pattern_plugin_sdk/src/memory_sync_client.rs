@@ -53,6 +53,15 @@ use pattern_core::traits::plugin::wire::{
 use smol_str::SmolStr;
 use tokio::task::JoinHandle;
 
+/// Per-cache-entry bundle: the materialised doc plus the loro
+/// `subscribe_local_update` subscription that auto-pushes plugin-local edits
+/// upstream as `WireMemoryEdit::Delta`. The Subscription field must be kept
+/// alive for the doc's lifetime in the cache; dropping it unsubscribes loro.
+struct CachedBlock {
+    doc: Arc<StructuredDocument>,
+    _sub: loro::Subscription,
+}
+
 /// Errors opening a MemorySync stream or operating against an open one.
 #[derive(Debug, thiserror::Error)]
 pub enum MemorySyncError {
@@ -79,8 +88,9 @@ pub enum MemorySyncError {
 pub struct MemorySyncClient {
     /// Outbound channel: plugin -> daemon (WireMemoryEdit).
     tx: mpsc::Sender<WireMemoryEdit>,
-    /// Local materialised cache keyed by addr.
-    cache: Arc<DashMap<BlockAddr, Arc<StructuredDocument>>>,
+    /// Local materialised cache keyed by addr. Each entry bundles the doc
+    /// with the loro subscription that drives auto-push of local edits.
+    cache: Arc<DashMap<BlockAddr, CachedBlock>>,
     /// Receive task driving the cache update loop. Joined on Drop.
     _recv_task: JoinHandle<()>,
 }
@@ -111,10 +121,10 @@ impl MemorySyncClient {
                 message: format!("bidi_streaming: {e}").into(),
             })?;
 
-        let cache: Arc<DashMap<BlockAddr, Arc<StructuredDocument>>> =
-            Arc::new(DashMap::new());
+        let cache: Arc<DashMap<BlockAddr, CachedBlock>> = Arc::new(DashMap::new());
         let cache_clone = Arc::clone(&cache);
-        let recv_task = tokio::spawn(receive_loop(rx, cache_clone));
+        let tx_for_recv = tx.clone();
+        let recv_task = tokio::spawn(receive_loop(rx, cache_clone, tx_for_recv));
 
         Ok(Self {
             tx,
@@ -127,7 +137,7 @@ impl MemorySyncClient {
     /// been materialised yet (e.g. BlockAvailable hasn't arrived, or addr is
     /// outside the watched set).
     pub fn get_block(&self, addr: &BlockAddr) -> Option<Arc<StructuredDocument>> {
-        self.cache.get(addr).map(|e| Arc::clone(e.value()))
+        self.cache.get(addr).map(|e| Arc::clone(&e.value().doc))
     }
 
     /// Check whether a block has been materialised yet.
@@ -192,12 +202,13 @@ impl Drop for MemorySyncClient {
 /// tx-side drop tearing down the connection).
 async fn receive_loop(
     mut rx: mpsc::Receiver<WireMemoryEvent>,
-    cache: Arc<DashMap<BlockAddr, Arc<StructuredDocument>>>,
+    cache: Arc<DashMap<BlockAddr, CachedBlock>>,
+    tx_for_subs: mpsc::Sender<WireMemoryEdit>,
 ) {
     loop {
         match rx.recv().await {
             Ok(Some(event)) => {
-                if let Err(e) = handle_event(event, &cache) {
+                if let Err(e) = handle_event(event, &cache, &tx_for_subs) {
                     tracing::warn!(error = %e, "memory_sync_client: event handling failed");
                 }
             }
@@ -215,7 +226,8 @@ async fn receive_loop(
 
 fn handle_event(
     event: WireMemoryEvent,
-    cache: &DashMap<BlockAddr, Arc<StructuredDocument>>,
+    cache: &DashMap<BlockAddr, CachedBlock>,
+    tx_for_subs: &mpsc::Sender<WireMemoryEdit>,
 ) -> Result<(), MemorySyncError> {
     match event {
         WireMemoryEvent::BlockAvailable {
@@ -240,7 +252,9 @@ fn handle_event(
                 addr: addr.clone(),
                 message: format!("{e}").into(),
             })?;
-            cache.insert(addr, Arc::new(doc));
+            let doc_arc = Arc::new(doc);
+            let sub = subscribe_auto_push(&doc_arc, addr.clone(), tx_for_subs.clone());
+            cache.insert(addr, CachedBlock { doc: doc_arc, _sub: sub });
         }
         WireMemoryEvent::Delta { addr, payload } => {
             let bytes = match payload {
@@ -248,11 +262,11 @@ fn handle_event(
                 DeltaPayload::Chunked { .. } => return Err(MemorySyncError::UnsupportedChunked),
                 _ => return Err(MemorySyncError::UnsupportedChunked),
             };
-            let Some(doc_entry) = cache.get(&addr) else {
+            let Some(entry) = cache.get(&addr) else {
                 tracing::warn!(addr = ?addr, "memory_sync_client: Delta for unknown addr; skipping (daemon may have missed Subscribe ack)");
                 return Ok(());
             };
-            doc_entry.apply_updates(&bytes).map_err(|e| {
+            entry.doc.apply_updates(&bytes).map_err(|e| {
                 MemorySyncError::DeltaApply {
                     addr: addr.clone(),
                     message: format!("{e}").into(),
@@ -264,7 +278,7 @@ fn handle_event(
             // while preserving the underlying loro state. `LoroDoc::clone` is
             // a reference clone (loro is internally Arc'd) so this is cheap
             // and the existing CRDT state stays consistent across the swap.
-            let old_doc = match cache.get(&addr).map(|e| Arc::clone(e.value())) {
+            let old_doc = match cache.get(&addr).map(|e| Arc::clone(&e.value().doc)) {
                 Some(d) => d,
                 None => {
                     tracing::warn!(addr = ?addr, "memory_sync_client: MetadataChanged for unknown addr; skipping");
@@ -282,7 +296,9 @@ fn handle_event(
                 addr: addr.clone(),
                 message: format!("from_doc_with_metadata on MetadataChanged: {e}").into(),
             })?;
-            cache.insert(addr, Arc::new(new_doc));
+            let new_doc_arc = Arc::new(new_doc);
+            let sub = subscribe_auto_push(&new_doc_arc, addr.clone(), tx_for_subs.clone());
+            cache.insert(addr, CachedBlock { doc: new_doc_arc, _sub: sub });
         }
         WireMemoryEvent::BlockGone { addr, reason } => {
             cache.remove(&addr);
@@ -297,4 +313,37 @@ fn handle_event(
         }
     }
     Ok(())
+}
+
+/// Subscribe to loro local-update events on a freshly-materialised doc. The
+/// callback fires on plugin-local edits (NOT on imports — loro's
+/// subscribe_local_update is intentionally local-only), pushing the resulting
+/// update bytes upstream as `WireMemoryEdit::Delta`. This is the plugin half
+/// of the echo-suppressed sync loop: daemon-side edits arrive as `Delta`
+/// events handled by `handle_event` (which calls apply_updates, NOT firing
+/// this subscription), while plugin-side edits flow through here back to the
+/// daemon (which has its own echo filter via OriginTag matching).
+fn subscribe_auto_push(
+    doc: &Arc<StructuredDocument>,
+    addr: BlockAddr,
+    tx: mpsc::Sender<WireMemoryEdit>,
+) -> loro::Subscription {
+    doc.inner().subscribe_local_update(Box::new(move |update_bytes| {
+        let edit = WireMemoryEdit::Delta {
+            addr: addr.clone(),
+            payload: DeltaPayload::Inline { bytes: update_bytes.clone() },
+        };
+        // subscribe_local_update fires synchronously from inside loro's commit
+        // path. We're in a tokio task context (the plugin called the
+        // MemoryStore mutation method that triggered the commit), so we can
+        // spawn the async send. Fire-and-forget: if the stream is closed we
+        // log on next call; the daemon will see the connection-drop on its end.
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            if let Err(_) = tx_clone.send(edit).await {
+                tracing::warn!("memory_sync_client: auto-push Delta failed; stream closed");
+            }
+        });
+        true // keep subscription active
+    }))
 }
