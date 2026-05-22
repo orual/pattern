@@ -27,6 +27,7 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 smol_str = { workspace = true }
+dashmap = { workspace = true }
 futures = { workspace = true }
 
 [features]

@@ -73,6 +73,9 @@ pub use pattern_core::memory::StructuredDocument;
 mod registration;
 pub use registration::{register_plugin, PluginHandle, RegisterError};
 
+pub mod memory_sync_client;
+pub use memory_sync_client::{MemorySyncClient, MemorySyncError};
+
 // ── TUI channel (opt-in via `tui-channel` feature) ──
 //
 // Plugins that want to dispatch slash commands or listen to daemon-level

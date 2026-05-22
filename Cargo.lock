@@ -6952,6 +6952,7 @@ name = "pattern-plugin-sdk"
 version = "0.4.0"
 dependencies = [
  "async-trait",
+ "dashmap",
  "futures",
  "iroh",
  "irpc",
