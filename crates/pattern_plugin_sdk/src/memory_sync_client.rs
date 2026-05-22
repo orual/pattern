@@ -91,6 +91,11 @@ pub struct MemorySyncClient {
     /// Local materialised cache keyed by addr. Each entry bundles the doc
     /// with the loro subscription that drives auto-push of local edits.
     cache: Arc<DashMap<BlockAddr, CachedBlock>>,
+    /// One-shot notification channels for addrs being awaited on first arrival
+    /// (e.g. PluginMemoryStore::create_block registers a waiter before sending
+    /// the host MemoryCreateBlock RPC; receive_loop drains and fires the
+    /// sender when BlockAvailable arrives for that addr).
+    pending_block_waiters: Arc<DashMap<BlockAddr, crossbeam_channel::Sender<()>>>,
     /// Receive task driving the cache update loop. Joined on Drop.
     _recv_task: JoinHandle<()>,
 }
@@ -122,13 +127,16 @@ impl MemorySyncClient {
             })?;
 
         let cache: Arc<DashMap<BlockAddr, CachedBlock>> = Arc::new(DashMap::new());
+        let pending_block_waiters: Arc<DashMap<BlockAddr, crossbeam_channel::Sender<()>>> = Arc::new(DashMap::new());
         let cache_clone = Arc::clone(&cache);
+        let waiters_clone = Arc::clone(&pending_block_waiters);
         let tx_for_recv = tx.clone();
-        let recv_task = tokio::spawn(receive_loop(rx, cache_clone, tx_for_recv));
+        let recv_task = tokio::spawn(receive_loop(rx, cache_clone, waiters_clone, tx_for_recv));
 
         Ok(Self {
             tx,
             cache,
+            pending_block_waiters,
             _recv_task: recv_task,
         })
     }
@@ -138,6 +146,25 @@ impl MemorySyncClient {
     /// outside the watched set).
     pub fn get_block(&self, addr: &BlockAddr) -> Option<Arc<StructuredDocument>> {
         self.cache.get(addr).map(|e| Arc::clone(&e.value().doc))
+    }
+
+    /// Register a one-shot waiter for the first BlockAvailable arrival of a
+    /// given addr. Returns a `Receiver` that the caller can block on
+    /// (typically with a timeout) until the doc has been materialised into
+    /// the local cache. Used by `PluginMemoryStore::create_block` to avoid
+    /// the alternative of polling `get_block` in a sleep loop.
+    ///
+    /// If the addr is already in the cache when this is called, the caller
+    /// should `get_block` first and skip waiter registration. The receive
+    /// loop only fires the waiter on cache insertion, not on "addr is
+    /// already present".
+    pub fn register_block_arrival_waiter(
+        &self,
+        addr: BlockAddr,
+    ) -> crossbeam_channel::Receiver<()> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.pending_block_waiters.insert(addr, tx);
+        rx
     }
 
     /// Check whether a block has been materialised yet.
@@ -203,12 +230,13 @@ impl Drop for MemorySyncClient {
 async fn receive_loop(
     mut rx: mpsc::Receiver<WireMemoryEvent>,
     cache: Arc<DashMap<BlockAddr, CachedBlock>>,
+    waiters: Arc<DashMap<BlockAddr, crossbeam_channel::Sender<()>>>,
     tx_for_subs: mpsc::Sender<WireMemoryEdit>,
 ) {
     loop {
         match rx.recv().await {
             Ok(Some(event)) => {
-                if let Err(e) = handle_event(event, &cache, &tx_for_subs) {
+                if let Err(e) = handle_event(event, &cache, &waiters, &tx_for_subs) {
                     tracing::warn!(error = %e, "memory_sync_client: event handling failed");
                 }
             }
@@ -227,6 +255,7 @@ async fn receive_loop(
 fn handle_event(
     event: WireMemoryEvent,
     cache: &DashMap<BlockAddr, CachedBlock>,
+    waiters: &DashMap<BlockAddr, crossbeam_channel::Sender<()>>,
     tx_for_subs: &mpsc::Sender<WireMemoryEdit>,
 ) -> Result<(), MemorySyncError> {
     match event {
@@ -254,7 +283,13 @@ fn handle_event(
             })?;
             let doc_arc = Arc::new(doc);
             let sub = subscribe_auto_push(&doc_arc, addr.clone(), tx_for_subs.clone());
-            cache.insert(addr, CachedBlock { doc: doc_arc, _sub: sub });
+            cache.insert(addr.clone(), CachedBlock { doc: doc_arc, _sub: sub });
+            // Fire any registered first-arrival waiter for this addr (e.g.
+            // PluginMemoryStore::create_block awaiting the daemon's snapshot
+            // after MemoryCreateBlock returned the addr).
+            if let Some((_, waiter)) = waiters.remove(&addr) {
+                let _ = waiter.send(());
+            }
         }
         WireMemoryEvent::Delta { addr, payload } => {
             let bytes = match payload {

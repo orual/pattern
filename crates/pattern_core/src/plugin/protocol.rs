@@ -134,9 +134,11 @@ pub enum PluginHostProtocol {
     #[rpc(tx = oneshot::Sender<Result<Option<BlockAddr>, MemoryError>>)]
     #[wrap(MemoryGetSharedBlockRequest)]
     MemoryGetSharedBlock(MemoryGetSharedBlockArgs),
-    /// Insert an archival entry.
-    #[rpc(tx = oneshot::Sender<Result<(), MemoryError>>)]
-    MemoryInsertArchival(ArchivalEntry),
+    /// Insert an archival entry. Returns the freshly-minted entry id.
+    /// (Host generates the id + created_at + sets agent_id from the
+    /// requester scope; plugin sends only content + optional metadata.)
+    #[rpc(tx = oneshot::Sender<Result<SmolStr, MemoryError>>)]
+    MemoryInsertArchival(MemoryInsertArchivalArgs),
     /// Search archival entries by content.
     #[rpc(tx = oneshot::Sender<Result<Vec<ArchivalEntry>, MemoryError>>)]
     #[wrap(MemorySearchArchivalRequest)]
@@ -154,6 +156,16 @@ pub enum PluginHostProtocol {
     /// List all scopes in the constellation (for Constellation-wide search resolution).
     #[rpc(tx = oneshot::Sender<Result<Vec<crate::types::memory_types::Scope>, MemoryError>>)]
     MemoryListConstellationScopes(MemoryListConstellationScopesArgs),
+
+    /// List blocks shared with a scope (not owned by, but readable by).
+    #[rpc(tx = oneshot::Sender<Result<Vec<crate::types::memory_types::SharedBlockInfo>, MemoryError>>)]
+    #[wrap(MemoryListSharedBlocksRequest)]
+    MemoryListSharedBlocks(crate::types::memory_types::Scope),
+
+    /// Get undo/redo depth for a block.
+    #[rpc(tx = oneshot::Sender<Result<crate::types::memory_types::UndoRedoDepth, MemoryError>>)]
+    #[wrap(MemoryHistoryDepthRequest)]
+    MemoryHistoryDepth(BlockAddr),
 }
 
 /// Memory delta-sync protocol. Single bidi-streaming method on the
@@ -201,6 +213,11 @@ pub struct MemoryUndoRedoArgs {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryGetSharedBlockArgs {
+    /// The requesting scope — the identity the permission check should be
+    /// against. Plugin sets this explicitly; daemon does NOT fall back to
+    /// the session's default scope (a permission check that silently uses
+    /// a different identity than the caller intended is the wrong shape).
+    pub requester: crate::types::memory_types::Scope,
     pub owner: crate::types::memory_types::Scope,
     pub label: SmolStr,
 }
@@ -219,6 +236,13 @@ pub struct MemoryGetRenderedContentArgs {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MemoryListConstellationScopesArgs;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryInsertArchivalArgs {
+    pub scope: crate::types::memory_types::Scope,
+    pub content: String,
+    pub metadata: Option<serde_json::Value>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryHasSharedBlocksWithArgs {

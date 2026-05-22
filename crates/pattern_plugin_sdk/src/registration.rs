@@ -68,7 +68,32 @@ pub struct PluginHandle {
     /// Daemon-spawned router accepting the guest protocol from the daemon side.
     _router: Router,
     /// Plugin's iroh endpoint (kept alive for the connection lifecycle).
-    _endpoint: Endpoint,
+    /// Also used by `open_memory_sync` to dial the daemon over the
+    /// memory-sync ALPN.
+    endpoint: Endpoint,
+    /// Daemon endpoint addr, retained so `open_memory_sync` can dial without
+    /// callers reconstructing it from the daemon-state file.
+    daemon_endpoint_addr: iroh::EndpointAddr,
+}
+
+impl PluginHandle {
+    /// Open a MemorySync bidi stream against the daemon over
+    /// `PLUGIN_MEMORY_SYNC_ALPN`. Convenience wrapper around
+    /// [`MemorySyncClient::open`] that uses the plugin's existing endpoint +
+    /// the daemon addr learned at registration time, so plugins don't have to
+    /// hand-construct either.
+    pub async fn open_memory_sync(
+        &self,
+        request: pattern_core::traits::plugin::wire::SyncRequest,
+    ) -> Result<crate::memory_sync_client::MemorySyncClient, crate::memory_sync_client::MemorySyncError>
+    {
+        crate::memory_sync_client::MemorySyncClient::open(
+            self.endpoint.clone(),
+            self.daemon_endpoint_addr.clone(),
+            request,
+        )
+        .await
+    }
 }
 
 /// Entry point for an out-of-process plugin. Sets up auth + transport + lifecycle wiring
@@ -161,7 +186,7 @@ where
         EndpointAddr::new(daemon_pubkey).with_addrs([TransportAddr::Ip(daemon_addr)]);
     let host = irpc_iroh::client::<PluginHostProtocol>(
         endpoint.clone(),
-        daemon_endpoint_addr,
+        daemon_endpoint_addr.clone(),
         PLUGIN_HOST_ALPN,
     );
 
@@ -174,7 +199,8 @@ where
     Ok(PluginHandle {
         host,
         _router: router,
-        _endpoint: endpoint,
+        endpoint,
+        daemon_endpoint_addr,
     })
 }
 

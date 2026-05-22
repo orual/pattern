@@ -40,6 +40,57 @@ enum Request {
         filter: BlockFilter,
         reply: cb::Sender<Result<Vec<BlockMetadata>, MemoryError>>,
     },
+    PersistBlock {
+        addr: BlockAddr,
+        reply: cb::Sender<Result<(), MemoryError>>,
+    },
+    DeleteArchival {
+        id: smol_str::SmolStr,
+        reply: cb::Sender<Result<(), MemoryError>>,
+    },
+    UndoRedo {
+        addr: BlockAddr,
+        op: UndoRedoOp,
+        reply: cb::Sender<Result<bool, MemoryError>>,
+    },
+    UpdateBlockMetadata {
+        addr: BlockAddr,
+        patch: BlockMetadataPatch,
+        reply: cb::Sender<Result<(), MemoryError>>,
+    },
+    CreateOrReplaceBlock {
+        scope: Scope,
+        create: BlockCreate,
+        reply: cb::Sender<Result<BlockAddr, MemoryError>>,
+    },
+    Search {
+        query: pattern_core::traits::plugin::wire::WireSearchQuery,
+        reply: cb::Sender<Result<Vec<pattern_core::traits::plugin::wire::WireSearchResult>, MemoryError>>,
+    },
+    SearchArchival {
+        query: pattern_core::traits::plugin::wire::WireSearchQuery,
+        reply: cb::Sender<Result<Vec<ArchivalEntry>, MemoryError>>,
+    },
+    GetSharedBlock {
+        requester: Scope,
+        owner: Scope,
+        label: smol_str::SmolStr,
+        reply: cb::Sender<Result<Option<BlockAddr>, MemoryError>>,
+    },
+    ListSharedBlocks {
+        scope: Scope,
+        reply: cb::Sender<Result<Vec<SharedBlockInfo>, MemoryError>>,
+    },
+    HistoryDepth {
+        addr: BlockAddr,
+        reply: cb::Sender<Result<UndoRedoDepth, MemoryError>>,
+    },
+    InsertArchival {
+        scope: Scope,
+        content: String,
+        metadata: Option<serde_json::Value>,
+        reply: cb::Sender<Result<smol_str::SmolStr, MemoryError>>,
+    },
 }
 
 #[derive(Clone)]
@@ -93,39 +144,163 @@ fn worker_loop(
     host: Client<PluginHostProtocol>,
     runtime: tokio::runtime::Handle,
 ) {
+    // Dispatcher: pulls requests off the crossbeam channel and spawns each
+    // onto the tokio runtime as an independent task. Lets concurrent
+    // MemoryStore calls run in parallel against the host instead of
+    // serializing through this single worker thread.
     while let Ok(req) = rx.recv() {
-        match req {
-            Request::CreateBlock { scope, create, reply } => {
-                let args = MemoryCreateBlockArgs { scope, create };
-                let result = match runtime.block_on(host.rpc(args)) {
-                    Ok(inner) => inner,
-                    Err(e) => Err(MemoryError::Other(format!(
-                        "plugin host MemoryCreateBlock transport: {e}"
-                    ))),
-                };
-                let _ = reply.send(result);
-            }
-            Request::DeleteBlock { addr, reply } => {
-                let result = match runtime.block_on(host.rpc(MemoryDeleteBlockRequest(addr))) {
-                    Ok(inner) => inner,
-                    Err(e) => Err(MemoryError::Other(format!(
-                        "plugin host MemoryDeleteBlock transport: {e}"
-                    ))),
-                };
-                let _ = reply.send(result);
-            }
-            Request::ListBlocks { filter, reply } => {
-                let result = match runtime.block_on(host.rpc(filter)) {
-                    Ok(inner) => inner,
-                    Err(e) => Err(MemoryError::Other(format!(
-                        "plugin host MemoryListBlocks transport: {e}"
-                    ))),
-                };
-                let _ = reply.send(result);
-            }
-        }
+        let host_clone = host.clone();
+        runtime.spawn(handle_request(req, host_clone));
     }
     tracing::debug!("plugin-memory-store-worker exiting");
+}
+
+async fn handle_request(req: Request, host: Client<PluginHostProtocol>) {
+    match req {
+        Request::CreateBlock { scope, create, reply } => {
+            let args = MemoryCreateBlockArgs { scope, create };
+            let result = match host.rpc(args).await {
+                Ok(inner) => inner,
+                Err(e) => Err(MemoryError::Other(format!(
+                    "plugin host MemoryCreateBlock transport: {e}"
+                ))),
+            };
+            let _ = reply.send(result);
+        }
+        Request::DeleteBlock { addr, reply } => {
+            let result = match host.rpc(MemoryDeleteBlockRequest(addr)).await {
+                Ok(inner) => inner,
+                Err(e) => Err(MemoryError::Other(format!(
+                    "plugin host MemoryDeleteBlock transport: {e}"
+                ))),
+            };
+            let _ = reply.send(result);
+        }
+        Request::ListBlocks { filter, reply } => {
+            let result = match host.rpc(filter).await {
+                Ok(inner) => inner,
+                Err(e) => Err(MemoryError::Other(format!(
+                    "plugin host MemoryListBlocks transport: {e}"
+                ))),
+            };
+            let _ = reply.send(result);
+        }
+        Request::PersistBlock { addr, reply } => {
+            use pattern_core::plugin::protocol::MemoryPersistRequest;
+            let result = match host.rpc(MemoryPersistRequest(addr)).await {
+                Ok(inner) => inner,
+                Err(e) => Err(MemoryError::Other(format!(
+                    "plugin host MemoryPersist transport: {e}"
+                ))),
+            };
+            let _ = reply.send(result);
+        }
+        Request::DeleteArchival { id, reply } => {
+            use pattern_core::plugin::protocol::MemoryDeleteArchivalRequest;
+            let result = match host.rpc(MemoryDeleteArchivalRequest(id)).await {
+                Ok(inner) => inner,
+                Err(e) => Err(MemoryError::Other(format!(
+                    "plugin host MemoryDeleteArchival transport: {e}"
+                ))),
+            };
+            let _ = reply.send(result);
+        }
+        Request::UndoRedo { addr, op, reply } => {
+            use pattern_core::plugin::protocol::{MemoryUndoRedoArgs, MemoryUndoRedoRequest};
+            let args = MemoryUndoRedoArgs { addr, op };
+            let result = match host.rpc(MemoryUndoRedoRequest(args)).await {
+                Ok(inner) => inner,
+                Err(e) => Err(MemoryError::Other(format!(
+                    "plugin host MemoryUndoRedo transport: {e}"
+                ))),
+            };
+            let _ = reply.send(result);
+        }
+        Request::UpdateBlockMetadata { addr, patch, reply } => {
+            use pattern_core::plugin::protocol::{MemoryUpdateMetadataArgs, MemoryUpdateMetadataRequest};
+            let args = MemoryUpdateMetadataArgs { addr, patch };
+            let result = match host.rpc(MemoryUpdateMetadataRequest(args)).await {
+                Ok(inner) => inner,
+                Err(e) => Err(MemoryError::Other(format!(
+                    "plugin host MemoryUpdateMetadata transport: {e}"
+                ))),
+            };
+            let _ = reply.send(result);
+        }
+        Request::CreateOrReplaceBlock { scope, create, reply } => {
+            use pattern_core::plugin::protocol::{MemoryCreateBlockArgs, MemoryCreateOrReplaceBlockRequest};
+            let args = MemoryCreateBlockArgs { scope, create };
+            let result = match host.rpc(MemoryCreateOrReplaceBlockRequest(args)).await {
+                Ok(inner) => inner,
+                Err(e) => Err(MemoryError::Other(format!(
+                    "plugin host MemoryCreateOrReplaceBlock transport: {e}"
+                ))),
+            };
+            let _ = reply.send(result);
+        }
+        Request::Search { query, reply } => {
+            use pattern_core::plugin::protocol::MemorySearchRequest;
+            let result = match host.rpc(MemorySearchRequest(query)).await {
+                Ok(inner) => inner,
+                Err(e) => Err(MemoryError::Other(format!(
+                    "plugin host MemorySearch transport: {e}"
+                ))),
+            };
+            let _ = reply.send(result);
+        }
+        Request::SearchArchival { query, reply } => {
+            use pattern_core::plugin::protocol::MemorySearchArchivalRequest;
+            let result = match host.rpc(MemorySearchArchivalRequest(query)).await {
+                Ok(inner) => inner,
+                Err(e) => Err(MemoryError::Other(format!(
+                    "plugin host MemorySearchArchival transport: {e}"
+                ))),
+            };
+            let _ = reply.send(result);
+        }
+        Request::GetSharedBlock { requester, owner, label, reply } => {
+            use pattern_core::plugin::protocol::{MemoryGetSharedBlockArgs, MemoryGetSharedBlockRequest};
+            let args = MemoryGetSharedBlockArgs { requester, owner, label };
+            let result = match host.rpc(MemoryGetSharedBlockRequest(args)).await {
+                Ok(inner) => inner,
+                Err(e) => Err(MemoryError::Other(format!(
+                    "plugin host MemoryGetSharedBlock transport: {e}"
+                ))),
+            };
+            let _ = reply.send(result);
+        }
+        Request::ListSharedBlocks { scope, reply } => {
+            use pattern_core::plugin::protocol::MemoryListSharedBlocksRequest;
+            let result = match host.rpc(MemoryListSharedBlocksRequest(scope)).await {
+                Ok(inner) => inner,
+                Err(e) => Err(MemoryError::Other(format!(
+                    "plugin host MemoryListSharedBlocks transport: {e}"
+                ))),
+            };
+            let _ = reply.send(result);
+        }
+        Request::HistoryDepth { addr, reply } => {
+            use pattern_core::plugin::protocol::MemoryHistoryDepthRequest;
+            let result = match host.rpc(MemoryHistoryDepthRequest(addr)).await {
+                Ok(inner) => inner,
+                Err(e) => Err(MemoryError::Other(format!(
+                    "plugin host MemoryHistoryDepth transport: {e}"
+                ))),
+            };
+            let _ = reply.send(result);
+        }
+        Request::InsertArchival { scope, content, metadata, reply } => {
+            use pattern_core::plugin::protocol::MemoryInsertArchivalArgs;
+            let args = MemoryInsertArchivalArgs { scope, content, metadata };
+            let result = match host.rpc(args).await {
+                Ok(inner) => inner,
+                Err(e) => Err(MemoryError::Other(format!(
+                    "plugin host MemoryInsertArchival transport: {e}"
+                ))),
+            };
+            let _ = reply.send(result);
+        }
+    }
 }
 
 impl MemoryStore for PluginMemoryStore {
@@ -134,24 +309,38 @@ impl MemoryStore for PluginMemoryStore {
         scope: &Scope,
         create: BlockCreate,
     ) -> MemoryResult<StructuredDocument> {
+        // Dispatch the host RPC + register a waiter for BlockAvailable in the
+        // same step. Worker handles the host call; receive_loop fires the
+        // waiter once the daemon's MemorySync stream delivers the snapshot.
+        // No polling: blocks on a bounded(1) receiver with a sane timeout.
         let (reply, recv) = cb::bounded(1);
         self.req_tx
             .send(Request::CreateBlock { scope: scope.clone(), create, reply })
             .map_err(|_| MemoryError::Other("plugin memory store worker gone".into()))?;
         let addr = recv.recv()
             .map_err(|_| MemoryError::Other("plugin memory store reply dropped".into()))??;
-        // After host accepts create, MemorySync emits BlockAvailable for the
-        // new addr. Poll briefly. 7b.2b: replace with an explicit notify on
-        // cache insertion (notify per-addr from receive_loop, awaited here).
-        for _ in 0..100 {
-            if let Some(doc) = self.sync.get_block(&addr) {
-                return Ok((*doc).clone());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        // If the block was already in the cache (rare but possible — the
+        // BlockAvailable could have arrived between the RPC return and now),
+        // skip waiter registration.
+        if let Some(doc) = self.sync.get_block(&addr) {
+            return Ok((*doc).clone());
         }
-        Err(MemoryError::Other(format!(
-            "create_block: BlockAvailable for {addr:?} did not arrive within 5s"
-        )))
+        let arrival = self.sync.register_block_arrival_waiter(addr.clone());
+        // Re-check after registering: cache insert could have raced past us.
+        if let Some(doc) = self.sync.get_block(&addr) {
+            return Ok((*doc).clone());
+        }
+        match arrival.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(()) => match self.sync.get_block(&addr) {
+                Some(doc) => Ok((*doc).clone()),
+                None => Err(MemoryError::Other(format!(
+                    "create_block: arrival waiter fired but cache lookup for {addr:?} returned None"
+                ))),
+            },
+            Err(_) => Err(MemoryError::Other(format!(
+                "create_block: BlockAvailable for {addr:?} did not arrive within 30s"
+            ))),
+        }
     }
 
     fn get_block(&self, scope: &Scope, label: &str) -> MemoryResult<Option<StructuredDocument>> {
@@ -189,43 +378,162 @@ impl MemoryStore for PluginMemoryStore {
 
     // 7b.2b stubs: same channel+worker pattern, more Request variants.
     fn create_or_replace_block(
-        &self, _scope: &Scope, _create: BlockCreate,
+        &self,
+        scope: &Scope,
+        create: BlockCreate,
     ) -> MemoryResult<StructuredDocument> {
-        Err(MemoryError::Other("plugin memory store: create_or_replace_block not wired (7b.2b)".into()))
+        // Same notify-waiter shape as create_block: dispatch RPC, get addr,
+        // wait for BlockAvailable via MemorySyncClient::register_block_arrival_waiter.
+        let (reply, recv) = cb::bounded(1);
+        self.req_tx
+            .send(Request::CreateOrReplaceBlock { scope: scope.clone(), create, reply })
+            .map_err(|_| MemoryError::Other("plugin memory store worker gone".into()))?;
+        let addr = recv.recv()
+            .map_err(|_| MemoryError::Other("plugin memory store reply dropped".into()))??;
+        if let Some(doc) = self.sync.get_block(&addr) {
+            return Ok((*doc).clone());
+        }
+        let arrival = self.sync.register_block_arrival_waiter(addr.clone());
+        if let Some(doc) = self.sync.get_block(&addr) {
+            return Ok((*doc).clone());
+        }
+        match arrival.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(()) => match self.sync.get_block(&addr) {
+                Some(doc) => Ok((*doc).clone()),
+                None => Err(MemoryError::Other(format!(
+                    "create_or_replace_block: arrival waiter fired but cache lookup for {addr:?} returned None"
+                ))),
+            },
+            Err(_) => Err(MemoryError::Other(format!(
+                "create_or_replace_block: BlockAvailable for {addr:?} did not arrive within 30s"
+            ))),
+        }
     }
     fn commit_write(&self, _scope: &Scope, _label: &str) -> MemoryResult<()> { Ok(()) }
-    fn get_rendered_content(&self, _scope: &Scope, _label: &str) -> MemoryResult<Option<String>> {
-        Err(MemoryError::Other("plugin memory store: get_rendered_content not wired (7b.2b)".into()))
+    fn get_rendered_content(&self, scope: &Scope, label: &str) -> MemoryResult<Option<String>> {
+        let addr = BlockAddr { scope: scope.clone(), label: label.into() };
+        match self.sync.get_block(&addr) {
+            Some(doc) => Ok(Some(doc.render())),
+            None => Ok(None),
+        }
     }
-    fn persist_block(&self, _scope: &Scope, _label: &str) -> MemoryResult<()> {
-        Err(MemoryError::Other("plugin memory store: persist_block not wired (7b.2b)".into()))
+    fn persist_block(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
+        let addr = BlockAddr { scope: scope.clone(), label: label.into() };
+        let (reply, recv) = cb::bounded(1);
+        self.req_tx
+            .send(Request::PersistBlock { addr, reply })
+            .map_err(|_| MemoryError::Other("plugin memory store worker gone".into()))?;
+        recv.recv()
+            .map_err(|_| MemoryError::Other("plugin memory store reply dropped".into()))?
     }
     fn mark_dirty(&self, _scope: &Scope, _label: &str) -> MemoryResult<()> { Ok(()) }
-    fn insert_archival(&self, _scope: &Scope, _content: &str, _metadata: Option<serde_json::Value>) -> MemoryResult<String> {
-        Err(MemoryError::Other("plugin memory store: insert_archival not wired (7b.2b)".into()))
+    fn insert_archival(
+        &self,
+        scope: &Scope,
+        content: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> MemoryResult<String> {
+        let (reply, recv) = cb::bounded(1);
+        self.req_tx
+            .send(Request::InsertArchival {
+                scope: scope.clone(),
+                content: content.to_string(),
+                metadata,
+                reply,
+            })
+            .map_err(|_| MemoryError::Other("plugin memory store worker gone".into()))?;
+        let id = recv.recv()
+            .map_err(|_| MemoryError::Other("plugin memory store reply dropped".into()))??;
+        Ok(id.to_string())
     }
-    fn search_archival(&self, _scope: &Scope, _query: &str, _limit: usize) -> MemoryResult<Vec<ArchivalEntry>> {
-        Err(MemoryError::Other("plugin memory store: search_archival not wired (7b.2b)".into()))
+    fn search_archival(&self, scope: &Scope, query: &str, limit: usize) -> MemoryResult<Vec<ArchivalEntry>> {
+        use pattern_core::traits::plugin::wire::WireSearchQuery;
+        let wire_query = WireSearchQuery {
+            query: query.to_string(),
+            scope: Some(MemorySearchScope::Scope(scope.clone())),
+            limit: limit as u32,
+        };
+        let (reply, recv) = cb::bounded(1);
+        self.req_tx
+            .send(Request::SearchArchival { query: wire_query, reply })
+            .map_err(|_| MemoryError::Other("plugin memory store worker gone".into()))?;
+        recv.recv()
+            .map_err(|_| MemoryError::Other("plugin memory store reply dropped".into()))?
     }
-    fn delete_archival(&self, _id: &str) -> MemoryResult<()> {
-        Err(MemoryError::Other("plugin memory store: delete_archival not wired (7b.2b)".into()))
+    fn delete_archival(&self, id: &str) -> MemoryResult<()> {
+        let (reply, recv) = cb::bounded(1);
+        self.req_tx
+            .send(Request::DeleteArchival { id: id.into(), reply })
+            .map_err(|_| MemoryError::Other("plugin memory store worker gone".into()))?;
+        recv.recv()
+            .map_err(|_| MemoryError::Other("plugin memory store reply dropped".into()))?
     }
-    fn search(&self, _q: &str, _o: SearchOptions, _s: MemorySearchScope) -> MemoryResult<Vec<MemorySearchResult>> {
-        Err(MemoryError::Other("plugin memory store: search not wired (7b.2b)".into()))
+    fn search(&self, query: &str, options: SearchOptions, scope: MemorySearchScope) -> MemoryResult<Vec<MemorySearchResult>> {
+        use pattern_core::traits::plugin::wire::WireSearchQuery;
+        use pattern_core::types::memory_types::{SearchContentType, SearchHit};
+        let wire_query = WireSearchQuery {
+            query: query.to_string(),
+            scope: Some(scope),
+            limit: options.limit as u32,
+        };
+        let (reply, recv) = cb::bounded(1);
+        self.req_tx
+            .send(Request::Search { query: wire_query, reply })
+            .map_err(|_| MemoryError::Other("plugin memory store worker gone".into()))?;
+        let wire_results = recv.recv()
+            .map_err(|_| MemoryError::Other("plugin memory store reply dropped".into()))??;
+        Ok(wire_results.into_iter().map(|w| MemorySearchResult {
+            hit: SearchHit::Block { scope: w.addr.scope, label: w.addr.label },
+            content_type: SearchContentType::Blocks,
+            content: Some(w.snippet),
+            score: w.score,
+        }).collect())
     }
-    fn list_shared_blocks(&self, _scope: &Scope) -> MemoryResult<Vec<SharedBlockInfo>> {
-        Err(MemoryError::Other("plugin memory store: list_shared_blocks needs new host RPC".into()))
+    fn list_shared_blocks(&self, scope: &Scope) -> MemoryResult<Vec<SharedBlockInfo>> {
+        let (reply, recv) = cb::bounded(1);
+        self.req_tx
+            .send(Request::ListSharedBlocks { scope: scope.clone(), reply })
+            .map_err(|_| MemoryError::Other("plugin memory store worker gone".into()))?;
+        recv.recv()
+            .map_err(|_| MemoryError::Other("plugin memory store reply dropped".into()))?
     }
-    fn get_shared_block(&self, _r: &Scope, _o: &Scope, _l: &str) -> MemoryResult<Option<StructuredDocument>> {
-        Err(MemoryError::Other("plugin memory store: get_shared_block not wired (7b.2b)".into()))
+    fn get_shared_block(&self, requester: &Scope, owner: &Scope, label: &str) -> MemoryResult<Option<StructuredDocument>> {
+        let (reply, recv) = cb::bounded(1);
+        self.req_tx
+            .send(Request::GetSharedBlock { requester: requester.clone(), owner: owner.clone(), label: label.into(), reply })
+            .map_err(|_| MemoryError::Other("plugin memory store worker gone".into()))?;
+        let maybe_addr = recv.recv()
+            .map_err(|_| MemoryError::Other("plugin memory store reply dropped".into()))??;
+        // Host returned the addr if the requester has read access. Look up in
+        // local cache. If the plugin hasn't subscribed to this addr the lookup
+        // returns None - plugin can subscribe explicitly via MemorySyncClient.
+        Ok(maybe_addr.and_then(|addr| self.sync.get_block(&addr).map(|d| (*d).clone())))
     }
-    fn update_block_metadata(&self, _s: &Scope, _l: &str, _p: BlockMetadataPatch) -> MemoryResult<()> {
-        Err(MemoryError::Other("plugin memory store: update_block_metadata not wired (7b.2b)".into()))
+    fn update_block_metadata(&self, scope: &Scope, label: &str, patch: BlockMetadataPatch) -> MemoryResult<()> {
+        let addr = BlockAddr { scope: scope.clone(), label: label.into() };
+        let (reply, recv) = cb::bounded(1);
+        self.req_tx
+            .send(Request::UpdateBlockMetadata { addr, patch, reply })
+            .map_err(|_| MemoryError::Other("plugin memory store worker gone".into()))?;
+        recv.recv()
+            .map_err(|_| MemoryError::Other("plugin memory store reply dropped".into()))?
     }
-    fn undo_redo(&self, _s: &Scope, _l: &str, _op: UndoRedoOp) -> MemoryResult<bool> {
-        Err(MemoryError::Other("plugin memory store: undo_redo not wired (7b.2b)".into()))
+    fn undo_redo(&self, scope: &Scope, label: &str, op: UndoRedoOp) -> MemoryResult<bool> {
+        let addr = BlockAddr { scope: scope.clone(), label: label.into() };
+        let (reply, recv) = cb::bounded(1);
+        self.req_tx
+            .send(Request::UndoRedo { addr, op, reply })
+            .map_err(|_| MemoryError::Other("plugin memory store worker gone".into()))?;
+        recv.recv()
+            .map_err(|_| MemoryError::Other("plugin memory store reply dropped".into()))?
     }
-    fn history_depth(&self, _s: &Scope, _l: &str) -> MemoryResult<UndoRedoDepth> {
-        Err(MemoryError::Other("plugin memory store: history_depth needs new host RPC".into()))
+    fn history_depth(&self, scope: &Scope, label: &str) -> MemoryResult<UndoRedoDepth> {
+        let addr = BlockAddr { scope: scope.clone(), label: label.into() };
+        let (reply, recv) = cb::bounded(1);
+        self.req_tx
+            .send(Request::HistoryDepth { addr, reply })
+            .map_err(|_| MemoryError::Other("plugin memory store worker gone".into()))?;
+        recv.recv()
+            .map_err(|_| MemoryError::Other("plugin memory store reply dropped".into()))?
     }
 }

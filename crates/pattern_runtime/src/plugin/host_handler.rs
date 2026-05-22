@@ -207,10 +207,13 @@ async fn handle(msg: PluginHostMessage, ctx: &HostApiContext) {
         MemoryGetSharedBlock(req) => {
             let WithChannels { tx, inner, .. } = req;
             use pattern_core::traits::memory_store::MemoryStore;
-            use pattern_core::types::memory_types::Scope;
             let args = inner.0;
-            let requester = &ctx.default_scope;
-            let result = ctx.memory_store.get_shared_block(requester, &args.owner, &args.label)
+            // Use the plugin-supplied requester scope explicitly. The trait's
+            // permission check is keyed on this; silently substituting
+            // ctx.default_scope would let a plugin query as a different
+            // identity than it specified, which is the wrong shape for a
+            // permission gate.
+            let result = ctx.memory_store.get_shared_block(&args.requester, &args.owner, &args.label)
                 .map(|doc_opt| doc_opt.map(|_doc| BlockAddr { scope: args.owner.clone(), label: args.label.clone() }));
             if tx.send(result).await.is_err() { tracing::warn!(method = "MemoryGetSharedBlock", "plugin host_handler: reply receiver dropped before send"); }
         }
@@ -218,18 +221,26 @@ async fn handle(msg: PluginHostMessage, ctx: &HostApiContext) {
         MemoryInsertArchival(req) => {
             let WithChannels { tx, inner, .. } = req;
             use pattern_core::traits::memory_store::MemoryStore;
-            let scope = ctx.default_scope.clone();
-            let entry = inner;
-            let result = ctx.memory_store.insert_archival(&scope, &entry.content, entry.metadata)
-                .map(|_| ());
-            if tx.send(result).await.is_err() { tracing::warn!("plugin host_handler: reply receiver dropped before send (plugin call abandoned mid-flight)"); }
+            let args = inner;
+            let result = ctx.memory_store
+                .insert_archival(&args.scope, &args.content, args.metadata)
+                .map(|id| smol_str::SmolStr::from(id));
+            if tx.send(result).await.is_err() { tracing::warn!(method = "MemoryInsertArchival", "plugin host_handler: reply receiver dropped before send"); }
         }
 
         MemorySearchArchival(req) => {
             let WithChannels { tx, inner, .. } = req;
             use pattern_core::traits::memory_store::MemoryStore;
+            use pattern_core::types::memory_types::MemorySearchScope;
             let q = inner.0;
-            let scope = ctx.default_scope.clone();
+            // Respect plugin-supplied scope when it targets a single scope.
+            // Fall back to session default for Constellation/None (archival
+            // search is single-scope; multi-scope iteration would need its
+            // own protocol shape).
+            let scope = match q.scope {
+                Some(MemorySearchScope::Scope(s)) => s,
+                _ => ctx.default_scope.clone(),
+            };
             let result = ctx.memory_store.search_archival(&scope, &q.query, q.limit as usize);
             if tx.send(result).await.is_err() { tracing::warn!("plugin host_handler: reply receiver dropped before send (plugin call abandoned mid-flight)"); }
         }
@@ -256,6 +267,22 @@ async fn handle(msg: PluginHostMessage, ctx: &HostApiContext) {
             use pattern_core::traits::memory_store::MemoryStore;
             let result = ctx.memory_store.list_constellation_scopes();
             if tx.send(result).await.is_err() { tracing::warn!(method = "MemoryListConstellationScopes", "plugin host_handler: reply receiver dropped before send"); }
+        }
+
+        MemoryListSharedBlocks(req) => {
+            let WithChannels { tx, inner, .. } = req;
+            use pattern_core::traits::memory_store::MemoryStore;
+            let scope = inner.0;
+            let result = ctx.memory_store.list_shared_blocks(&scope);
+            if tx.send(result).await.is_err() { tracing::warn!(method = "MemoryListSharedBlocks", "plugin host_handler: reply receiver dropped before send"); }
+        }
+
+        MemoryHistoryDepth(req) => {
+            let WithChannels { tx, inner, .. } = req;
+            use pattern_core::traits::memory_store::MemoryStore;
+            let addr = inner.0;
+            let result = ctx.memory_store.history_depth(&addr.scope, addr.label.as_str());
+            if tx.send(result).await.is_err() { tracing::warn!(method = "MemoryHistoryDepth", "plugin host_handler: reply receiver dropped before send"); }
         }
     }
 

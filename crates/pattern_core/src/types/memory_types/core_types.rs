@@ -332,7 +332,7 @@ pub enum UndoRedoOp {
 ///
 /// Replaces the pre-Phase-3 separate `undo_depth` and `redo_depth`
 /// methods.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UndoRedoDepth {
     /// Number of available undo steps.
     pub undo: usize,
