@@ -2229,6 +2229,55 @@ impl MemoryStore for MemoryCache {
         Some(&self.observer)
     }
 
+    fn push_external_commit(
+        &self,
+        scope: &pattern_core::types::memory_types::Scope,
+        label: &str,
+        update_bytes: Vec<u8>,
+    ) -> pattern_core::error::MemoryResult<()> {
+        // Resolve (scope, label) → block_id via the cached block. If the block
+        // isn't loaded, we have nowhere to send the commit; that's a bug at the
+        // caller (they should have loaded it before importing), so warn + skip.
+        let cached_id = self
+            .blocks
+            .iter()
+            .find(|entry| {
+                let cb = entry.value();
+                let doc_scope = pattern_core::types::memory_types::Scope::from_db_key(cb.doc.agent_id())
+                    .unwrap_or_else(|| pattern_core::types::memory_types::Scope::Global(cb.doc.agent_id().into()));
+                doc_scope == *scope && cb.doc.label() == label
+            })
+            .map(|entry| entry.key().clone());
+        let Some(block_id) = cached_id else {
+            tracing::warn!(scope = ?scope, label = %label, "push_external_commit: block not loaded; skip");
+            return Ok(());
+        };
+
+        // Lazy-spawn the per-block subscriber if needed (no-op if already up,
+        // or if mount_path-less so subscriber machinery is disabled).
+        self.maybe_spawn_subscriber_for_block(&block_id);
+
+        // Push the CommitEvent on the subscriber's crossbeam channel. Worker
+        // picks it up + runs disk render + FTS5 + embed exactly like a
+        // local-edit-driven event.
+        if let Some(handle) = self.subscribers.get(&block_id) {
+            handle
+                .event_tx
+                .try_send(crate::subscriber::event::CommitEvent {
+                    block_id: block_id.clone(),
+                    update_bytes,
+                })
+                .map_err(|e| pattern_core::error::MemoryError::Other(format!(
+                    "push_external_commit: try_send: {e}"
+                )))?;
+        } else {
+            // No subscriber even after maybe_spawn — likely no mount_path
+            // configured, so persistence is disabled for this store. Quiet skip.
+            tracing::debug!(block_id = %block_id, "push_external_commit: no subscriber (persistence disabled)");
+        }
+        Ok(())
+    }
+
     fn create_block(&self, scope: &Scope, create: BlockCreate) -> MemoryResult<StructuredDocument> {
         let BlockCreate {
             label,

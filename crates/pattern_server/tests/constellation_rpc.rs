@@ -31,6 +31,7 @@ fn make_config() -> SessionConfig {
         port_registry,
         plugin_routes: None,
         plugin_routing_handler: None,
+        plugin_memory_sync_handler: None,
         daemon_endpoint: None,
     }
 }

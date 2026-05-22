@@ -424,6 +424,10 @@ pub struct SessionContext {
     /// and unregister on drop. None disables OOP plugin host-callback dispatch
     /// for this session.
     plugin_routing_handler: Option<Arc<pattern_core::plugin::auth::SessionRoutingProtocolHandler>>,
+    /// Daemon-shared routing handler for the memory-sync ALPN. Sessions
+    /// register their per-session memory_sync_handler here at open + unregister
+    /// at drop. None disables MemorySync for this session.
+    plugin_memory_sync_handler: Option<Arc<pattern_core::plugin::auth::SessionRoutingProtocolHandler>>,
     /// Daemon iroh endpoint used to dial spawned plugin processes for the
     /// guest-side `pattern-plugin-guest/1` ALPN. Required to construct
     /// `OutOfProcessPluginConnection` for native plugins at session-open.
@@ -798,6 +802,15 @@ impl Drop for SessionContext {
                 "unregistered per-session host_handler on session-context drop"
             );
         }
+        // Same for the memory-sync handler.
+        if let Some(routing_handler) = self.plugin_memory_sync_handler.as_ref() {
+            let session_id: smol_str::SmolStr = self.agent_id.to_string().into();
+            routing_handler.unregister_handler(&session_id);
+            tracing::debug!(
+                session = %session_id,
+                "unregistered per-session memory_sync_handler on session-context drop"
+            );
+        }
     }
 }
 
@@ -837,6 +850,7 @@ impl SessionContext {
             plugin_registry: None,
             plugin_routes: None,
             plugin_routing_handler: None,
+            plugin_memory_sync_handler: None,
             daemon_endpoint: None,
             agent_id,
             default_scope,
@@ -1069,6 +1083,22 @@ impl SessionContext {
         &self,
     ) -> Option<&Arc<pattern_core::plugin::auth::SessionRoutingProtocolHandler>> {
         self.plugin_routing_handler.as_ref()
+    }
+
+    /// Accessor for the memory-sync routing handler.
+    pub fn plugin_memory_sync_handler(
+        &self,
+    ) -> Option<&Arc<pattern_core::plugin::auth::SessionRoutingProtocolHandler>> {
+        self.plugin_memory_sync_handler.as_ref()
+    }
+
+    /// Set the memory-sync routing handler (daemon-shared).
+    pub fn with_plugin_memory_sync_handler(
+        mut self,
+        handler: Arc<pattern_core::plugin::auth::SessionRoutingProtocolHandler>,
+    ) -> Self {
+        self.plugin_memory_sync_handler = Some(handler);
+        self
     }
 
     /// Set the session-routing protocol handler (daemon-shared).
@@ -1387,6 +1417,7 @@ impl SessionContext {
             plugin_registry: self.plugin_registry.clone(),
             plugin_routes: self.plugin_routes.clone(),
             plugin_routing_handler: self.plugin_routing_handler.clone(),
+            plugin_memory_sync_handler: self.plugin_memory_sync_handler.clone(),
             daemon_endpoint: self.daemon_endpoint.clone(),
             // Each ephemeral child gets a fresh session_id (so its
             // PortHandler subscription channels don't collide with the
@@ -2037,6 +2068,7 @@ pub struct SessionRegistries {
     /// per-session host handler into this at open so plugin dials get dispatched
     /// to the right session. None leaves OOP plugin host-callbacks disabled.
     pub plugin_routing_handler: Option<Arc<pattern_core::plugin::auth::SessionRoutingProtocolHandler>>,
+    pub plugin_memory_sync_handler: Option<Arc<pattern_core::plugin::auth::SessionRoutingProtocolHandler>>,
     /// Optional daemon iroh endpoint. Required to spawn native (OOP) plugins
     /// at session-open. `None` disables native plugin spawn (CC plugins work).
     pub daemon_endpoint: Option<iroh::Endpoint>,
@@ -2871,6 +2903,48 @@ impl TidepoolSession {
                     tracing::warn!(
                         session = %session_id,
                         "freshly-spawned host client unexpectedly remote — host_handler not registered",
+                    );
+                }
+            }
+
+            // Per-session memory_sync_handler registration. Mirrors the
+            // host_handler block above but for the memory-sync ALPN bidi-stream
+            // protocol. Builds a MemorySyncApiContext from the session's
+            // memory_store + its observer (via trait method) + session ids.
+            // Drop side unregisters in SessionContext::Drop.
+            if let Some(routing_handler) = session.ctx.plugin_memory_sync_handler() {
+                use irpc::rpc::RemoteService;
+                use pattern_core::plugin::protocol::MemorySyncProtocol;
+                let session_id: smol_str::SmolStr = session.ctx.agent_id().to_string().into();
+                let store = session.ctx.memory_store();
+                let observer_opt = store.observer().cloned();
+                let memsync_client = if let Some(observer) = observer_opt {
+                    let ctx = crate::plugin::memory_sync_handler::MemorySyncApiContext {
+                        memory_store: store,
+                        observer,
+                        session_agent_id: pattern_core::AgentId::from(session.ctx.agent_id()),
+                        default_scope: session.ctx.default_scope().clone(),
+                    };
+                    Some(crate::plugin::memory_sync_handler::spawn(ctx))
+                } else {
+                    tracing::warn!(
+                        session = %session_id,
+                        "memory store has no observer; skipping per-session memory_sync_handler registration",
+                    );
+                    None
+                };
+                if let Some(memsync_client) = memsync_client
+                    && let Some(memsync_local) = memsync_client.as_local() {
+                    let memsync_proto = MemorySyncProtocol::remote_handler(memsync_local);
+                    routing_handler.register_handler(
+                        session_id.clone(),
+                        std::sync::Arc::new(irpc_iroh::IrohProtocol::new(memsync_proto)),
+                    );
+                    tracing::debug!(session = %session_id, "per-session memory_sync_handler registered");
+                } else {
+                    tracing::warn!(
+                        session = %session_id,
+                        "freshly-spawned memsync client unexpectedly remote — handler not registered",
                     );
                 }
             }

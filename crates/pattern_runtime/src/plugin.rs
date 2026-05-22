@@ -6,6 +6,7 @@
 
 pub mod cc_adapter;
 pub mod host_handler;
+pub mod memory_sync_handler;
 pub mod manifest;
 pub mod marketplace;
 pub mod registry;

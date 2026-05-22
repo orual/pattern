@@ -89,6 +89,12 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
     let gated_host_arc = Arc::new(pattern_core::plugin::auth::SessionRoutingProtocolHandler::new(
         Arc::clone(&plugin_routes),
     ));
+    // Parallel routing handler for the memory-sync ALPN. Same PluginRouteTable
+    // (pubkey → session_id mapping is shared), but each protocol gets its own
+    // routing handler so per-session registration is keyed per-protocol.
+    let gated_memory_sync_arc = Arc::new(pattern_core::plugin::auth::SessionRoutingProtocolHandler::new(
+        Arc::clone(&plugin_routes),
+    ));
 
     // Bind iroh endpoint FIRST so SessionConfig can hold it for native-plugin
     // OOP spawn at session-open. Phase 6 Task 5 — replaces noq-cert-pinning
@@ -188,6 +194,7 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
             port_registry,
             plugin_routes: Some(Arc::clone(&plugin_routes)),
             plugin_routing_handler: Some(Arc::clone(&gated_host_arc)),
+            plugin_memory_sync_handler: Some(Arc::clone(&gated_memory_sync_arc)),
             daemon_endpoint: Some(endpoint.clone()),
         };
 
@@ -206,10 +213,11 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
     // dispatch into the session's runtime state. Daemon main constructed the
     // routing handler above + threaded it into SessionConfig; here we clone the
     // struct (cheap — internal Arcs) to attach to the iroh Router.
-    use pattern_core::plugin::protocol::PLUGIN_HOST_ALPN;
+    use pattern_core::plugin::protocol::{PLUGIN_HOST_ALPN, PLUGIN_MEMORY_SYNC_ALPN};
     use std::sync::Arc;
 
     let gated_host = (*gated_host_arc).clone();
+    let gated_memory_sync = (*gated_memory_sync_arc).clone();
 
     // Multi-ALPN router. pattern/1 carries the TUI/client protocol;
     // pattern-plugin-host/1 carries Plugin→Runtime callbacks + memory ops,
@@ -220,6 +228,7 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
     let _router = iroh::protocol::Router::builder(endpoint)
         .accept(b"pattern/1", irpc_iroh::IrohProtocol::new(handler))
         .accept(PLUGIN_HOST_ALPN, gated_host)
+        .accept(PLUGIN_MEMORY_SYNC_ALPN, gated_memory_sync)
         .spawn();
 
     // plugin_routes is now threaded through SessionConfig → SessionRegistries

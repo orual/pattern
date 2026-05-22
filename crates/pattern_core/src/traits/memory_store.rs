@@ -48,6 +48,23 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
     /// is upstream-driven) default to `None`.
     fn observer(&self) -> Option<&crate::observer::MemoryObserver> { None }
 
+    /// Externally-applied loro update bytes need to drive the same persistence
+    /// pipeline as local agent edits (disk render + FTS5 + embedding) — but
+    /// `LoroDoc::subscribe_local_update` doesn't fire on imports, so the
+    /// existing local-edit closure doesn't catch them. Concrete impls with
+    /// worker-backed persistence override this method to push a CommitEvent on
+    /// their per-block channel manually after a successful import. Defaults to
+    /// `Ok(())` — no-op for impls without workers (in-memory tests, the future
+    /// plugin-side proxy whose persistence is upstream-driven, etc).
+    fn push_external_commit(
+        &self,
+        _scope: &crate::types::memory_types::Scope,
+        _label: &str,
+        _update_bytes: Vec<u8>,
+    ) -> MemoryResult<()> {
+        Ok(())
+    }
+
     // ========== Block CRUD ==========
 
     /// Create a new memory block, returning the document ready for editing.
