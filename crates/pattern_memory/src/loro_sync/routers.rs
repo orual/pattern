@@ -158,7 +158,12 @@ impl EventRouter for BlockFanoutRouter {
                         Ok(mtime) => mtime,
                         Err(_) => continue,
                     };
-                    if let Some(last_written) = subscriber.synced_doc.last_written_mtime()
+                    // Observer-only subscribers have no synced_doc → no echo-
+                    // suppression mtime to compare against. Fall through and
+                    // process the file normally (which apply_external_edit
+                    // will skip since there's no synced_doc anyway).
+                    if let Some(synced_doc) = &subscriber.synced_doc
+                        && let Some(last_written) = synced_doc.last_written_mtime()
                         && file_mtime == last_written
                     {
                         continue;

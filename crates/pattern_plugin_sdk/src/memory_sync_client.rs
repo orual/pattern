@@ -44,6 +44,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use iroh::{Endpoint, EndpointAddr};
+use irpc::Client;
 use irpc::channel::mpsc;
 use pattern_core::memory::StructuredDocument;
 use pattern_core::plugin::protocol::{MemorySyncProtocol, PLUGIN_MEMORY_SYNC_ALPN};
@@ -116,7 +117,19 @@ impl MemorySyncClient {
             daemon_endpoint_addr,
             PLUGIN_MEMORY_SYNC_ALPN,
         );
+        Self::open_with_client(client, request).await
+    }
 
+    /// In-process / pre-constructed-client variant. Accepts a
+    /// [`Client<MemorySyncProtocol>`] directly (e.g. from
+    /// `memory_sync_handler::spawn`'s `Client::local(tx)`) and skips the iroh
+    /// dial. Used by integration tests that drive both sides of the protocol
+    /// in-process via tokio channels, but also usable in any context where the
+    /// client is constructed by some other means than dialing.
+    pub async fn open_with_client(
+        client: Client<MemorySyncProtocol>,
+        request: SyncRequest,
+    ) -> Result<Self, MemorySyncError> {
         // bidi_streaming(msg, update_cap, response_cap): we send WireMemoryEdit
         // as Updates, receive WireMemoryEvent as Responses.
         let (tx, rx) = client

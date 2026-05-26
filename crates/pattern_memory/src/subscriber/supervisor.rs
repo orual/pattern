@@ -83,18 +83,22 @@ pub(crate) async fn run_supervisor(
                         "block_id" => block_id.clone()
                     ).increment(1);
 
-                    // Cancel and join the failed worker.
+                    // Cancel and join the failed worker. Only storage-having
+                    // subscribers have a thread; observer-only ones don't reach
+                    // the supervisor because they don't emit heartbeats.
                     if let Some((_, handle)) = subscribers.remove(block_id) {
                         handle.cancel.cancel();
                         let bid = block_id.clone();
-                        tokio::task::spawn_blocking(move || {
-                            if let Err(e) = handle.thread.join() {
-                                tracing::warn!(
-                                    block_id = %bid,
-                                    "subscriber thread panicked during supervisor restart: {e:?}"
-                                );
-                            }
-                        }).await.ok();
+                        if let Some(thread) = handle.thread {
+                            tokio::task::spawn_blocking(move || {
+                                if let Err(e) = thread.join() {
+                                    tracing::warn!(
+                                        block_id = %bid,
+                                        "subscriber thread panicked during supervisor restart: {e:?}"
+                                    );
+                                }
+                            }).await.ok();
+                        }
                     }
 
                     // Remove stale heartbeat entry.
@@ -243,15 +247,15 @@ mod tests {
                 };
                 let dummy_handle = SubscriberHandle {
                     cancel: worker_cancel_clone,
-                    thread: std::thread::spawn(move || {
+                    thread: Some(std::thread::spawn(move || {
                         while !worker_cancel.is_cancelled() {
                             std::thread::sleep(Duration::from_millis(5));
                         }
-                    }),
-                    event_tx: {
+                    })),
+                    event_tx: Some({
                         let (tx, _) = crossbeam_channel::bounded::<CommitEvent>(1);
                         tx
-                    },
+                    }),
                     _subscription: {
                         let doc = loro::LoroDoc::new();
                         doc.subscribe_local_update(Box::new(|_| true))
@@ -259,7 +263,7 @@ mod tests {
                     paused: Arc::new(AtomicBool::new(false)),
                     pause_complete: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
                     resume_signal: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
-                    synced_doc: dummy_synced_doc,
+                    synced_doc: Some(dummy_synced_doc),
                 };
                 subscribers.insert("stale-block".to_string(), dummy_handle);
 

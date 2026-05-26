@@ -340,13 +340,20 @@ impl MemoryCache {
                             return;
                         }
 
+                        // The supervisor only respawns subscribers that had
+                        // a worker thread to begin with (storage config was
+                        // present at original spawn time). So we always pass
+                        // Some here — observer-only subscribers don't have
+                        // worker threads that can crash.
                         spawn_subscriber_for_block(
                             block_id,
                             schema,
                             &doc,
-                            respawn_reembed_tx.clone(),
-                            respawn_heartbeat_tx.clone(),
-                            Arc::clone(&respawn_mount_path),
+                            Some(SubscriberStorageConfig {
+                                reembed_tx: respawn_reembed_tx.clone(),
+                                heartbeat_tx: respawn_heartbeat_tx.clone(),
+                                mount_path: Arc::clone(&respawn_mount_path),
+                            }),
                             respawn_persona_state_dir.clone(),
                             Arc::clone(&respawn_db),
                             Arc::clone(&respawn_subscribers),
@@ -768,12 +775,16 @@ impl MemoryCache {
         // same loro doc this cache entry just persisted to DB; write_local
         // renders that doc and atomic-writes the canonical bytes.
         if let Some(sub) = self.subscribers.get(&block_id) {
-            if let Err(e) = sub.synced_doc.write_local() {
-                tracing::warn!(
-                    block_id = %block_id,
-                    error = %e,
-                    "synced_doc.write_local failed during persist; disk file may be stale"
-                );
+            // Only subscribers with storage configured have a synced_doc to
+            // write out. Observer-only subscribers (no mount_path) skip this.
+            if let Some(synced_doc) = &sub.synced_doc {
+                if let Err(e) = synced_doc.write_local() {
+                    tracing::warn!(
+                        block_id = %block_id,
+                        error = %e,
+                        "synced_doc.write_local failed during persist; disk file may be stale"
+                    );
+                }
             }
         }
 
@@ -858,7 +869,11 @@ impl MemoryCache {
             // this join completes within ~50ms in the normal case.
             if let Some((_, handle)) = self.subscribers.remove(&block_id) {
                 handle.cancel.cancel();
-                if let Err(e) = handle.thread.join() {
+                // Only storage-having subscribers have a worker thread to join.
+                // Observer-only subscribers shut down via Subscription drop alone.
+                if let Some(thread) = handle.thread
+                    && let Err(e) = thread.join()
+                {
                     tracing::warn!(
                         block_id = %block_id,
                         "subscriber thread panicked during drop_doc join: {e:?}"
@@ -893,13 +908,16 @@ impl MemoryCache {
 
         // Phase 2: remove and join each worker thread.
         for block_id in &block_ids {
-            if let Some((_, handle)) = self.subscribers.remove(block_id)
-                && let Err(e) = handle.thread.join()
-            {
-                tracing::warn!(
-                    block_id = %block_id,
-                    "subscriber thread panicked during drain: {e:?}"
-                );
+            if let Some((_, handle)) = self.subscribers.remove(block_id) {
+                // Only storage-having subscribers have a worker thread.
+                if let Some(thread) = handle.thread
+                    && let Err(e) = thread.join()
+                {
+                    tracing::warn!(
+                        block_id = %block_id,
+                        "subscriber thread panicked during drain: {e:?}"
+                    );
+                }
             }
         }
 
@@ -1035,17 +1053,13 @@ impl MemoryCache {
         block_id: &str,
         schema: BlockSchema,
         doc: &StructuredDocument,
-        reembed_tx: tokio::sync::mpsc::UnboundedSender<ReembedRequest>,
-        heartbeat_tx: crossbeam_channel::Sender<Heartbeat>,
-        mount_path: Arc<PathBuf>,
+        storage: Option<SubscriberStorageConfig>,
     ) {
         spawn_subscriber_for_block(
             block_id,
             schema,
             doc,
-            reembed_tx,
-            heartbeat_tx,
-            mount_path,
+            storage,
             self.persona_state_dir.clone(),
             Arc::clone(&self.db),
             Arc::clone(&self.subscribers),
@@ -1096,8 +1110,15 @@ impl MemoryCache {
         };
 
         // Hold an Arc to synced_doc so we can call apply_external_bytes after
-        // releasing the DashMap lock.
-        let synced_doc = Arc::clone(&subscriber.synced_doc);
+        // releasing the DashMap lock. Observer-only subscribers have no
+        // synced_doc — there's nothing to apply external edits TO, so skip.
+        let Some(synced_doc) = subscriber.synced_doc.as_ref().map(Arc::clone) else {
+            tracing::debug!(
+                block_id = %block_id,
+                "external edit for observer-only subscriber (no storage); skipping merge"
+            );
+            return;
+        };
         drop(subscriber); // Release the DashMap lock.
 
         let schema = doc.schema().clone();
@@ -1302,20 +1323,35 @@ impl MemoryCache {
         self.path_to_block_id.get(path).map(|e| e.value().clone())
     }
 
-    /// Lazily spawn a subscriber for a cached block using the cache's own
-    /// mount_path, reembed_tx, and heartbeat_tx.
+    /// Lazily spawn a subscriber for a cached block. ALWAYS installs the
+    /// loro subscribe_local_update closure that drives `observer.publish`
+    /// for cross-block fanout (no config dep). When mount_path + reembed_tx
+    /// + heartbeat_tx are all configured, ALSO spawns the disk/FTS/embed
+    /// worker pipeline. When any is unset (e.g. test caches built via
+    /// `MemoryCache::new(db)` without `attach()`), the disk-write parts are
+    /// skipped but the observer-publish path still works.
     ///
     /// Does nothing if:
-    /// - `mount_path` was not configured (subscriber machinery disabled).
     /// - The block is not currently loaded in the in-memory cache.
     /// - A subscriber for this block is already running.
     fn maybe_spawn_subscriber_for_block(&self, block_id: &str) {
-        let (Some(mount_path), Some(reembed_tx), Some(heartbeat_tx)) = (
+        // Build optional storage config — None when any of the 3 storage
+        // fields is unset. spawn_subscriber_for_block handles None internally
+        // by skipping the disk/FTS/embed pipeline and installing only the
+        // observer-publish loro subscription.
+        let storage = match (
             self.mount_path.clone(),
             self.reembed_tx.clone(),
             self.heartbeat_tx.clone(),
-        ) else {
-            return;
+        ) {
+            (Some(mount_path), Some(reembed_tx), Some(heartbeat_tx)) => Some(
+                SubscriberStorageConfig {
+                    reembed_tx,
+                    heartbeat_tx,
+                    mount_path,
+                },
+            ),
+            _ => None,
         };
 
         // Don't double-spawn — checked again inside spawn_subscriber, but skip
@@ -1332,7 +1368,7 @@ impl MemoryCache {
         let schema = doc.schema().clone();
         drop(cached); // Release DashMap lock before spawning.
 
-        self.spawn_subscriber(block_id, schema, &doc, reembed_tx, heartbeat_tx, mount_path);
+        self.spawn_subscriber(block_id, schema, &doc, storage);
     }
 
     /// Internal search implementation shared by agent-scoped and
@@ -1774,13 +1810,23 @@ fn sanitize_block_label(label: &str) -> String {
     result
 }
 
+/// Storage-related config for a per-block subscriber. When present, the
+/// subscriber spawns a worker thread + SyncedDoc that handles disk render,
+/// FTS5, embeddings. When absent (e.g. test caches built via
+/// `MemoryCache::new(db)` without `attach()`), the subscriber still spawns
+/// the loro subscription that drives `observer.publish` for cross-block
+/// fanout — but skips the disk/index pipeline entirely.
+pub(crate) struct SubscriberStorageConfig {
+    pub reembed_tx: tokio::sync::mpsc::UnboundedSender<ReembedRequest>,
+    pub heartbeat_tx: crossbeam_channel::Sender<Heartbeat>,
+    pub mount_path: Arc<PathBuf>,
+}
+
 pub(crate) fn spawn_subscriber_for_block(
     block_id: &str,
     schema: BlockSchema,
     doc: &StructuredDocument,
-    reembed_tx: tokio::sync::mpsc::UnboundedSender<ReembedRequest>,
-    heartbeat_tx: crossbeam_channel::Sender<Heartbeat>,
-    mount_path: Arc<PathBuf>,
+    storage: Option<SubscriberStorageConfig>,
     persona_state_dir: Option<Arc<PathBuf>>,
     db: Arc<ConstellationDb>,
     subscribers: Arc<DashMap<String, SubscriberHandle>>,
@@ -1793,10 +1839,7 @@ pub(crate) fn spawn_subscriber_for_block(
         return;
     }
 
-    let (event_tx, event_rx) = crossbeam_channel::bounded(64);
     let cancel = CancellationToken::new();
-
-    // Shared pause state for flush-pause-resume quiesce.
     let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let pause_complete = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
     let resume_signal = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
@@ -1806,20 +1849,65 @@ pub(crate) fn spawn_subscriber_for_block(
     // treat those as `Scope::Global(agent_id)` so they keep working.
     let doc_scope =
         Scope::from_db_key(doc.agent_id()).unwrap_or_else(|| Scope::Global(doc.agent_id().into()));
+    let block_addr = pattern_core::types::memory_types::BlockAddr {
+        scope: doc_scope.clone(),
+        label: doc.label().into(),
+    };
+
+    // Observer-only branch: no storage config. The loro subscription still
+    // fires observer.publish for cross-block fanout, but skips the disk/FTS/
+    // embed pipeline. SubscriberHandle's storage fields are None.
+    let storage = match storage {
+        Some(s) => s,
+        None => {
+            let block_addr_for_closure = block_addr.clone();
+            let paused_flag = Arc::clone(&paused);
+            let observer_for_closure = observer.clone();
+            let subscription = doc
+                .inner()
+                .subscribe_local_update(Box::new(move |update_bytes| {
+                    if !paused_flag.load(std::sync::atomic::Ordering::Acquire) {
+                        observer_for_closure.publish(
+                            pattern_core::observer::MemoryEvent::Delta {
+                                addr: block_addr_for_closure.clone(),
+                                update_bytes: update_bytes.clone(),
+                                origin: None,
+                            },
+                        );
+                    }
+                    true
+                }));
+            subscribers.insert(
+                block_id.to_string(),
+                SubscriberHandle {
+                    cancel,
+                    thread: None,
+                    event_tx: None,
+                    _subscription: subscription,
+                    paused,
+                    pause_complete,
+                    resume_signal,
+                    synced_doc: None,
+                },
+            );
+            return;
+        }
+    };
+
+    // Storage-having branch: build event_tx + SyncedDoc + worker thread.
+    let (event_tx, event_rx) = crossbeam_channel::bounded(64);
 
     // Determine the canonical file extension for this schema so we can compute
-    // the block file path for the SyncedDoc. The extension must match what
-    // render_canonical_from_disk_doc would return for this schema.
+    // the block file path for the SyncedDoc.
     let ext = block_schema_extension(&schema);
     let file_path = block_file_path(
-        &mount_path,
+        &storage.mount_path,
         persona_state_dir.as_deref().map(|p| p.as_path()),
         &doc_scope,
         doc.block_type(),
         doc.label(),
         &ext,
     );
-    // Ensure the agent/type directory exists (lazy creation).
     if let Some(parent) = file_path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             tracing::warn!(
@@ -1831,22 +1919,8 @@ pub(crate) fn spawn_subscriber_for_block(
             return;
         }
     }
-    // Register the reverse mapping (path -> block_id) for the filesystem watcher.
     path_to_block_id.insert(file_path.clone(), block_id.to_string());
 
-    // Build the SyncedDoc for this block. RouterOwned mode: no internal
-    // filesystem watcher (the mount-wide DirWatcher<BlockFanoutRouter> handles
-    // external edit routing) and no internal local-update subscription (the
-    // worker's CommitEvent channel handles that). The SyncedDoc owns disk_doc,
-    // echo-suppression state, atomic_write, and last_saved_frontier.
-    //
-    // LoroDoc::clone is a reference clone — it shares the same underlying
-    // state as doc.inner(). This means SyncedDoc's memory_doc IS the same
-    // Loro state as the StructuredDocument's doc, so apply_external_bytes
-    // correctly propagates external edits into the live memory_doc.
-    // Single-doc world: SyncedDoc takes the LoroDoc directly (Loro is
-    // internally Arc'd). The block subscriber holds an `Arc<SyncedDoc>` and
-    // can call write_local for synchronous disk persistence.
     let synced_doc_loro = doc.inner().clone();
     let bridge = Arc::new(crate::subscriber::bridge::BlockSchemaBridge::new(
         schema.clone(),
@@ -1857,11 +1931,6 @@ pub(crate) fn spawn_subscriber_for_block(
             doc: synced_doc_loro,
             bridge,
             event_channel_bound: 64,
-            // Block-subscriber path: external edits arrive via
-            // `apply_external_bytes` (which bypasses the watcher-based
-            // conflict check entirely), not through the watcher. AutoMerge
-            // here is explicit rather than implicit — the policy field is
-            // checked only for watcher-delivered events.
             conflict_policy: crate::loro_sync::ConflictPolicy::AutoMerge,
         }) {
             Ok(d) => Arc::new(d),
@@ -1876,41 +1945,21 @@ pub(crate) fn spawn_subscriber_for_block(
             }
         };
 
-    // Wire subscribe_local_update on memory_doc: when the agent writes
-    // to memory_doc, capture the raw Loro update bytes and forward them
-    // to the worker thread for import into disk_doc and file rendering.
-    // When paused, skip try_send — writes accumulate in memory_doc and
-    // are reconciled via version-vector diff on resume.
-    //
-    // We subscribe on the StructuredDocument's inner LoroDoc directly
-    // (not synced_doc.memory_doc(), which is the same shared state).
-    // RouterOwned mode does not set up a local-update subscription inside
-    // SyncedDoc, so this is the only subscription on the memory_doc.
+    // subscribe_local_update closure: both crossbeam (persistence) AND
+    // observer.publish (cross-block fanout).
     let block_id_owned = block_id.to_string();
     let tx_clone = event_tx.clone();
     let paused_flag = Arc::clone(&paused);
-    // Observer-side: build the BlockAddr from the doc's scope + label so
-    // cross-block observers (MemorySync handlers etc) can filter and route
-    // by stable wire-side addressing. Cloning the observer is cheap (Arc'd
-    // internally); the closure owns its own handle to publish on.
     let observer_for_closure = observer.clone();
-    let block_addr_for_closure = pattern_core::types::memory_types::BlockAddr {
-        scope: doc_scope.clone(),
-        label: doc.label().into(),
-    };
+    let block_addr_for_closure = block_addr.clone();
     let subscription = doc
         .inner()
         .subscribe_local_update(Box::new(move |update_bytes| {
             if !paused_flag.load(std::sync::atomic::Ordering::Acquire) {
-                // Persistence path (per-block crossbeam, bounded-blocking, no drops).
                 let _ = tx_clone.try_send(crate::subscriber::event::CommitEvent {
                     block_id: block_id_owned.clone(),
                     update_bytes: update_bytes.clone(),
                 });
-                // Observer path (tokio broadcast, drop-on-lag, origin=None for
-                // local agent edits). Imported plugin deltas don't fire this
-                // callback (loro's subscribe_local_update is local-only) so
-                // origin=None is the right default here.
                 observer_for_closure.publish(
                     pattern_core::observer::MemoryEvent::Delta {
                         addr: block_addr_for_closure.clone(),
@@ -1919,19 +1968,18 @@ pub(crate) fn spawn_subscriber_for_block(
                     },
                 );
             }
-            true // Keep subscription active.
+            true
         }));
 
-    // Spawn the worker OS thread.
     let config = crate::subscriber::worker::WorkerConfig {
         block_id: block_id.to_string(),
         schema,
         rx: event_rx,
         cancel: cancel.clone(),
         db,
-        reembed_tx,
-        heartbeat_tx,
-        mount_path,
+        reembed_tx: storage.reembed_tx,
+        heartbeat_tx: storage.heartbeat_tx,
+        mount_path: storage.mount_path,
         doc: doc.clone(),
         paused: Arc::clone(&paused),
         pause_complete: Arc::clone(&pause_complete),
@@ -1947,10 +1995,6 @@ pub(crate) fn spawn_subscriber_for_block(
         }) {
         Ok(t) => t,
         Err(e) => {
-            // Thread spawn failed (OS resource limits, etc.). Log the
-            // error and return without registering the subscriber. The
-            // cache continues to function; the block simply won't have a
-            // backing file until the next persist attempt.
             tracing::error!(
                 block_id = %block_id,
                 error = %e,
@@ -1965,13 +2009,13 @@ pub(crate) fn spawn_subscriber_for_block(
         block_id.to_string(),
         SubscriberHandle {
             cancel,
-            thread,
-            event_tx,
+            thread: Some(thread),
+            event_tx: Some(event_tx),
             _subscription: subscription,
             paused,
             pause_complete,
             resume_signal,
-            synced_doc,
+            synced_doc: Some(synced_doc),
         },
     );
 }
@@ -2261,19 +2305,23 @@ impl MemoryStore for MemoryCache {
         // picks it up + runs disk render + FTS5 + embed exactly like a
         // local-edit-driven event.
         if let Some(handle) = self.subscribers.get(&block_id) {
-            handle
-                .event_tx
-                .try_send(crate::subscriber::event::CommitEvent {
+            // Storage-having subscriber has event_tx for the disk/FTS/embed
+            // worker; observer-only subscribers don't (and don't persist).
+            if let Some(tx) = &handle.event_tx {
+                tx.try_send(crate::subscriber::event::CommitEvent {
                     block_id: block_id.clone(),
                     update_bytes,
                 })
                 .map_err(|e| pattern_core::error::MemoryError::Other(format!(
                     "push_external_commit: try_send: {e}"
                 )))?;
+            } else {
+                tracing::debug!(block_id = %block_id, "push_external_commit: observer-only subscriber (storage disabled)");
+            }
         } else {
-            // No subscriber even after maybe_spawn — likely no mount_path
-            // configured, so persistence is disabled for this store. Quiet skip.
-            tracing::debug!(block_id = %block_id, "push_external_commit: no subscriber (persistence disabled)");
+            // No subscriber even after maybe_spawn — block isn't loaded or
+            // double-spawn raced. Quiet skip.
+            tracing::debug!(block_id = %block_id, "push_external_commit: no subscriber for block");
         }
         Ok(())
     }
@@ -4547,9 +4595,11 @@ mod tests {
             block_id,
             schema.clone(),
             &doc,
-            reembed_tx.clone(),
-            hb_tx.clone(),
-            Arc::clone(&mount_path),
+            Some(SubscriberStorageConfig {
+                reembed_tx: reembed_tx.clone(),
+                heartbeat_tx: hb_tx.clone(),
+                mount_path: Arc::clone(&mount_path),
+            }),
             None,
             Arc::clone(&db),
             Arc::clone(&subscribers),
@@ -4568,9 +4618,10 @@ mod tests {
         old_handle.cancel.cancel();
         // Drop the subscription before joining so the channel sender is gone.
         drop(old_handle._subscription);
-        drop(old_handle.event_tx);
+        drop(old_handle.event_tx.expect("test subscriber must have event_tx"));
         old_handle
             .thread
+            .expect("test subscriber must have thread")
             .join()
             .expect("worker thread should not panic on cancel");
 
@@ -4584,9 +4635,11 @@ mod tests {
             block_id,
             schema,
             &doc,
-            reembed_tx,
-            hb_tx,
-            Arc::clone(&mount_path),
+            Some(SubscriberStorageConfig {
+                reembed_tx,
+                heartbeat_tx: hb_tx,
+                mount_path: Arc::clone(&mount_path),
+            }),
             None,
             Arc::clone(&db),
             Arc::clone(&subscribers),
@@ -4603,9 +4656,10 @@ mod tests {
         let (_, respawned) = subscribers.remove(block_id).unwrap();
         respawned.cancel.cancel();
         drop(respawned._subscription);
-        drop(respawned.event_tx);
+        drop(respawned.event_tx.expect("test subscriber must have event_tx"));
         respawned
             .thread
+            .expect("test subscriber must have thread")
             .join()
             .expect("respawned worker thread should not panic");
     }
@@ -4812,9 +4866,11 @@ mod tests {
             block_id,
             schema.clone(),
             &doc,
-            reembed_tx,
-            hb_tx,
-            Arc::clone(&mount_path),
+            Some(SubscriberStorageConfig {
+                reembed_tx,
+                heartbeat_tx: hb_tx,
+                mount_path: Arc::clone(&mount_path),
+            }),
             None,
             Arc::clone(&db),
             Arc::clone(&subscribers),
@@ -4863,7 +4919,7 @@ mod tests {
         // Verify the disk_doc (accessed via the subscriber's synced_doc) reflects
         // the edit.
         let sub = cache.subscribers.get(block_id).unwrap();
-        let disk_doc = sub.synced_doc.doc().clone();
+        let disk_doc = sub.synced_doc.as_ref().expect("test subscriber must have synced_doc").doc().clone();
         drop(sub);
 
         let deep = disk_doc.get_movable_list("items").get_deep_value();
@@ -4880,8 +4936,8 @@ mod tests {
         let (_, handle) = cache.subscribers.remove(block_id).unwrap();
         handle.cancel.cancel();
         drop(handle._subscription);
-        drop(handle.event_tx);
-        handle.thread.join().expect("worker should not panic");
+        drop(handle.event_tx.expect("test subscriber must have event_tx"));
+        handle.thread.expect("test subscriber must have thread").join().expect("worker should not panic");
     }
 
     // region: trust-tier override tests (C5-test)
@@ -4947,9 +5003,11 @@ mod tests {
             block_id,
             schema,
             &doc,
-            reembed_tx,
-            hb_tx,
-            Arc::clone(&mount_path),
+            Some(SubscriberStorageConfig {
+                reembed_tx,
+                heartbeat_tx: hb_tx,
+                mount_path: Arc::clone(&mount_path),
+            }),
             None,
             Arc::clone(&db),
             Arc::clone(&subscribers),
@@ -4992,7 +5050,7 @@ mod tests {
         use crate::fs::markdown_skill::loro_bridge::project_metadata_from_loro;
 
         let sub = cache.subscribers.get(block_id).unwrap();
-        let disk_doc = sub.synced_doc.doc().clone();
+        let disk_doc = sub.synced_doc.as_ref().expect("test subscriber must have synced_doc").doc().clone();
         drop(sub);
 
         let deep = disk_doc.get_deep_value();
@@ -5055,8 +5113,8 @@ mod tests {
         let (_, handle) = cache.subscribers.remove(block_id).unwrap();
         handle.cancel.cancel();
         drop(handle._subscription);
-        drop(handle.event_tx);
-        handle.thread.join().expect("worker should not panic");
+        drop(handle.event_tx.expect("test subscriber must have event_tx"));
+        handle.thread.expect("test subscriber must have thread").join().expect("worker should not panic");
     }
 
     /// `apply_external_edit` with a Skill block whose file path IS under
@@ -5100,8 +5158,8 @@ mod tests {
         let (_, handle) = cache.subscribers.remove(block_id).unwrap();
         handle.cancel.cancel();
         drop(handle._subscription);
-        drop(handle.event_tx);
-        handle.thread.join().expect("worker should not panic");
+        drop(handle.event_tx.expect("test subscriber must have event_tx"));
+        handle.thread.expect("test subscriber must have thread").join().expect("worker should not panic");
     }
 
     /// `apply_external_edit` with a Skill file outside fp_dir that declares
@@ -5177,8 +5235,8 @@ mod tests {
         let (_, handle) = cache.subscribers.remove(block_id).unwrap();
         handle.cancel.cancel();
         drop(handle._subscription);
-        drop(handle.event_tx);
-        handle.thread.join().expect("worker should not panic");
+        drop(handle.event_tx.expect("test subscriber must have event_tx"));
+        handle.thread.expect("test subscriber must have thread").join().expect("worker should not panic");
     }
 
     // endregion: trust-tier override tests (C5-test)

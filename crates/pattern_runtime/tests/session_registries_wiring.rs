@@ -68,6 +68,7 @@ async fn open_with_agent_loop_wires_session_registries() {
         plugin_registry: None,
         plugin_routes: None,
         plugin_routing_handler: None,
+        plugin_memory_sync_handler: None,
         daemon_endpoint: None,
         reembed_tx: None,
     };

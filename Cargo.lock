@@ -7036,6 +7036,7 @@ dependencies = [
  "pattern-core",
  "pattern-db",
  "pattern-memory",
+ "pattern-plugin-sdk",
  "pattern-provider",
  "pattern-runtime",
  "postcard",

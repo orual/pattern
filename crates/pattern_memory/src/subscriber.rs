@@ -54,29 +54,32 @@ use crate::subscriber::bridge::BlockSchemaBridge;
 pub struct SubscriberHandle {
     /// Signal to request graceful shutdown of the worker thread.
     pub cancel: CancellationToken,
-    /// Join handle for the worker OS thread.
-    pub thread: JoinHandle<()>,
+    /// Join handle for the worker OS thread. `None` when the cache has no
+    /// storage config (mount_path/reembed_tx/heartbeat_tx unset) — in that
+    /// case the loro subscription still fires observer.publish for cross-
+    /// block fanout, but there's no per-block disk/FTS/embed worker.
+    pub thread: Option<JoinHandle<()>>,
     /// Sender side of the commit event channel, used to push events from
-    /// `subscribe_local_update` callbacks into the worker.
-    pub event_tx: crossbeam_channel::Sender<CommitEvent>,
+    /// `subscribe_local_update` callbacks into the worker. `None` in the
+    /// observer-only mode (no storage config).
+    pub event_tx: Option<crossbeam_channel::Sender<CommitEvent>>,
     /// The loro subscription guard — dropping this unsubscribes the callback.
-    /// Must outlive the worker thread.
+    /// Always present: the loro subscription is the always-on path that
+    /// drives observer.publish for cross-block fanout, regardless of whether
+    /// storage is configured.
     pub _subscription: loro::Subscription,
     /// When true, the `subscribe_local_update` callback skips `try_send` and
-    /// the worker enters its pause loop. Set by `pause_subscribers`, cleared
-    /// by the worker on resume.
+    /// (when a worker is present) the worker enters its pause loop. Observer
+    /// publish ALSO honors paused so all cross-block fanout pauses in lockstep.
     pub paused: Arc<AtomicBool>,
     /// Worker sets the inner bool to true and notifies when it has finished
-    /// flushing and is fully parked.
+    /// flushing and is fully parked. Unused in observer-only mode.
     pub pause_complete: Arc<(Mutex<bool>, Condvar)>,
     /// `resume_subscribers` sets the inner bool to true and notifies to wake
-    /// the parked worker.
+    /// the parked worker. Unused in observer-only mode.
     pub resume_signal: Arc<(Mutex<bool>, Condvar)>,
-    /// The `SyncedDoc<BlockSchemaBridge>` that owns the two-doc CRDT machinery:
-    /// disk_doc, last_written_mtime + last_written_hash (echo suppression),
-    /// atomic_write, and last_saved_frontier. External edits arrive via
-    /// `synced_doc.apply_external_bytes`; the worker drives local-update
-    /// coalescing and calls `synced_doc.write_rendered` after each debounce
-    /// window.
-    pub synced_doc: Arc<SyncedDoc<BlockSchemaBridge>>,
+    /// The `SyncedDoc<BlockSchemaBridge>` that owns the two-doc CRDT machinery.
+    /// `None` in observer-only mode (no storage config) — there's no disk file
+    /// to render to, so no SyncedDoc.
+    pub synced_doc: Option<Arc<SyncedDoc<BlockSchemaBridge>>>,
 }

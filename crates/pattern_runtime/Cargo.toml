@@ -120,3 +120,7 @@ wiremock       = { workspace = true }
 # library crate with the features enabled, while downstream users see
 # no feature turned on unless they opt in explicitly.
 pattern-runtime = { path = ".", features = ["test-hooks", "test-support"] }
+# For the MemorySync in-process integration test (tests/memory_sync_e2e.rs):
+# exercises the plugin-side MemoryStore impl against the daemon-side handler
+# via irpc's Client::local mode (no iroh dial).
+pattern-plugin-sdk = { path = "../pattern_plugin_sdk" }

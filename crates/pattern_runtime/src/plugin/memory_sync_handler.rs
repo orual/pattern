@@ -20,22 +20,20 @@
 //! 4. On clean close (Done from plugin or empty rx), emits its own Done before
 //!    dropping tx so the plugin can distinguish coherent-close from network-drop.
 //!
-//! ## Persistence-on-import status (open design point)
+//! ## Persistence-on-import (option a, landed)
 //!
 //! When a plugin pushes `WireMemoryEdit::Delta`, the handler imports the bytes
 //! into the local loro doc (via `StructuredDocument::apply_updates`). Per loro
 //! semantics this does NOT fire `subscribe_local_update`, so the existing
-//! per-block crossbeam persistence path does NOT trigger. To make plugin-pushed
-//! edits durable, the handler needs to either (a) publish a `CommitEvent` on
-//! the per-block crossbeam channel after import, or (b) the broadcast event
-//! needs to be picked up by a persistence subscriber that mirrors the worker's
-//! disk + FTS + embed pipeline.
+//! per-block crossbeam persistence path does NOT trigger from the import
+//! itself.
 //!
-//! Option (a) is cleaner but requires reaching into MemoryCache's per-block
-//! subscriber registry; queued for design discussion with orual. For now the
-//! ingest path is wired but emits a `tracing::warn` flagging the persistence
-//! gap — plugin-pushed deltas propagate to in-memory state + other observers,
-//! but won't survive a daemon restart until persistence is wired.
+//! To bridge that: the handler then calls `MemoryStore::push_external_commit`,
+//! which resolves the (scope, label) to a block_id, lazy-spawns the per-block
+//! subscriber, and pushes a `CommitEvent` on the subscriber's crossbeam
+//! channel. The existing worker picks it up and runs disk render + FTS5 +
+//! embed exactly as it would for a local edit. Plugin-pushed deltas are
+//! durable.
 
 use std::sync::Arc;
 
@@ -380,11 +378,10 @@ async fn forward_observer_event(
 /// then republish on the observer broadcast (with origin = self) so other
 /// session-handlers watching the same addr can forward to their plugins.
 ///
-/// PERSISTENCE GAP (see file-header docs): loro's subscribe_local_update does
-/// NOT fire on import. The existing per-block crossbeam persistence path is
-/// driven by subscribe_local_update, so plugin-pushed deltas don't currently
-/// persist. This is wired pending a design call with orual on where the
-/// persistence-trigger should live.
+/// Persistence: loro's subscribe_local_update does NOT fire on import, so
+/// after `apply_updates` we explicitly call `push_external_commit` which
+/// pushes a CommitEvent on the per-block crossbeam — the existing worker
+/// handles disk + FTS5 + embed exactly as for a local edit.
 async fn ingest_delta(
     ctx: &MemorySyncApiContext,
     self_origin: &OriginTag,

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use pattern_memory::paths::PatternPaths;
-use pattern_runtime::plugin::registry::{InstallSource, LoadedPlugin, PluginRegistry};
+use pattern_runtime::plugin::registry::{InstallSource, PluginRegistry};
 use pattern_runtime::plugin::PluginScope;
 
 fn fixture(name: &str) -> PathBuf {
