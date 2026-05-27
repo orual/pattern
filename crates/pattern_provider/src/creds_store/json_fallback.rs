@@ -19,8 +19,10 @@ use std::path::{Path, PathBuf};
 
 use pattern_core::error::ProviderError;
 use pattern_core::types::provider::ProviderCredential;
+use rand::RngCore;
 
 use super::CredsStore;
+use crate::auth::file_lock::{FileLockError, acquire_file_lock};
 
 /// JSON-file credential store.
 pub struct JsonFallbackStore {
@@ -80,7 +82,23 @@ impl CredsStore for JsonFallbackStore {
 
     async fn put(&self, token: &ProviderCredential) -> Result<(), ProviderError> {
         let path = self.path_for(&token.provider)?;
-        let tmp = path.with_extension("json.tmp");
+
+        // Per-call random nonce — the previous `{provider}.json.tmp` was
+        // shared across concurrent in-process callers, which races: A's
+        // rename consumed the path before B finished writing. Nonce
+        // makes each writer's temp file unique.
+        let mut nonce_bytes = [0u8; 8];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let nonce = u64::from_le_bytes(nonce_bytes);
+        let tmp = path.with_extension(format!("json.tmp.{nonce:x}"));
+
+        // Cross-process advisory flock. Mirrors the same pattern codex
+        // storage uses; protects against Pattern-vs-Pattern races on the
+        // shared keyring-fallback path.
+        let lock_path = path.with_extension("json.lock");
+        let _guard = acquire_file_lock(&lock_path)
+            .await
+            .map_err(|e| file_lock_to_provider(&lock_path, e))?;
 
         let json =
             serde_json::to_string_pretty(token).map_err(|e| ProviderError::CredentialStorage {
@@ -102,12 +120,23 @@ impl CredsStore for JsonFallbackStore {
 
     async fn delete(&self, provider: &str) -> Result<(), ProviderError> {
         let path = self.path_for(provider)?;
+        // Acquire the same lock as put() so a delete can't race a
+        // concurrent put on the same provider.
+        let lock_path = path.with_extension("json.lock");
+        let _guard = acquire_file_lock(&lock_path)
+            .await
+            .map_err(|e| file_lock_to_provider(&lock_path, e))?;
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()), // idempotent
             Err(e) => Err(io_to_provider(&path, "remove_file", e)),
         }
     }
+}
+
+fn file_lock_to_provider(lock_path: &Path, e: FileLockError) -> ProviderError {
+    tracing::warn!(?lock_path, error = %e, "json_fallback file_lock error");
+    ProviderError::CredentialStoreUnavailable
 }
 
 // ---- helpers ----

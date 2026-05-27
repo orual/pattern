@@ -69,15 +69,19 @@ keyring = { workspace = true, optional = true }
 whoami = { workspace = true, optional = true }
 
 # Codex OAuth-only deps. `tiny_http` runs the loopback callback listener
-# for the PKCE flow; `open` opens the user's browser to the authorize URL;
-# `fs4` provides advisory file locking so Pattern + codex CLI don't race on
-# `~/.codex/.auth.json` refresh. id_token claims are extracted by
-# base64-decoding the JWT payload (matching codex CLI's approach) — TLS to
-# auth.openai.com is the authentication boundary, so JWKS signature
-# verification adds nothing.
+# for the PKCE flow; `open` opens the user's browser to the authorize URL.
+# id_token claims are extracted by base64-decoding the JWT payload
+# (matching codex CLI's approach) — TLS to auth.openai.com is the
+# authentication boundary, so JWKS signature verification adds nothing.
 tiny_http = { workspace = true, optional = true }
 open = { workspace = true, optional = true }
-fs4 = { workspace = true, optional = true }
+
+# Advisory cross-process file locking. Used unconditionally by
+# `auth::file_lock` (which is consumed by codex storage AND Anthropic's
+# `creds_store::json_fallback` — both need concurrent-safe atomic-rename
+# write sequences). Not gated under `subscription-oauth` because file
+# locking is generic infrastructure, not subscription-flow-specific.
+fs4 = { workspace = true }
 llama-cpp-4 = { version = "0.2.52", features = ["vulkan"] }
 
 [dev-dependencies]
@@ -110,6 +114,5 @@ subscription-oauth = [
     "dep:whoami",
     "dep:tiny_http",
     "dep:open",
-    "dep:fs4",
 ]
 default = ["subscription-oauth"]

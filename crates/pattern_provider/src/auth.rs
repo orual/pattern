@@ -24,6 +24,11 @@ pub mod session_pickup;
 
 #[cfg(feature = "subscription-oauth")]
 pub mod codex_oauth;
+#[cfg(feature = "subscription-oauth")]
+pub mod codex_storage;
+pub mod file_lock;
+#[cfg(feature = "subscription-oauth")]
+pub(crate) mod keyring_util;
 
 pub use api_key::ApiKeyTier;
 pub use resolver::{
@@ -40,4 +45,8 @@ pub use codex_oauth::{
     CodexLoginHandle, CodexOAuthConfig, CodexOAuthError, CodexTokenSet, DeviceCodeHandle,
     IdTokenClaims, LoginFlow, LoopbackHandle, RefreshFailureKind, begin_login, complete_login,
     parse_id_token, refresh_token,
+};
+#[cfg(feature = "subscription-oauth")]
+pub use codex_storage::{
+    AuthDotJson, AuthMode, CodexAuthStore, LoadResult, StorageError, TokenData,
 };

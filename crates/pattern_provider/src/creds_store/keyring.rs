@@ -20,6 +20,7 @@ use pattern_core::error::ProviderError;
 use pattern_core::types::provider::ProviderCredential;
 
 use super::CredsStore;
+use crate::auth::keyring_util::{classify_keyring_error, open_entry};
 
 /// Keyring-backed credential store.
 pub struct KeyringStore {
@@ -54,54 +55,12 @@ impl KeyringStore {
         format!("{}-{}", self.service_prefix, provider)
     }
 
-    /// Produce a keyring entry for `provider`, mapping any construction
-    /// failure to `CredentialStoreUnavailable` (likely means "no keyring
-    /// backend accessible" — DBus down, no Secret Service daemon, etc.).
+    /// Produce a keyring entry for `provider`. Naming convention:
+    /// service = `"{service_prefix}-{provider}"`, account = local username.
+    /// Error mapping shared with codex_storage via
+    /// [`crate::auth::keyring_util::open_entry`].
     fn entry(&self, provider: &str) -> Result<Entry, ProviderError> {
-        Entry::new(&self.service_name(provider), &whoami::username()).map_err(|e| {
-            tracing::warn!(provider, error = %e, "keyring entry construction failed");
-            ProviderError::CredentialStoreUnavailable
-        })
-    }
-}
-
-/// Classify a `keyring::Error` as either backend-unreachable (retry via
-/// fallback) or stored-data-corrupt (propagate).
-fn classify_keyring_error(e: keyring::Error) -> ProviderError {
-    use keyring::Error;
-    match e {
-        // Backend-unreachable variants → fallback tier gets a chance.
-        Error::PlatformFailure(_) | Error::NoStorageAccess(_) => {
-            ProviderError::CredentialStoreUnavailable
-        }
-        // Stored data is unreadable — this is corruption, not unavailability.
-        Error::BadEncoding(_) | Error::Ambiguous(_) => ProviderError::CredentialStorage {
-            reason: format!("keyring stored data unusable: {e}"),
-        },
-        // Rare shape errors — conservatively treat as storage errors.
-        Error::TooLong(_, _) | Error::Invalid(_, _) => ProviderError::CredentialStorage {
-            reason: format!("keyring API misuse: {e}"),
-        },
-        // NoEntry is caller-level absence, not an error from this function's POV.
-        // The callers map it to Ok(None) before reaching here.
-        Error::NoEntry => ProviderError::CredentialStorage {
-            reason: "NoEntry reached classify_keyring_error — this is a bug in KeyringStore".into(),
-        },
-        // Future-proofing against new variants we don't recognise.
-        other => ProviderError::CredentialStoreUnavailable
-            .tap_log(format!("unknown keyring error: {other}")),
-    }
-}
-
-/// Tiny extension trait so we can log-and-return in one line.
-trait TapLog: Sized {
-    fn tap_log(self, msg: String) -> Self;
-}
-
-impl TapLog for ProviderError {
-    fn tap_log(self, msg: String) -> Self {
-        tracing::warn!(message = %msg);
-        self
+        open_entry(&self.service_name(provider), &whoami::username())
     }
 }
 
