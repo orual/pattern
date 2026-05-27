@@ -385,23 +385,28 @@ pub fn handle_search(
         return Ok(Vec::new());
     }
 
-    // Collect the result IDs (memory_blocks.id UUIDs) so we can correlate.
+    // Block search results identify the hit by **label** (see
+    // `MemorySearchResult::display_id` →
+    // `SearchHit::Block { label, .. } => label`). Earlier code keyed the
+    // skill-metadata lookup map on `BlockMetadata.id` (the UUID), which
+    // never matched and silently dropped every hit. Key the map by label
+    // so the search → projection path actually links up.
+    //
     // Results are already ordered by BM25 score (descending) from the store.
-    let result_ids: Vec<&str> = search_results.iter().map(|r| r.display_id()).collect();
+    let result_labels: Vec<&str> = search_results.iter().map(|r| r.display_id()).collect();
 
-    // Enumerate all Skill blocks visible to this scope to build a label↔id mapping.
-    // Use an unscoped filter so that MemoryScope (if present) can apply its
-    // IsolatePolicy routing — same rationale as handle_list.
+    // Enumerate all Skill blocks visible to this scope to build a
+    // label → metadata mapping. Use an unscoped filter so that MemoryScope
+    // (if present) can apply its IsolatePolicy routing — same rationale as
+    // handle_list.
     let all_meta = store
         .list_blocks(BlockFilter::default())
         .map_err(|e| SkillHandlerError::Store(e.to_string()))?;
 
-    // Build a map from memory_id → BlockMetadata for Skill blocks only.
-    // BlockMetadata.id is the memory_blocks DB UUID.
-    let skill_by_id: std::collections::HashMap<&str, &BlockMetadata> = all_meta
+    let skill_by_label: std::collections::HashMap<&str, &BlockMetadata> = all_meta
         .iter()
         .filter(|m| matches!(m.schema, BlockSchema::Skill { .. }))
-        .map(|m| (m.id.as_str(), m))
+        .map(|m| (m.label.as_str(), m))
         .collect();
 
     // Walk search results in BM25 order; keep only Skill hits.
@@ -409,8 +414,8 @@ pub fn handle_search(
     // for get_block — necessary for project blocks under Full isolation (see
     // handle_list for the same rationale).
     let mut matched: Vec<(String, Scope)> = Vec::new();
-    for id in &result_ids {
-        if let Some(meta) = skill_by_id.get(*id) {
+    for label in &result_labels {
+        if let Some(meta) = skill_by_label.get(*label) {
             let block_scope =
                 Scope::from_db_key(&meta.agent_id).unwrap_or_else(|| scope.clone());
             matched.push((meta.label.clone(), block_scope));

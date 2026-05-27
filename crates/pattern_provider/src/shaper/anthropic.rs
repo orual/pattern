@@ -19,7 +19,7 @@ pub mod compat_mode;
 pub mod headers;
 pub mod system_prompt;
 
-pub use compat_mode::ShaperCompatMode;
+pub use compat_mode::{ShaperCompatMode, default_shaper_mode_for};
 pub use headers::build_identification_headers;
 pub use system_prompt::{build_content_blocks, build_system_prompt, prepend_routing_token};
 

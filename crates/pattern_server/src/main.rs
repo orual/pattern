@@ -168,8 +168,37 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
         let counter = Arc::new(pattern_provider::token_count::TokenCounter::anthropic(
             limiter.clone(),
         ));
+        // OpenAI provider: codex-OAuth-aware chain + NoOpShaper (the
+        // Anthropic shaper would inject the claude-code routing literal,
+        // which is structurally wrong for OpenAI traffic; gateway shaper
+        // dispatch is keyed on provider name so registering NoOpShaper
+        // here makes it impossible for the Anthropic shaper to fire on
+        // OpenAI requests). The codex storage uses default $CODEX_HOME
+        // resolution ($CODEX_HOME env var or ~/.codex); FileOnly mode is
+        // not used in production — keyring is primary, file is interop.
+        let openai_chain: Arc<dyn pattern_provider::auth::CredentialChain> = {
+            use pattern_provider::auth::{CodexAuthStore, CodexOAuthConfig, OpenAiAuthChain};
+            let store = match CodexAuthStore::from_env() {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not resolve $CODEX_HOME; openai chain falls back to api-key only");
+                    return Err(miette::miette!("codex storage init: {e}"));
+                }
+            };
+            Arc::new(OpenAiAuthChain::with_oauth(
+                store,
+                CodexOAuthConfig::codex(),
+                reqwest::Client::new(),
+            ))
+        };
+        let openai_limiter =
+            Arc::new(pattern_provider::ratelimit::ProviderRateLimiter::openai_default());
+        let openai_shaper: Arc<dyn pattern_provider::shaper::RequestShaper> =
+            Arc::new(pattern_provider::shaper::NoOpShaper);
+
         let gateway = pattern_provider::gateway::PatternGatewayClient::builder()
             .with_provider("anthropic", chain, shaper, limiter)
+            .with_provider("openai", openai_chain, openai_shaper, openai_limiter)
             .with_token_counter("anthropic", counter)
             .build()
             .map_err(|e| miette::miette!("failed to build gateway: {e}"))?;

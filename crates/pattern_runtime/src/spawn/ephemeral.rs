@@ -329,10 +329,14 @@ pub async fn run_ephemeral(
     let worker =
         EvalWorker::spawn_with_includes(child_ctx.clone(), child_include, session_id_for_worker);
 
-    // Default cache profile — same as the parent session's
-    // step_with_agent_loop fallback. CacheProfile lives in
-    // pattern_provider's compose surface.
-    let cache_profile = pattern_provider::compose::CacheProfile::default_anthropic_subscriber();
+    // Provider-aware cache profile. Derived from the child's OWN model
+    // (which may differ from the parent's — ephemeral configs can name
+    // a different model than their spawner). Anthropic gets the
+    // extended-TTL subscriber profile; OpenAI/Gemini/others get the
+    // no-cache profile (cache markers would never reach the wire for
+    // them anyway — see NoOpShaper).
+    let cache_profile =
+        pattern_provider::compose::CacheProfile::default_for(child_ctx.provider_kind());
 
     // Build the per-turn observer that appends to the spawn-log block.
     // Best-effort writes — failures get logged via tracing but never

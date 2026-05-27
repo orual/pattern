@@ -87,6 +87,16 @@ impl ProviderRateLimiter {
         Self::new("gemini", 60, 5_000, 120)
     }
 
+    /// OpenAI defaults — same conservative "polite personal-use" envelope as
+    /// Anthropic. Used for both the Platform API path (api-key tier →
+    /// `api.openai.com`) and the ChatGPT subscription path (OAuth tier →
+    /// `chatgpt.com/backend-api/codex/responses`). The subscription path has
+    /// its own server-side per-5h budget; this client-side limiter is
+    /// belt-and-suspenders, same as Anthropic.
+    pub fn openai_default() -> Self {
+        Self::new("openai", 60, 5_000, 120)
+    }
+
     /// Which provider this limiter serves. Useful for logging.
     pub fn provider(&self) -> &str {
         &self.provider

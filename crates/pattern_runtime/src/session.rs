@@ -1719,6 +1719,22 @@ impl SessionContext {
         &self.model_id
     }
 
+    /// Provider adapter kind derived from `model_id` via
+    /// `genai::adapter::AdapterKind::from_model`. genai's routing is the
+    /// single source of truth for which protocol each model speaks
+    /// (`gpt-5*` / `codex*` → `OpenAIResp`, `claude*` → `Anthropic`, etc.);
+    /// no Pattern-side catalog is maintained.
+    ///
+    /// Used by the compose path to pick provider-aware [`CacheProfile`]
+    /// and [`ShaperCompatMode`] defaults. Falls back to `Anthropic` if
+    /// genai can't classify the model (which would itself fail at the
+    /// gateway — this is a defense-in-depth default, not a routing
+    /// decision).
+    pub fn provider_kind(&self) -> genai::adapter::AdapterKind {
+        genai::adapter::AdapterKind::from_model(&self.model_id)
+            .unwrap_or(genai::adapter::AdapterKind::Anthropic)
+    }
+
     /// Per-turn budget snapshot.
     pub fn budget(&self) -> Budget {
         self.budget
@@ -2315,7 +2331,23 @@ impl TidepoolSession {
             eval_worker: None,
             preamble: None,
             tasks: tokio::task::JoinSet::new(),
-            cache_profile: pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+            // Provider-aware: Anthropic gets the extended-TTL subscriber
+            // profile; OpenAI/Gemini/others get the no-cache profile (cache
+            // markers would never reach the wire for them anyway because the
+            // NoOpShaper flattens `system_blocks` into a plain `chat.system`
+            // string before genai's adapter serializes the request).
+            //
+            // Derive via `AdapterKind::from_model(model_id)` rather than
+            // `persona.model.choice.provider` because genai's routing IS
+            // the catalog — if the persona declares a model but mis-tags
+            // the provider, the gateway would route by `from_model`
+            // anyway, so the cache profile must match that decision.
+            cache_profile: pattern_provider::compose::CacheProfile::default_for(
+                genai::adapter::AdapterKind::from_model(
+                    &persona.model.choice.model_id,
+                )
+                .unwrap_or(genai::adapter::AdapterKind::Anthropic),
+            ),
             _registry_guard: None,
             _port_lib_tempdir: None,
         })

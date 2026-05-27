@@ -54,6 +54,29 @@ impl Default for ShaperCompatMode {
     }
 }
 
+/// Provider-aware default shaper mode. Used by the runtime composer to
+/// pick the right [`ShaperCompatMode`] without baking the Anthropic-
+/// specific `SubscriptionRoutingShape` into non-Anthropic providers'
+/// composed requests.
+///
+/// - `Anthropic` → [`ShaperCompatMode::default`] (feature-gated:
+///   `SubscriptionRoutingShape` under `subscription-oauth`,
+///   `HonestPattern` otherwise).
+/// - All others (OpenAI, OpenAIResp, Gemini, Cohere, …) →
+///   `HonestPattern`. These providers don't have Anthropic's
+///   subscription-routing requirements, so the cleanest posture is to
+///   produce content blocks without any routing wrappers and let the
+///   per-provider shaper at the gateway adapt the wire shape (e.g.,
+///   NoOpShaper flattens system_blocks → chat.system for genai's
+///   OpenAI adapter).
+pub fn default_shaper_mode_for(adapter: genai::adapter::AdapterKind) -> ShaperCompatMode {
+    use genai::adapter::AdapterKind;
+    match adapter {
+        AdapterKind::Anthropic => ShaperCompatMode::default(),
+        _ => ShaperCompatMode::HonestPattern,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

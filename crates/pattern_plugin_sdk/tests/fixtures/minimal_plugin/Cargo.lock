@@ -4611,10 +4611,13 @@ name = "pattern-plugin-sdk"
 version = "0.4.0"
 dependencies = [
  "async-trait",
+ "crossbeam-channel",
+ "dashmap",
  "futures",
  "iroh",
  "irpc",
  "irpc-iroh",
+ "loro",
  "pattern-core",
  "serde",
  "serde_json",

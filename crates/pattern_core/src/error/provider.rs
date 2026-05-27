@@ -241,6 +241,39 @@ pub enum ProviderError {
         provider: String,
     },
 
+    /// The resolved auth tier is incompatible with the model's required
+    /// protocol. The canonical case: ChatGPT-subscription OAuth tier
+    /// resolved, but the model name routes to `AdapterKind::OpenAI`
+    /// (Chat Completions) which the chatgpt.com backend doesn't speak.
+    /// Surfaced BEFORE the network call so users see a clear remediation
+    /// hint instead of an opaque server-side rejection.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ProviderError;
+    ///
+    /// let err = ProviderError::TierMismatch {
+    ///     model: "gpt-4o".into(),
+    ///     hint: "the chatgpt subscription backend speaks the Responses API only; \
+    ///            pick a codex-family model or use the `openai_resp::` namespace prefix",
+    /// };
+    /// assert!(err.to_string().contains("gpt-4o"));
+    /// ```
+    #[error("auth tier incompatible with model {model:?}: {hint}")]
+    #[diagnostic(
+        code(pattern_core::provider::tier_mismatch),
+        help("either change the model selection or re-authenticate with a tier that supports this model's protocol")
+    )]
+    TierMismatch {
+        /// Model identifier the caller requested.
+        model: String,
+        /// Static remediation hint; constructed at the gateway boundary
+        /// so the message is provider-aware without callers needing to
+        /// switch on the variant.
+        hint: &'static str,
+    },
+
     /// The provider returned an HTTP error response.
     ///
     /// # Example

@@ -137,6 +137,56 @@ impl CacheProfile {
         }
     }
 
+    /// "No prompt-caching" profile — emit no cache_control markers in
+    /// composed requests. Suitable for providers without Anthropic-style
+    /// prompt caching (OpenAI Chat Completions, OpenAI Responses,
+    /// Gemini, others). Composer passes still place cache breakpoints
+    /// in their `BreakpointTracker`, but
+    /// [`Self::segment_N_control`] returns `None`-equivalent placement
+    /// so no markers appear in the final wire request body.
+    ///
+    /// Internally we set all three TTLs to `Ephemeral5m` (the
+    /// shortest, cheapest value) and `allow_extended_ttl = false` so
+    /// any accidental promotion to extended TTL gets downgraded with a
+    /// warning. The CacheStrategy stays `Default` because the
+    /// three-segment LAYOUT (where in the message stream breakpoints
+    /// notionally sit) is provider-agnostic — what differs is whether
+    /// markers get emitted at all, which the per-provider shaper at
+    /// the gateway controls when it rebuilds `system_blocks`.
+    ///
+    /// For OpenAI specifically: cache_control markers attached to
+    /// `SystemBlock`s would never reach the wire because the
+    /// `NoOpShaper` flattens `system_blocks` into `chat.system` (a
+    /// plain string) before genai's adapter serializes the request.
+    /// But for any block-level cache_control the composer places on
+    /// message-level content (segment 2/3), this profile ensures the
+    /// short, cheap TTL is used.
+    pub fn default_no_cache() -> Self {
+        Self {
+            segment_1_ttl: CacheControl::Ephemeral5m,
+            segment_2_ttl: CacheControl::Ephemeral5m,
+            segment_3_ttl: CacheControl::Ephemeral5m,
+            allow_extended_ttl: false,
+            strategy: CacheStrategy::Default,
+        }
+    }
+
+    /// Provider-aware factory. Picks the right cache profile based on
+    /// the resolved `AdapterKind`. The runtime calls this at session
+    /// open + per-compose so non-Anthropic providers don't carry
+    /// Anthropic-specific cache plumbing into their requests.
+    ///
+    /// - `Anthropic` → [`Self::default_anthropic_subscriber`].
+    /// - All others (OpenAI, OpenAIResp, Gemini, Cohere, …) →
+    ///   [`Self::default_no_cache`].
+    pub fn default_for(adapter: genai::adapter::AdapterKind) -> Self {
+        use genai::adapter::AdapterKind;
+        match adapter {
+            AdapterKind::Anthropic => Self::default_anthropic_subscriber(),
+            _ => Self::default_no_cache(),
+        }
+    }
+
     /// Shared downgrade helper. When `allow_extended_ttl` is false and
     /// the requested control is an extended-TTL variant, emit a
     /// `tracing::warn` and downgrade to `Ephemeral5m`. Otherwise return

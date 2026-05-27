@@ -46,7 +46,7 @@ pub mod noop;
 // Convenience re-exports so `shaper::HonestPatternShaper` keeps working.
 pub use anthropic::{
     HonestPatternShaper, ShaperCompatMode, build_content_blocks, build_identification_headers,
-    build_system_prompt, prepend_routing_token,
+    build_system_prompt, default_shaper_mode_for, prepend_routing_token,
 };
 pub use noop::NoOpShaper;
 

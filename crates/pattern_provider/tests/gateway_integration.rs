@@ -962,3 +962,136 @@ async fn provider_dispatch_routes_per_model() {
 fn _unused_chat_options_sentinel() -> ChatOptions {
     ChatOptions::default()
 }
+
+// ---- OpenAI gateway integration ----
+
+#[cfg(feature = "subscription-oauth")]
+struct StaticOpenAiOAuthChain {
+    token: ProviderCredential,
+}
+
+#[cfg(feature = "subscription-oauth")]
+#[async_trait]
+impl CredentialChain for StaticOpenAiOAuthChain {
+    fn provider(&self) -> &str {
+        "openai"
+    }
+
+    async fn resolve(&self) -> Result<ResolvedCredential, ProviderError> {
+        Ok(ResolvedCredential {
+            source: AuthTier::StoredOauth,
+            token: self.token.clone(),
+        })
+    }
+}
+
+/// Tier-vs-protocol pre-flight gate: when the user has OAuth tier but
+/// the model name resolves to `AdapterKind::OpenAI` (Chat Completions),
+/// the gateway must refuse with `ProviderError::TierMismatch` BEFORE
+/// any network call. The error message must include a remediation hint
+/// pointing at the `openai_resp::` namespace prefix.
+///
+/// We assert no network call by constructing a mock server but mounting
+/// no mocks — any request would 404 and the gateway would surface a
+/// different error. `wiremock` doesn't directly let us assert "zero
+/// requests", but the TierMismatch path returns immediately without
+/// touching the http client at all, so the mock server's bound port is
+/// untouched.
+#[cfg(feature = "subscription-oauth")]
+#[tokio::test]
+async fn openai_oauth_plus_chat_completions_model_returns_tier_mismatch() {
+    let chain: Arc<dyn CredentialChain> = Arc::new(StaticOpenAiOAuthChain {
+        // session_id carries the chatgpt_account_id; included here so the
+        // error path can't accidentally be triggered by the missing-claim
+        // branch in auth_headers_for_tier.
+        token: ProviderCredential {
+            provider: "openai".into(),
+            access_token: SecretString::from("at-tier-mismatch-test".to_string()),
+            refresh_token: None,
+            expires_at: None,
+            scope: None,
+            session_id: Some("acct_tier_mismatch".into()),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
+        },
+    });
+    let gateway = PatternGatewayClient::builder()
+        .with_provider(
+            "openai",
+            chain,
+            Arc::new(pattern_provider::shaper::NoOpShaper),
+            Arc::new(ProviderRateLimiter::openai_default()),
+        )
+        .build()
+        .expect("gateway builds");
+
+    // `gpt-4o` resolves to AdapterKind::OpenAI (Chat Completions) per
+    // genai's from_model — OAuth tier can't serve it.
+    let req = CompletionRequest::new("gpt-4o").append_message(ChatMessage::user("hi"));
+    // ChunkStream doesn't impl Debug, so we can't use `expect_err`;
+    // hand-match the result instead.
+    match gateway.complete(req).await {
+        Ok(_) => panic!("OAuth + Chat-Completions model must fail with TierMismatch"),
+        Err(ProviderError::TierMismatch { model, hint }) => {
+            assert_eq!(model, "gpt-4o");
+            assert!(
+                hint.contains("openai_resp::"),
+                "hint must mention namespace override: {hint}"
+            );
+            assert!(
+                hint.contains("Responses API"),
+                "hint must explain why the model is rejected: {hint}"
+            );
+        }
+        Err(other) => panic!("expected TierMismatch, got {other:?}"),
+    }
+}
+
+/// Companion to the tier-mismatch test: when the user has OAuth tier
+/// AND picks a codex-family model that resolves to `OpenAIResp`, the
+/// gate must NOT fire. We construct the same gateway, ask for
+/// `gpt-5-codex`, and assert we get an error OTHER than TierMismatch
+/// (the test doesn't run a real ChatGPT backend — anything past the
+/// gate is fine; what matters is the gate didn't reject this model).
+#[cfg(feature = "subscription-oauth")]
+#[tokio::test]
+async fn openai_oauth_plus_responses_model_passes_tier_gate() {
+    let chain: Arc<dyn CredentialChain> = Arc::new(StaticOpenAiOAuthChain {
+        token: ProviderCredential {
+            provider: "openai".into(),
+            access_token: SecretString::from("at-passes-gate".to_string()),
+            refresh_token: None,
+            expires_at: None,
+            scope: None,
+            session_id: Some("acct_passes_gate".into()),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
+        },
+    });
+    let gateway = PatternGatewayClient::builder()
+        .with_provider(
+            "openai",
+            chain,
+            Arc::new(pattern_provider::shaper::NoOpShaper),
+            Arc::new(ProviderRateLimiter::openai_default()),
+        )
+        // Point at an invalid URL so the actual network call definitively
+        // fails — we don't want to accidentally hit chatgpt.com.
+        .with_provider_base_url("openai", "http://127.0.0.1:1")
+        .build()
+        .expect("gateway builds");
+
+    let req =
+        CompletionRequest::new("gpt-5-codex").append_message(ChatMessage::user("hi"));
+    match gateway.complete(req).await {
+        Ok(_) => panic!("bogus base URL must produce a network error"),
+        Err(ProviderError::TierMismatch { .. }) => {
+            panic!("tier gate fired for OAuth + Responses-API model — should have passed")
+        }
+        Err(_) => {
+            // Any other error variant means we got past the gate; that's
+            // what this test asserts. Downstream network/parse failures are
+            // expected because base_url_override points at an invalid host.
+        }
+    }
+}

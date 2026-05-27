@@ -1608,7 +1608,13 @@ async fn compose_request_for_turn(
     //    wire-shape on top. This keeps Segment1Pass's cache-control
     //    marker (placed on the LAST block) attached to the persona block
     //    even after the shaper prepends.
-    let mode = default_shaper_mode();
+    // Pick the shaper mode from the session's resolved provider, NOT a
+    // global feature-gated constant. Non-Anthropic providers (OpenAI,
+    // Gemini, …) always get HonestPattern; the Anthropic-only routing
+    // wrappers don't apply to them and would otherwise leak into their
+    // composed requests. See `pattern_provider::shaper::default_shaper_mode_for`.
+    let mode =
+        pattern_provider::shaper::default_shaper_mode_for(ctx.provider_kind());
     let base_instructions = ctx
         .system_prompt()
         .unwrap_or(pattern_core::DEFAULT_BASE_INSTRUCTIONS);
@@ -1710,19 +1716,10 @@ async fn compose_request_for_turn(
     Ok((req, has_segment_1))
 }
 
-/// Default `ShaperCompatMode` used by the composer. Hardcoded to
-/// `SubscriptionRoutingShape` when built with the
-/// `subscription-oauth` feature, `HonestPattern` otherwise. A future
-/// refinement may expose this as a session-level override.
-#[cfg(feature = "subscription-oauth")]
-fn default_shaper_mode() -> ShaperCompatMode {
-    ShaperCompatMode::SubscriptionRoutingShape
-}
-
-#[cfg(not(feature = "subscription-oauth"))]
-fn default_shaper_mode() -> ShaperCompatMode {
-    ShaperCompatMode::HonestPattern
-}
+// Replaced by `pattern_provider::shaper::default_shaper_mode_for`, which
+// is provider-aware (this constant was hardcoded Anthropic-tier-specific
+// and would have leaked SubscriptionRoutingShape's claude-code routing
+// literal into non-Anthropic providers' composed requests).
 
 // ---- helpers ------------------------------------------------------------
 

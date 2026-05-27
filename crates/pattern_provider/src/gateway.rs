@@ -175,6 +175,28 @@ impl ProviderClient for PatternGatewayClient {
             })?;
         let resolved = chain.resolve().await?;
 
+        // Tier-vs-protocol pre-flight gate.
+        //
+        // The ChatGPT subscription backend (`chatgpt.com/backend-api/codex/...`)
+        // speaks the Responses API exclusively — Chat Completions models are
+        // not routable through that endpoint. If the user has OAuth credentials
+        // but the model name resolves to `AdapterKind::OpenAI` (Chat Completions),
+        // refuse here with a clear remediation hint instead of letting the
+        // request go out and come back as an opaque server-side "unknown model"
+        // error. The `openai_resp::` namespace prefix forces the
+        // Responses-API adapter and is the documented way to override genai's
+        // model-name routing.
+        if matches!(adapter, AdapterKind::OpenAI)
+            && resolved.source.is_oauth()
+        {
+            return Err(ProviderError::TierMismatch {
+                model: model.clone(),
+                hint: "the chatgpt subscription backend speaks the Responses API only; \
+                       pick a codex-family model (e.g. `gpt-5-codex`) or use the \
+                       `openai_resp::` namespace prefix to force the Responses adapter",
+            });
+        }
+
         let shaper = self
             .shapers
             .get(&provider)
@@ -198,6 +220,7 @@ impl ProviderClient for PatternGatewayClient {
         let target = service_target(
             adapter,
             &model,
+            resolved.source,
             outbound_headers,
             self.base_url_overrides.get(&provider).map(String::as_str),
         );
@@ -815,6 +838,24 @@ fn auth_headers_for_tier(
             // overwrite the shaper's `anthropic-beta` value (last-insert-wins),
             // silently dropping capability markers on every OAuth-tier call.
             // The shaper is the single source of truth for the full beta value.
+
+            // OpenAI OAuth (codex / ChatGPT-subscription) routes through
+            // `chatgpt.com/backend-api/codex/responses` and REQUIRES two
+            // extra headers in addition to the Authorization Bearer:
+            //   - `chatgpt-account-id` — extracted from the id_token JWT
+            //     during login; carried through `ProviderCredential.session_id`.
+            //   - `originator` — Pattern-specific UA tag (honest pattern
+            //     identification, mirrors the user-agent posture).
+            // These belong here (not in the shaper) because they're
+            // credential-derived: the account_id lives on the resolved token
+            // and would otherwise require threading it from the chain into
+            // the shaper layer.
+            if matches!(adapter, AdapterKind::OpenAI | AdapterKind::OpenAIResp) {
+                if let Some(account_id) = resolved.token.session_id.as_deref() {
+                    headers.insert("chatgpt-account-id".into(), account_id.to_string());
+                }
+                headers.insert("originator".into(), "pattern".into());
+            }
         }
     }
 
@@ -826,10 +867,11 @@ fn auth_headers_for_tier(
 fn service_target(
     adapter: AdapterKind,
     model: &str,
+    tier: AuthTier,
     headers: std::collections::BTreeMap<String, String>,
     base_url_override: Option<&str>,
 ) -> ServiceTarget {
-    let url = chat_url_for(adapter, model, base_url_override);
+    let url = chat_url_for(adapter, model, tier, base_url_override);
     // Single conversion to Vec at the genai boundary.
     let headers_vec: Vec<(String, String)> = headers.into_iter().collect();
     ServiceTarget {
@@ -850,7 +892,17 @@ fn service_target(
 /// endpoint ourselves. The per-adapter path suffix is fixed; the base URL
 /// (scheme + host + optional port) can be overridden via the gateway
 /// builder's `with_provider_base_url` for tests and self-hosted proxies.
-fn chat_url_for(adapter: AdapterKind, model: &str, base_url_override: Option<&str>) -> String {
+///
+/// `tier` is consulted only for OpenAI/OpenAIResp adapters: under OAuth
+/// the request routes to `chatgpt.com/backend-api/codex/responses`
+/// instead of the regular `api.openai.com/v1/responses`. Other adapters
+/// (Anthropic, Gemini) use the same URL for both tiers.
+fn chat_url_for(
+    adapter: AdapterKind,
+    model: &str,
+    tier: AuthTier,
+    base_url_override: Option<&str>,
+) -> String {
     match adapter {
         AdapterKind::Anthropic => {
             let base = base_url_override.unwrap_or("https://api.anthropic.com");
@@ -860,6 +912,30 @@ fn chat_url_for(adapter: AdapterKind, model: &str, base_url_override: Option<&st
             // Gemini's endpoint embeds the model name and the service verb.
             let base = base_url_override.unwrap_or("https://generativelanguage.googleapis.com");
             format!("{base}/v1beta/models/{model}:streamGenerateContent")
+        }
+        AdapterKind::OpenAI => {
+            // Chat Completions API. Only reachable with api-key tier — the
+            // tier-vs-protocol pre-flight gate blocks the OAuth+OpenAI
+            // combination upstream.
+            let base = base_url_override.unwrap_or("https://api.openai.com");
+            format!("{base}/v1/chat/completions")
+        }
+        AdapterKind::OpenAIResp => {
+            // Responses API. Endpoint depends on tier: api-key uses the
+            // Platform endpoint; OAuth (ChatGPT subscription via codex)
+            // uses the chatgpt.com backend with a different path prefix.
+            let is_oauth = tier.is_oauth();
+            let default_base = if is_oauth {
+                "https://chatgpt.com"
+            } else {
+                "https://api.openai.com"
+            };
+            let base = base_url_override.unwrap_or(default_base);
+            if is_oauth {
+                format!("{base}/backend-api/codex/responses")
+            } else {
+                format!("{base}/v1/responses")
+            }
         }
         _ => {
             // Surface a clearly-invalid URL so mis-routed calls fail loudly
@@ -1007,6 +1083,143 @@ mod tests {
         let hdrs = auth_headers_for_tier(&resolved, AdapterKind::Gemini);
         assert!(hdrs.contains_key("x-goog-api-key"));
         assert!(!hdrs.contains_key("anthropic-version"));
+    }
+
+    // ---- OpenAI tests ----
+
+    fn openai_api_key_token() -> ProviderCredential {
+        let now = Timestamp::now();
+        ProviderCredential {
+            provider: "openai".into(),
+            access_token: SecretString::from("sk-openai-test".to_string()),
+            refresh_token: None,
+            expires_at: None,
+            scope: None,
+            session_id: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[cfg(feature = "subscription-oauth")]
+    fn openai_oauth_token(account_id: Option<&str>) -> ProviderCredential {
+        let now = Timestamp::now();
+        ProviderCredential {
+            provider: "openai".into(),
+            access_token: SecretString::from("at-oauth-test".to_string()),
+            refresh_token: Some(SecretString::from("rt-oauth-test".to_string())),
+            expires_at: None,
+            scope: None,
+            session_id: account_id.map(String::from),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn auth_headers_api_key_openai_emits_only_bearer() {
+        let resolved = ResolvedCredential {
+            source: AuthTier::ApiKey,
+            token: openai_api_key_token(),
+        };
+        for adapter in [AdapterKind::OpenAI, AdapterKind::OpenAIResp] {
+            let hdrs = auth_headers_for_tier(&resolved, adapter);
+            // Bearer auth, no ChatGPT-Account-Id, no originator (the codex
+            // extras only fire for OAuth tier).
+            let auth = hdrs.get("authorization").expect("authorization present");
+            assert!(auth.starts_with("Bearer "), "adapter={adapter:?} auth={auth}");
+            assert!(!hdrs.contains_key("chatgpt-account-id"), "adapter={adapter:?}");
+            assert!(!hdrs.contains_key("originator"), "adapter={adapter:?}");
+            assert!(!hdrs.contains_key("anthropic-version"), "adapter={adapter:?}");
+        }
+    }
+
+    #[cfg(feature = "subscription-oauth")]
+    #[test]
+    fn auth_headers_oauth_openai_emits_account_id_and_originator() {
+        let resolved = ResolvedCredential {
+            source: AuthTier::StoredOauth,
+            token: openai_oauth_token(Some("acct_abc")),
+        };
+        for adapter in [AdapterKind::OpenAI, AdapterKind::OpenAIResp] {
+            let hdrs = auth_headers_for_tier(&resolved, adapter);
+            assert_eq!(
+                hdrs.get("authorization").map(String::as_str),
+                Some("Bearer at-oauth-test"),
+                "adapter={adapter:?}"
+            );
+            assert_eq!(
+                hdrs.get("chatgpt-account-id").map(String::as_str),
+                Some("acct_abc"),
+                "adapter={adapter:?}"
+            );
+            assert_eq!(
+                hdrs.get("originator").map(String::as_str),
+                Some("pattern"),
+                "adapter={adapter:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "subscription-oauth")]
+    #[test]
+    fn auth_headers_oauth_openai_without_account_id_omits_header() {
+        // If the id_token didn't carry chatgpt_account_id (rare but possible),
+        // we still emit the bearer + originator but skip account_id. The
+        // server will reject the request; surfacing that error is the
+        // caller's job.
+        let resolved = ResolvedCredential {
+            source: AuthTier::StoredOauth,
+            token: openai_oauth_token(None),
+        };
+        let hdrs = auth_headers_for_tier(&resolved, AdapterKind::OpenAIResp);
+        assert!(hdrs.contains_key("authorization"));
+        assert!(hdrs.contains_key("originator"));
+        assert!(!hdrs.contains_key("chatgpt-account-id"));
+    }
+
+    #[test]
+    fn chat_url_openai_api_key_uses_platform_endpoint() {
+        let url = chat_url_for(AdapterKind::OpenAI, "gpt-4o", AuthTier::ApiKey, None);
+        assert_eq!(url, "https://api.openai.com/v1/chat/completions");
+        let url = chat_url_for(AdapterKind::OpenAIResp, "gpt-5-codex", AuthTier::ApiKey, None);
+        assert_eq!(url, "https://api.openai.com/v1/responses");
+    }
+
+    #[cfg(feature = "subscription-oauth")]
+    #[test]
+    fn chat_url_openai_resp_oauth_uses_chatgpt_backend() {
+        let url = chat_url_for(
+            AdapterKind::OpenAIResp,
+            "gpt-5-codex",
+            AuthTier::StoredOauth,
+            None,
+        );
+        assert_eq!(url, "https://chatgpt.com/backend-api/codex/responses");
+    }
+
+    #[test]
+    fn chat_url_openai_honours_base_url_override() {
+        let url = chat_url_for(
+            AdapterKind::OpenAIResp,
+            "gpt-5-codex",
+            AuthTier::ApiKey,
+            Some("http://127.0.0.1:9999"),
+        );
+        assert_eq!(url, "http://127.0.0.1:9999/v1/responses");
+
+        #[cfg(feature = "subscription-oauth")]
+        {
+            let url = chat_url_for(
+                AdapterKind::OpenAIResp,
+                "gpt-5-codex",
+                AuthTier::StoredOauth,
+                Some("http://127.0.0.1:9999"),
+            );
+            // Override replaces the host portion; the OAuth-tier path
+            // suffix still applies.
+            assert_eq!(url, "http://127.0.0.1:9999/backend-api/codex/responses");
+        }
     }
 
     // End-to-end streaming round trip tests live in
