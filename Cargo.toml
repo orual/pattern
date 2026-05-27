@@ -239,6 +239,12 @@ askama = "0.15"
 # `kdl = "6"` per-crate dep.
 kdl = { version = "6", features = ["v1-fallback"] }
 
+# Codex OAuth: loopback HTTP listener (sync, single-purpose) + browser open
+# helper + advisory cross-process file lock for credential storage.
+tiny_http = "0.12"
+open = "5"
+fs4 = { version = "0.13", features = ["tokio"] }
+
 
 [workspace.lints.clippy]
 mod_module_files = "warn"

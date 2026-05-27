@@ -22,6 +22,9 @@ pub mod pkce;
 #[cfg(feature = "subscription-oauth")]
 pub mod session_pickup;
 
+#[cfg(feature = "subscription-oauth")]
+pub mod codex_oauth;
+
 pub use api_key::ApiKeyTier;
 pub use resolver::{
     AnthropicAuthChain, AuthTier, CredentialChain, GeminiAuthChain, ResolvedCredential,
@@ -31,3 +34,10 @@ pub use resolver::{
 pub use pkce::{PendingAuth, PkceConfig, PkceTier};
 #[cfg(feature = "subscription-oauth")]
 pub use session_pickup::SessionPickupTier;
+
+#[cfg(feature = "subscription-oauth")]
+pub use codex_oauth::{
+    CodexLoginHandle, CodexOAuthConfig, CodexOAuthError, CodexTokenSet, DeviceCodeHandle,
+    IdTokenClaims, LoginFlow, LoopbackHandle, RefreshFailureKind, begin_login, complete_login,
+    parse_id_token, refresh_token,
+};

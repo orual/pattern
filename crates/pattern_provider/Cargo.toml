@@ -67,6 +67,17 @@ base64 = { workspace = true }
 # minimal / downstream-distributor builds.
 keyring = { workspace = true, optional = true }
 whoami = { workspace = true, optional = true }
+
+# Codex OAuth-only deps. `tiny_http` runs the loopback callback listener
+# for the PKCE flow; `open` opens the user's browser to the authorize URL;
+# `fs4` provides advisory file locking so Pattern + codex CLI don't race on
+# `~/.codex/.auth.json` refresh. id_token claims are extracted by
+# base64-decoding the JWT payload (matching codex CLI's approach) — TLS to
+# auth.openai.com is the authentication boundary, so JWKS signature
+# verification adds nothing.
+tiny_http = { workspace = true, optional = true }
+open = { workspace = true, optional = true }
+fs4 = { workspace = true, optional = true }
 llama-cpp-4 = { version = "0.2.52", features = ["vulkan"] }
 
 [dev-dependencies]
@@ -94,5 +105,11 @@ insta = { version = "1", features = ["yaml"] }
 #
 # Default = on for dev convenience; pattern's foundation primary target is
 # subscription-tier work.
-subscription-oauth = ["dep:keyring", "dep:whoami"]
+subscription-oauth = [
+    "dep:keyring",
+    "dep:whoami",
+    "dep:tiny_http",
+    "dep:open",
+    "dep:fs4",
+]
 default = ["subscription-oauth"]
