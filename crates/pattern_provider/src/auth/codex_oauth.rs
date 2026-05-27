@@ -356,6 +356,33 @@ struct OidcAuth {
     chatgpt_account_is_fedramp: bool,
 }
 
+/// Decode the `exp` claim from any JWT (no signature verification). For
+/// codex tokens, both `access_token` and `id_token` are JWTs; we use
+/// this on `access_token` to determine when refresh is needed. Returns
+/// `None` if the JWT has no `exp` claim. Matches codex's
+/// `parse_jwt_expiration`.
+pub fn parse_jwt_expiration(jwt: &str) -> Result<Option<Timestamp>, CodexOAuthError> {
+    let mut parts = jwt.split('.');
+    let payload_b64 = match (parts.next(), parts.next(), parts.next()) {
+        (Some(h), Some(p), Some(s)) if !h.is_empty() && !p.is_empty() && !s.is_empty() => p,
+        _ => return Err(CodexOAuthError::IdTokenShape),
+    };
+    let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload_b64)?;
+    #[derive(Deserialize)]
+    struct ExpClaim {
+        #[serde(default)]
+        exp: Option<i64>,
+    }
+    let claim: ExpClaim =
+        serde_json::from_slice(&payload_bytes).map_err(CodexOAuthError::IdTokenJson)?;
+    match claim.exp {
+        None => Ok(None),
+        Some(secs) => Timestamp::from_second(secs)
+            .map(Some)
+            .map_err(CodexOAuthError::ExpiresInOverflow),
+    }
+}
+
 /// Decode and parse an id_token JWT. Signature is NOT verified — see
 /// module-level docs. Returns the namespaced claims (plus the raw JWT,
 /// stored verbatim so we can pass it through to codex's `.auth.json`).

@@ -32,7 +32,8 @@ pub(crate) mod keyring_util;
 
 pub use api_key::ApiKeyTier;
 pub use resolver::{
-    AnthropicAuthChain, AuthTier, CredentialChain, GeminiAuthChain, ResolvedCredential,
+    AnthropicAuthChain, AuthTier, CredentialChain, GeminiAuthChain, OpenAiAuthChain,
+    ResolvedCredential,
 };
 
 #[cfg(feature = "subscription-oauth")]

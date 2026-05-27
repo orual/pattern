@@ -190,6 +190,20 @@ pub struct LoadResult {
 
 // ---- Store ----
 
+/// Where stored auth lives. Production uses `KeyringAndFile`; tests and
+/// keyring-less environments can use `FileOnly` to skip the keyring tier
+/// entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StorageMode {
+    /// Try keyring first, fall back to `auth.json`. Production default.
+    KeyringAndFile,
+    /// File-only. Used by tests so they never touch the developer's real
+    /// keyring, and as a deliberate config for headless environments where
+    /// no keyring daemon is reachable.
+    FileOnly,
+}
+
 /// Codex-compatible credential store. One instance per `$CODEX_HOME`.
 #[derive(Clone, Debug)]
 pub struct CodexAuthStore {
@@ -197,11 +211,18 @@ pub struct CodexAuthStore {
     keyring_account: String,
     auth_file: PathBuf,
     lock_file: PathBuf,
+    mode: StorageMode,
 }
 
 impl CodexAuthStore {
-    /// Construct against an explicit `codex_home` directory.
+    /// Construct against an explicit `codex_home` directory with the
+    /// default `KeyringAndFile` mode.
     pub fn new(codex_home: PathBuf) -> Self {
+        Self::with_mode(codex_home, StorageMode::KeyringAndFile)
+    }
+
+    /// Construct with an explicit storage mode.
+    pub fn with_mode(codex_home: PathBuf, mode: StorageMode) -> Self {
         let keyring_account = compute_keyring_account(&codex_home);
         let auth_file = codex_home.join(AUTH_FILENAME);
         let lock_file = codex_home.join(LOCK_FILENAME);
@@ -210,7 +231,14 @@ impl CodexAuthStore {
             keyring_account,
             auth_file,
             lock_file,
+            mode,
         }
+    }
+
+    /// File-only store. Equivalent to `with_mode(..., StorageMode::FileOnly)`.
+    /// Tests use this so they don't touch the developer's real keyring.
+    pub fn file_only(codex_home: PathBuf) -> Self {
+        Self::with_mode(codex_home, StorageMode::FileOnly)
     }
 
     /// Construct using `$CODEX_HOME` env or `~/.codex` default. Mirrors
@@ -268,6 +296,22 @@ impl CodexAuthStore {
             source,
         })?;
         let _guard = acquire_file_lock(&self.lock_file).await?;
+        self.save_under_lock(auth, file_existed).await
+    }
+
+    /// Persist credential state, **assuming the caller already holds the
+    /// file lock**. Used by the refresh path, where `OpenAiAuthChain`
+    /// acquires the lock once for the full read-refresh-write cycle and
+    /// calling [`save`] again would recursively block on the same lock
+    /// (POSIX flock is per-open-file-description; same process opening
+    /// the file twice deadlocks).
+    ///
+    /// Public callers should prefer [`save`].
+    pub async fn save_under_lock(
+        &self,
+        auth: &AuthDotJson,
+        file_existed: bool,
+    ) -> Result<(), StorageError> {
         self.save_keyring(auth).await?;
         if file_existed {
             self.save_file(auth).await?;
@@ -275,24 +319,37 @@ impl CodexAuthStore {
         Ok(())
     }
 
+    /// Acquire the shared cross-process file lock. Used by the refresh
+    /// path so [`save_under_lock`] can write without re-entry.
+    pub async fn lock(&self) -> Result<crate::auth::file_lock::FileLockGuard, StorageError> {
+        std::fs::create_dir_all(&self.codex_home).map_err(|source| StorageError::Io {
+            path: self.codex_home.clone(),
+            source,
+        })?;
+        Ok(acquire_file_lock(&self.lock_file).await?)
+    }
+
     /// Clear stored credentials from both keyring and (if it exists) the
     /// `.auth.json` file. Idempotent — already-clean state is not an error.
     pub async fn forget(&self) -> Result<(), StorageError> {
         let _guard = acquire_file_lock(&self.lock_file).await?;
-        // Keyring delete: NoEntry is fine.
-        let account = self.keyring_account.clone();
-        let entry = open_entry(CODEX_KEYRING_SERVICE, &account).map_err(StorageError::Keyring)?;
-        tokio::task::spawn_blocking(move || match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(classify_keyring_error(e)),
-        })
-        .await
-        .map_err(|join_err| StorageError::Keyring(
-            pattern_core::error::ProviderError::CredentialStorage {
-                reason: format!("keyring delete spawn_blocking join: {join_err}"),
-            },
-        ))?
-        .map_err(StorageError::Keyring)?;
+
+        // Keyring delete: gated on mode. NoEntry is fine.
+        if self.mode != StorageMode::FileOnly {
+            let account = self.keyring_account.clone();
+            let entry = open_entry(CODEX_KEYRING_SERVICE, &account).map_err(StorageError::Keyring)?;
+            tokio::task::spawn_blocking(move || match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(e) => Err(classify_keyring_error(e)),
+            })
+            .await
+            .map_err(|join_err| {
+                StorageError::Keyring(pattern_core::error::ProviderError::CredentialStorage {
+                    reason: format!("keyring delete spawn_blocking join: {join_err}"),
+                })
+            })?
+            .map_err(StorageError::Keyring)?;
+        }
 
         // File delete: NotFound is fine.
         let auth_file = self.auth_file.clone();
@@ -317,6 +374,9 @@ impl CodexAuthStore {
     // ---- internals ----
 
     async fn load_keyring(&self) -> Result<Option<AuthDotJson>, StorageError> {
+        if self.mode == StorageMode::FileOnly {
+            return Ok(None);
+        }
         let entry = open_entry(CODEX_KEYRING_SERVICE, &self.keyring_account)
             .map_err(StorageError::Keyring)?;
         let result = tokio::task::spawn_blocking(move || match entry.get_password() {
@@ -349,6 +409,9 @@ impl CodexAuthStore {
     }
 
     async fn save_keyring(&self, auth: &AuthDotJson) -> Result<(), StorageError> {
+        if self.mode == StorageMode::FileOnly {
+            return Ok(());
+        }
         let json = serde_json::to_string(auth)?;
         let account = self.keyring_account.clone();
         let entry = open_entry(CODEX_KEYRING_SERVICE, &account).map_err(StorageError::Keyring)?;
