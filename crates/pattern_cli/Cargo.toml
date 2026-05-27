@@ -62,6 +62,10 @@ blake3 = { workspace = true }
 unicode-width = { workspace = true }
 unicase = { workspace = true }
 askama = { workspace = true }
+# Used by `pattern auth login openai` for the OAuth refresh HTTP client
+# and to open the user's browser to the authorize URL.
+reqwest = { workspace = true }
+open = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
