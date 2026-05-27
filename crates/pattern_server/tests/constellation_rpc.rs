@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Phase 6 T7: end-to-end integration tests for the constellation registry RPCs.
 //!
 //! Sets up a real project mount in a tmpdir, sends `InitSession` so the

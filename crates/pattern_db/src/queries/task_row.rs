@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! SQLite row types for the `tasks` and `task_edges` block-index tables.
 //!
 //! These structs mirror the post-migration-0011 schema and are used by the

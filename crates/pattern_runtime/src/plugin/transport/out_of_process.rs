@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Out-of-process plugin transport (Phase 6 Task 5c).
 //!
 //! Daemon-side `PluginConnection` impl over irpc-iroh. Spawns the plugin's binary,

@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! End-to-end smoke tests for the full Tasks + Skills SDK surface.
 //!
 //! Verifies AC10.1, AC10.2, AC10.3, AC10.4, AC10.5, AC10.8.

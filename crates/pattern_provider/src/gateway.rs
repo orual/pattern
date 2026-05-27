@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! [`PatternGatewayClient`] — the `pattern_core::traits::ProviderClient` impl.
 //!
 //! One gateway instance dispatches per-call on the request's model string:
@@ -175,6 +181,29 @@ impl ProviderClient for PatternGatewayClient {
             })?;
         let resolved = chain.resolve().await?;
 
+        // Per-resolve observability. Logs the tier + model + provider so an
+        // operator can grep for which auth path served each request. For
+        // OAuth tiers that carry an account id (codex `session_id`), also
+        // log a short suffix so requests can be correlated to a specific
+        // ChatGPT subscription account without leaking the full UUID.
+        let account_id_suffix = resolved
+            .token
+            .session_id
+            .as_deref()
+            .map(|s| {
+                // Last 4 chars of the account id — same shape as
+                // `pattern-test-cli auth` uses for the status output.
+                let len = s.len();
+                if len >= 4 { &s[len - 4..] } else { s }
+            });
+        tracing::info!(
+            tier = ?resolved.source,
+            provider = %provider,
+            model = %model,
+            account_id_suffix = account_id_suffix.unwrap_or("-"),
+            "gateway resolved credential"
+        );
+
         // Tier-vs-protocol pre-flight gate.
         //
         // The ChatGPT subscription backend (`chatgpt.com/backend-api/codex/...`)
@@ -214,31 +243,68 @@ impl ProviderClient for PatternGatewayClient {
         // marker), and `auth_headers_for_tier` owns `authorization` /
         // `x-api-key` / `anthropic-version`. BTreeMap::extend is still
         // last-insert-wins, but a collision here would now be a bug.
-        let mut outbound_headers = ident_headers;
-        outbound_headers.extend(auth_headers_for_tier(&resolved, adapter));
-
-        let target = service_target(
-            adapter,
-            &model,
-            resolved.source,
-            outbound_headers,
-            self.base_url_overrides.get(&provider).map(String::as_str),
-        );
-
         let limiter =
             self.limiters
                 .get(&provider)
                 .ok_or_else(|| ProviderError::NoAuthAvailable {
                     provider: provider.clone(),
                 })?;
-        limiter.acquire_completion().await;
 
-        // Open the stream with transparent retry on pre-stream failures
-        // AND on first-event tunneled HTTP errors (429 / 5xx). Once the
-        // first successful event arrives, subsequent errors flow through
-        // to the caller — retrying after content emission would duplicate
-        // output.
-        open_stream_with_retry(&self.genai, target, chat, options, RetryPolicy::default()).await
+        // Reactive-refresh loop: on a 401 from an OAuth-tier provider,
+        // force a credential refresh and retry the request ONCE before
+        // propagating the error. Covers the case where the access_token
+        // passed our proactive 8s expiry check but the server rejected
+        // it anyway (revocation, clock skew, expiry during request
+        // flight, etc.). The chain's `resolve_force_refresh` hits the
+        // refresh endpoint regardless of local freshness.
+        //
+        // The retry happens ONCE per resolve(); if the second attempt
+        // also 401s, the user genuinely needs to re-authenticate and
+        // we propagate. This bounds the worst-case latency for a bad
+        // credential to two round trips.
+        let mut resolved = resolved;
+        let base_url_override = self.base_url_overrides.get(&provider).map(String::as_str);
+        let mut already_force_refreshed = false;
+        loop {
+            let mut outbound_headers = ident_headers.clone();
+            outbound_headers.extend(auth_headers_for_tier(&resolved, adapter));
+            let target = service_target(
+                adapter,
+                &model,
+                resolved.source,
+                outbound_headers,
+                base_url_override,
+            );
+
+            limiter.acquire_completion().await;
+
+            // Open the stream with transparent retry on pre-stream failures
+            // AND on first-event tunneled HTTP errors (429 / 5xx). Once the
+            // first successful event arrives, subsequent errors flow through
+            // to the caller — retrying after content emission would duplicate
+            // output.
+            let attempt =
+                open_stream_with_retry(&self.genai, target, chat.clone(), options.clone(), RetryPolicy::default())
+                    .await;
+
+            match attempt {
+                Ok(stream) => return Ok(stream),
+                Err(ProviderError::RequestFailed { status: 401, body })
+                    if resolved.source.is_oauth() && !already_force_refreshed =>
+                {
+                    tracing::info!(
+                        provider = %provider,
+                        model = %model,
+                        body = body.as_deref().unwrap_or(""),
+                        "401 from OAuth-tier provider; forcing credential refresh and retrying once"
+                    );
+                    resolved = chain.resolve_force_refresh().await?;
+                    already_force_refreshed = true;
+                    // Loop back: rebuild target with the refreshed token, re-send.
+                }
+                Err(other) => return Err(other),
+            }
+        }
     }
 
     async fn count_tokens(&self, request: &CompletionRequest) -> Result<TokenCount, ProviderError> {
@@ -569,11 +635,26 @@ async fn open_stream_with_retry(
 ///
 /// genai's tunneled status errors land as `Error::HttpError { status, ... }`.
 /// 429 and 5xx are transient; 4xx other than 429 are caller bugs.
+///
+/// `WebStream` is the SSE-transport wrapper; genai stores the underlying
+/// error as `Box<dyn Error + Send + Sync>` and most often the inner
+/// value is a `genai::Error::HttpError`. We downcast and recurse so an
+/// inner 401/4xx is correctly classified as non-retryable. Without this
+/// peek, a 401 from the streaming pre-flight would burn the entire
+/// inner backoff envelope (5 retries × full backoff) before the
+/// gateway's reactive-refresh loop ever saw it.
 fn is_first_event_retryable(err: &genai::Error) -> bool {
     use genai::Error as E;
     match err {
         E::HttpError { status, .. } => status.as_u16() == 429 || status.is_server_error(),
-        E::WebStream { .. } => true,
+        E::WebStream { error, .. } => match error.downcast_ref::<E>() {
+            // Inner error is a genai::Error — recurse with the same
+            // classification rules.
+            Some(inner) => is_first_event_retryable(inner),
+            // Couldn't downcast — assume transport-layer flake (genuine
+            // network hiccup, server hangup mid-SSE, etc.) and retry.
+            None => true,
+        },
         E::WebModelCall { webc_error, .. } => is_webc_retryable(webc_error),
         _ => false,
     }
@@ -638,12 +719,18 @@ fn exponential_backoff(attempt: u32, base: Duration, max: Duration) -> Duration 
 /// Retry on: 429 (rate-limit), 5xx (transient server), reqwest transport
 /// failures (connect/timeout). Do NOT retry on: 4xx other than 429
 /// (auth / payload shape), stream-parse errors (our bug or a provider
-/// protocol change).
+/// protocol change). `WebStream` peeks at its inner error so a 401
+/// arriving via the SSE transport wrapper still classifies as
+/// non-retryable — load-bearing for the reactive-refresh path.
 fn is_retryable(err: &genai::Error) -> bool {
     use genai::Error as E;
     match err {
         E::WebModelCall { webc_error, .. } => is_webc_retryable(webc_error),
-        E::WebStream { .. } => true, // stream-layer transport hiccups
+        E::WebStream { error, .. } => match error.downcast_ref::<E>() {
+            Some(inner) => is_retryable(inner),
+            None => true,
+        },
+        E::HttpError { status, .. } => status.as_u16() == 429 || status.is_server_error(),
         _ => false,
     }
 }

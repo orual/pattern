@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! CRUD queries for `fronting_set` and `routing_rules` (migration 0013).
 //!
 //! The fronting set uses a singleton row pattern: there is always at most one

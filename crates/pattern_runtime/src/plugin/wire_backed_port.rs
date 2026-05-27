@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! `WireBackedPort` — daemon-side `Port` impl that forwards calls + subscribes
 //! to an out-of-process plugin over its `PluginConnection`. Built from a
 //! `WirePortDeclaration` at session-open time; stashes metadata/capabilities

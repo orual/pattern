@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Segment 1 composer pass — system prompt + tool schemas + cache marker.
 //!
 //! Appends pre-built system blocks (identity prefix, negation prefix, base

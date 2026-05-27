@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Shared keyring-handling primitives used by `creds_store::keyring` (the
 //! Pattern-side `pattern-<provider>` store) and `auth::codex_storage` (the
 //! codex-compatible `"Codex Auth"` store).

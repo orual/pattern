@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Per-provider credential resolution.
 //!
 //! Two concrete chains ship in Phase 4:
@@ -90,6 +96,26 @@ pub trait CredentialChain: Send + Sync {
     /// Errors propagate — tier absence (e.g. missing env var) is not an
     /// error, just a fall-through.
     async fn resolve(&self) -> Result<ResolvedCredential, ProviderError>;
+
+    /// Force a credential refresh even if the cached/stored token would
+    /// otherwise still be valid. Called by the gateway on 401 responses
+    /// from OAuth-tier providers — the token passed our proactive expiry
+    /// check but the server rejected it anyway (could be a revocation,
+    /// clock skew, or a token that expired mid-flight after we resolved).
+    ///
+    /// Default impl just delegates to `resolve()` — chains that don't
+    /// have a refresh path (api-key only, etc.) get freshness from
+    /// re-reading their source. Chains with stored OAuth tokens
+    /// should override this to bypass freshness checks and hit the
+    /// refresh endpoint regardless.
+    ///
+    /// **Convention:** callers invoke this AFTER observing a 401 from a
+    /// resolve()'s credential. If `resolve_force_refresh` itself returns
+    /// success, retry the original request ONCE. If it errors, surface
+    /// the error — the user needs to re-authenticate.
+    async fn resolve_force_refresh(&self) -> Result<ResolvedCredential, ProviderError> {
+        self.resolve().await
+    }
 }
 
 // ---- Gemini: API key only ----
@@ -516,6 +542,44 @@ impl CredentialChain for OpenAiAuthChain {
 
         Err(ProviderError::NoAuthAvailable {
             provider: "openai".into(),
+        })
+    }
+
+    /// Force a refresh of the stored OAuth credential, bypassing the
+    /// proactive 8s expiry check. Called by the gateway on 401 responses
+    /// from the chatgpt backend — the server rejected a token that passed
+    /// our local check, so we MUST hit the refresh endpoint before
+    /// retrying. If no OAuth tier is configured (api-key only), this is
+    /// equivalent to `resolve()` — there's no refresh to force.
+    #[cfg(feature = "subscription-oauth")]
+    async fn resolve_force_refresh(&self) -> Result<ResolvedCredential, ProviderError> {
+        // If no OAuth tier configured, delegate. Api-key tier 401s
+        // can't be fixed by refresh — they need a new key.
+        let Some(oauth) = &self.oauth else {
+            return self.resolve().await;
+        };
+
+        // Re-load the stored state so we have the current refresh_token.
+        let load = oauth.store.load().await.map_err(storage_to_provider)?;
+        let (auth, tokens, file_existed) = match load.auth {
+            Some(a)
+                if matches!(a.auth_mode, Some(super::codex_storage::AuthMode::Chatgpt))
+                    && a.tokens.is_some() =>
+            {
+                let t = a.tokens.clone().expect("checked Some above");
+                (a, t, load.file_existed)
+            }
+            // Nothing to refresh — fall through to api-key tiers if those resolve.
+            _ => return self.resolve().await,
+        };
+
+        // Force a refresh regardless of the access_token's exp claim.
+        let new_tokens = self
+            .refresh_serialized(oauth, &auth, &tokens, file_existed)
+            .await?;
+        Ok(ResolvedCredential {
+            source: AuthTier::StoredOauth,
+            token: provider_credential_from_codex_tokens(&new_tokens),
         })
     }
 }

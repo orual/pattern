@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Pattern daemon binary.
 //!
 //! Provides `start`, `stop`, and `status` subcommands for managing the
@@ -86,15 +92,15 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
     // (SessionRoutingProtocolHandler) so accept-time pubkey lookup hits the
     // same table.
     let plugin_routes = Arc::new(pattern_core::plugin::auth::PluginRouteTable::new());
-    let gated_host_arc = Arc::new(pattern_core::plugin::auth::SessionRoutingProtocolHandler::new(
-        Arc::clone(&plugin_routes),
-    ));
+    let gated_host_arc = Arc::new(
+        pattern_core::plugin::auth::SessionRoutingProtocolHandler::new(Arc::clone(&plugin_routes)),
+    );
     // Parallel routing handler for the memory-sync ALPN. Same PluginRouteTable
     // (pubkey → session_id mapping is shared), but each protocol gets its own
     // routing handler so per-session registration is keyed per-protocol.
-    let gated_memory_sync_arc = Arc::new(pattern_core::plugin::auth::SessionRoutingProtocolHandler::new(
-        Arc::clone(&plugin_routes),
-    ));
+    let gated_memory_sync_arc = Arc::new(
+        pattern_core::plugin::auth::SessionRoutingProtocolHandler::new(Arc::clone(&plugin_routes)),
+    );
 
     // Bind iroh endpoint FIRST so SessionConfig can hold it for native-plugin
     // OOP spawn at session-open. Phase 6 Task 5 — replaces noq-cert-pinning

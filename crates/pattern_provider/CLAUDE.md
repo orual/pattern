@@ -168,6 +168,114 @@ duplicating the refresh. Unit tests cover the single-path,
 concurrent-refresh-serialization, and refresh-failure cases in
 `auth::resolver::tests::oauth_chain`.
 
+## OpenAI / codex OAuth (`auth::codex_oauth`, `auth::codex_storage`)
+
+ChatGPT-subscription auth via the codex CLI's OAuth flow. Lets users
+hit `chatgpt.com/backend-api/codex/responses` with their ChatGPT Plus /
+Pro / Team / Enterprise plan instead of paying API tokens for the
+Platform API.
+
+### Tier order
+
+`OpenAiAuthChain::resolve()` walks tiers in this order (explicit over
+ambient, same rationale as Anthropic):
+
+1. **Stored OAuth** (codex `.auth.json` with `auth_mode: chatgpt` +
+   `tokens`). Loaded from the keyring entry (`"Codex Auth"` service)
+   primary; `~/.codex/.auth.json` fallback. Proactive refresh fires
+   when the access_token JWT's `exp` claim is within 8 seconds
+   (matches codex's `TOKEN_REFRESH_INTERVAL`).
+2. **`OPENAI_API_KEY`** env var.
+3. **File-embedded API key** (codex `.auth.json` with
+   `auth_mode: apikey` + non-null `OPENAI_API_KEY`). Last-resort
+   ambient fallback.
+
+### id_token verification
+
+NONE — TLS to `auth.openai.com` is the authentication boundary, same
+as codex CLI's own OAuth path (verified in codex-rs/login/src/token_data.rs +
+server.rs::jwt_auth_claims; both base64-decode the payload and discard
+the signature). The OAuth `id_token` is consumed solely for its claims
+(`chatgpt_account_id`, `chatgpt_plan_type`, `chatgpt_user_id`); we
+never re-verify the JWT against JWKS. Codex uses `jsonwebtoken` ONLY
+for its separate `agent_identity` SSH-key flow, not for OAuth.
+
+### Storage interop with codex CLI
+
+**Pattern never creates `~/.codex/.auth.json`.** Keyring is the primary
+store; the file is updated only if it was already present at load time
+(i.e. codex CLI created it). Atomic-rename writes with a random nonce
+in the temp filename (per-call uniqueness; bare `pid` would collide
+across concurrent in-process callers). Cross-process advisory flock
+on `~/.codex/.auth.json.lock` spans the full read-refresh-write cycle.
+
+Keyring service name and account derivation match codex byte-for-byte:
+- service: `"Codex Auth"`
+- account: `cli|{sha256(canonical($CODEX_HOME))[0:16]}`
+
+So Pattern and codex CLI on the same `$CODEX_HOME` share the same
+keyring entry transparently.
+
+`AuthDotJson` / `TokenData` / `AuthMode` schema in `auth::codex_storage`
+is pinned byte-for-byte against codex (snapshot test in
+`codex_storage::tests::auth_dot_json_serializes_to_pinned_codex_schema`
+catches drift). `openai_api_key` is intentionally serialized without
+`skip_serializing_if = "Option::is_none"` — codex always emits it as
+`null` when unused, and our writes match that shape so codex CLI can
+re-read our files without breakage.
+
+### Refresh semantics
+
+- **Reactive 401 refresh** — not yet wired into `open_stream_with_retry`
+  (follow-up item).
+- **Proactive** — `resolve()` checks the access_token JWT's `exp` claim;
+  refresh fires when ≤ 8s remain.
+- **In-process serialization** — single `tokio::sync::Mutex<()>` on the
+  chain; first caller refreshes, subsequent callers re-read the store.
+- **Cross-process serialization** — `auth::file_lock::acquire_file_lock`
+  on `.auth.json.lock`. Acquired BEFORE the in-process mutex so
+  Pattern instances on the same machine + codex CLI all serialize on
+  the same flock.
+- **Refresh-token rotation** — when the server returns a new
+  `refresh_token` in the exchange response, we persist it atomically
+  before returning the access token to the caller (preserve the
+  rotation invariant).
+- **Error classification** — `RefreshFailureKind::{Expired, Exhausted,
+  Revoked, Transient, Other}`. The chain maps the first three to
+  `ProviderError::NoAuthAvailable` (re-login required); Transient and
+  Other become `ProviderError::RefreshFailed` (retry-eligible).
+
+### `originator: pattern` header
+
+Sent on every chatgpt-backend request as honest pattern-identification.
+Codex CLI sends `originator: codex_cli_rs`; Pattern sends `pattern`.
+OpenAI does not currently differentiate behaviour based on this value
+but using a Pattern-specific tag matches the project's overall
+identification posture.
+
+### Tier-vs-protocol gate
+
+OAuth credentials route to `chatgpt.com/backend-api/codex/responses`,
+which speaks the Responses API exclusively. If the user has OAuth tier
+AND picks a model name that genai's `AdapterKind::from_model` resolves
+to `OpenAI` (Chat Completions), the gateway returns
+`ProviderError::TierMismatch` **before any network call**, with a hint
+mentioning the `openai_resp::` namespace prefix as remediation. genai
+already routes `gpt-5*`, `codex*`, `gpt-*-codex*`, and `gpt-*-pro*` to
+the Responses API, so the gate only fires when the user explicitly
+picks a Chat Completions–only model name.
+
+### Codex CLI's concurrent-refresh race
+
+Codex uses no cross-process lock for its own refresh path. If both
+Pattern and codex CLI try to refresh the same near-expiry token
+simultaneously, the OpenAI server returns `refresh_token_reused` to
+the loser (refresh-token rotation invalidates the previous token on
+first use). Pattern's flock prevents this Pattern-side and across
+Pattern instances; it does NOT fix codex CLI's bug. The worst case is
+that codex CLI sees its refresh rejected — surfacing as a re-login
+prompt — not data loss.
+
 ## `<system-reminder>` tag helper
 
 `shaper::wrap_system_reminder(content: &str) -> String` wraps arbitrary

@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Daemon server actor.
 //!
 //! [`DaemonServer`] is a tokio task (actor) that owns the event bus and
@@ -2948,9 +2954,9 @@ fn build_turn_input(msg: &AgentMessage, session_agent_id: &str) -> TurnInput {
     // Preserve the full Vec<ContentPart> (Text + Binary) end-to-end —
     // MessageContent::from_parts keeps multi-modal content intact rather than
     // flattening to text and silently dropping attachments.
-    let chat_msg = ChatMessage::user(
-        pattern_core::types::provider::MessageContent::from_parts(msg.parts.clone()),
-    );
+    let chat_msg = ChatMessage::user(pattern_core::types::provider::MessageContent::from_parts(
+        msg.parts.clone(),
+    ));
 
     // Always attach an OriginHint so the composer can render typed
     // provenance (Author + transport_hint) into the LLM-facing prompt as a
@@ -3062,8 +3068,11 @@ fn message_to_wire_events(
                 // Pass Vec<ContentPart> through natively to the TUI — postcard handles
                 // ContentPart roundtrip via the existing send_message client path.
                 let joined = tr.joined_text().unwrap_or_default();
-                let success = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&joined) {
-                    !parsed.as_object().is_some_and(|obj| obj.contains_key("error"))
+                let success = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&joined)
+                {
+                    !parsed
+                        .as_object()
+                        .is_some_and(|obj| obj.contains_key("error"))
                 } else {
                     true
                 };
@@ -3113,7 +3122,9 @@ fn estimate_batch_tokens(user_message: &Option<String>, events: &[WireTurnEvent]
                     match p {
                         ContentPart::Text(s) => total_chars += s.len(),
                         ContentPart::Binary(b) => {
-                            if let pattern_core::types::provider::BinarySource::Base64(data) = &b.source {
+                            if let pattern_core::types::provider::BinarySource::Base64(data) =
+                                &b.source
+                            {
                                 total_chars += data.len();
                             }
                         }

@@ -111,9 +111,4 @@ I exist at [@pattern.atproto.systems](https://bsky.app/profile/pattern.atproto.s
 
 ## License
 
-Pattern is dual-licensed:
-
-- **AGPL-3.0** for open source use - see [LICENSE](LICENSE)
-- **Commercial License** available for proprietary applications - contact for details
-
-This dual licensing ensures Pattern remains open for the neurodivergent community while supporting sustainable development. Any use of Pattern in a network service or application requires either compliance with AGPL-3.0 (sharing source code) or a commercial license.
+**MPL-2.0**

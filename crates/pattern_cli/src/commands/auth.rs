@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! `pattern auth {login,status,clear}` subcommand implementations.
 //!
 //! Mirrors the auth surface in `pattern-test-cli` so the production
@@ -68,7 +74,7 @@ pub enum AuthSub {
     /// which tier the resolver currently picks.
     Login {
         /// Provider to authenticate against. Defaults to `anthropic`.
-        #[arg(long, value_enum, default_value_t = ProviderKind::Anthropic)]
+        #[arg(value_enum, default_value_t = ProviderKind::Anthropic)]
         provider: ProviderKind,
 
         /// Force device-code flow instead of PKCE loopback. Useful for
@@ -91,7 +97,7 @@ pub enum AuthSub {
     /// the daemon will resolve at session open.
     Status {
         /// Provider to query. Defaults to `anthropic`.
-        #[arg(long, value_enum, default_value_t = ProviderKind::Anthropic)]
+        #[arg(value_enum, default_value_t = ProviderKind::Anthropic)]
         provider: ProviderKind,
 
         /// Override `$CODEX_HOME` for OpenAI codex storage. OpenAI only.
@@ -105,7 +111,7 @@ pub enum AuthSub {
     /// tool's credentials (claude-code, codex CLI, etc.).
     Clear {
         /// Provider whose stored credential to delete. Defaults to `anthropic`.
-        #[arg(long, value_enum, default_value_t = ProviderKind::Anthropic)]
+        #[arg(value_enum, default_value_t = ProviderKind::Anthropic)]
         provider: ProviderKind,
 
         /// Override `$CODEX_HOME` for OpenAI codex storage. OpenAI only.
@@ -283,7 +289,7 @@ async fn cmd_status(
         }
         Err(e) => Err(miette!(
             "no credential resolved for provider={}: {e}\n\
-             run `pattern auth login --provider {}` to authenticate",
+             run `pattern auth login {}` to authenticate",
             provider.as_str(),
             provider.as_str()
         )),
@@ -338,7 +344,7 @@ async fn cmd_clear(
                     .await
                     .into_diagnostic()
                     .map_err(|e| miette!("clear failed: {e}"))?;
-                eprintln!("✓ cleared. next `auth login --provider openai` re-runs the OAuth flow.");
+                eprintln!("✓ cleared. next `auth login openai` re-runs the OAuth flow.");
                 Ok(())
             }
         }

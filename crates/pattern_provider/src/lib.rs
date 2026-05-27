@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Pattern v3 LLM provider: multi-provider gateway over a rebased `rust-genai`
 //! fork (v0.6.0-beta.17 base with pattern-v3-foundation patches).
 //!

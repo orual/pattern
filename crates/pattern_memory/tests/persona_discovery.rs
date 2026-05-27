@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Integration tests for persona discovery across global and project scopes.
 //!
 //! Verifies AC13.1 through AC13.5 for the v3-memory-rework Phase 8 plan.

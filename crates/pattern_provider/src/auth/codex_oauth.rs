@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Codex OAuth flow for OpenAI ChatGPT-subscription authentication.
 //!
 //! Ports the auth-flow surface from the official codex CLI
@@ -1200,6 +1206,63 @@ mod tests {
         }));
         let claims = parse_id_token(&jwt).expect("parse ok");
         assert_eq!(claims.email.as_deref(), Some("p@example.com"));
+    }
+
+    /// Pinned against the actual id_token shape returned by
+    /// `auth.openai.com` (verified 2026-05-26 against a real codex login).
+    /// Values are synthesized but the structure — including the
+    /// additional claims we deliberately don't model (subscription
+    /// timestamps, groups, organizations, localhost flag) — matches
+    /// production. Tolerance of unknown fields is load-bearing here:
+    /// if OpenAI adds new claims, our parser keeps working as long as
+    /// the ones we care about stay put.
+    #[test]
+    fn parse_id_token_matches_real_codex_shape() {
+        let jwt = synth_jwt(json!({
+            "at_hash": "fake_at_hash_v",
+            "aud": ["app_EMoamEEZ73f0CkXaXp7hrann"],
+            "auth_provider": "passwordless",
+            "auth_time": 1_700_000_000_u64,
+            "email": "user@example.test",
+            "email_verified": true,
+            "exp": 1_700_003_600_u64,
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "00000000-aaaa-bbbb-cccc-000000000000",
+                "chatgpt_plan_type": "plus",
+                "chatgpt_subscription_active_start": "2026-01-01T00:00:00+00:00",
+                "chatgpt_subscription_active_until": "2026-12-31T00:00:00+00:00",
+                "chatgpt_subscription_last_checked": "2026-05-26T00:00:00+00:00",
+                "chatgpt_user_id": "user-FAKEUSERID",
+                "groups": [],
+                "localhost": true,
+                "organizations": [
+                    {
+                        "id": "org-FAKEORG",
+                        "is_default": true,
+                        "role": "owner",
+                        "title": "Personal",
+                    }
+                ],
+                "user_id": "user-FAKEUSERID",
+            },
+            "iat": 1_700_000_000_u64,
+            "iss": "https://auth.openai.com",
+            "jti": "fake-jti-uuid",
+            "name": "Fake User",
+            "rat": 1_700_000_000_u64,
+            "sid": "fake-sid",
+            "sub": "auth0|FAKESUB",
+        }));
+        let claims = parse_id_token(&jwt).expect("parse ok");
+        assert_eq!(claims.email.as_deref(), Some("user@example.test"));
+        assert_eq!(
+            claims.chatgpt_account_id.as_deref(),
+            Some("00000000-aaaa-bbbb-cccc-000000000000")
+        );
+        assert_eq!(claims.chatgpt_plan_type.as_deref(), Some("plus"));
+        assert_eq!(claims.chatgpt_user_id.as_deref(), Some("user-FAKEUSERID"));
+        assert!(!claims.chatgpt_account_is_fedramp);
+        assert_eq!(claims.raw_jwt, jwt);
     }
 
     // Token exchange ---------------------------------------------------------

@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Bookmark-name construction for persistent forks.
 //!
 //! Persistent forks (Phase 3 Tasks 4-6) live in dedicated jj workspaces and

@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Custom Haskell wake-condition evaluator (Phase 7 Task 6).
 //!
 //! Closes the Phase 4 Task 9 deferral: when a user registers a

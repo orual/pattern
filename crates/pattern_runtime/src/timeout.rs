@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Two-path cancellation harness for Tidepool execution (Phase 3 Task 16).
 //!
 //! Tidepool has no public interrupt API. Pattern's approach:

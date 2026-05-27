@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Gateway integration tests — end-to-end HTTP round trips via wiremock.
 //!
 //! Covers the variant matrix the gateway should handle:
@@ -1094,4 +1100,218 @@ async fn openai_oauth_plus_responses_model_passes_tier_gate() {
             // expected because base_url_override points at an invalid host.
         }
     }
+}
+
+// ---- Reactive 401 refresh ----
+
+/// On a 401 from the chatgpt backend, the gateway must:
+///   1. Call `chain.resolve_force_refresh()` (hits the OAuth token
+///      endpoint, swaps refresh_token).
+///   2. Rebuild the ServiceTarget with the new credential headers.
+///   3. Retry the request ONCE.
+///
+/// We exercise this end-to-end with a real `OpenAiAuthChain` against a
+/// wiremock that:
+///   - Returns 401 from `/backend-api/codex/responses` (the chatgpt
+///     backend endpoint) on every hit.
+///   - Returns a fresh token bundle from `/oauth/token` (the refresh
+///     endpoint) on POST.
+///
+/// Assertions:
+///   - `/backend-api/codex/responses` hit TWICE (initial + retry).
+///   - `/oauth/token` hit ONCE (the force_refresh call).
+///   - Final error is the 401 (refresh succeeded but server still
+///     rejects — the retry exhausts its one allowance and propagates).
+#[cfg(feature = "subscription-oauth")]
+#[tokio::test]
+async fn reactive_401_refresh_retries_once_then_propagates() {
+    use base64::Engine;
+    use pattern_provider::auth::{
+        AuthDotJson, AuthMode, CodexAuthStore, CodexOAuthConfig, OpenAiAuthChain, TokenData,
+    };
+    use tempfile::tempdir;
+
+    let server = wiremock::MockServer::start().await;
+
+    // Synthetic id_token with a chatgpt_account_id claim — the chain
+    // surfaces this as session_id on the ProviderCredential, which the
+    // gateway puts in the `chatgpt-account-id` header.
+    let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
+    let payload = serde_json::json!({
+        "https://api.openai.com/auth": { "chatgpt_account_id": "acct_reactive" }
+    });
+    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&payload).unwrap());
+    let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"sig");
+    let id_token = format!("{header}.{payload_b64}.{sig}");
+
+    // Chatgpt backend: always 401. Counts hits so we can assert "exactly 2"
+    // (initial attempt + reactive refresh retry).
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let backend_hits = Arc::new(AtomicUsize::new(0));
+    let backend_hits_clone = backend_hits.clone();
+    wiremock::Mock::given(method("POST"))
+        .and(path("/backend-api/codex/responses"))
+        .respond_with(move |_req: &wiremock::Request| {
+            backend_hits_clone.fetch_add(1, Ordering::SeqCst);
+            wiremock::ResponseTemplate::new(401).set_body_json(json!({"error": "unauthorized"}))
+        })
+        .mount(&server)
+        .await;
+
+    // OAuth refresh endpoint: returns a fresh token bundle.
+    let refresh_hits = Arc::new(AtomicUsize::new(0));
+    let refresh_hits_clone = refresh_hits.clone();
+    let id_token_clone = id_token.clone();
+    wiremock::Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(move |_req: &wiremock::Request| {
+            refresh_hits_clone.fetch_add(1, Ordering::SeqCst);
+            wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "at-after-force-refresh",
+                "refresh_token": "rt-after-force-refresh",
+                "id_token": id_token_clone,
+                "expires_in": 3600
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    // Seed a stored OAuth token via a FileOnly CodexAuthStore so we don't
+    // touch the real keyring.
+    let dir = tempdir().unwrap();
+    let store = Arc::new(CodexAuthStore::file_only(dir.path().into()));
+    let seeded = AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(TokenData {
+            id_token: id_token.clone(),
+            access_token: "at-seeded".into(),
+            refresh_token: "rt-seeded".into(),
+            account_id: Some("acct_reactive".into()),
+        }),
+        last_refresh: Some(Timestamp::now()),
+        agent_identity: None,
+    };
+    store.save(&seeded, true).await.expect("seed save");
+
+    let config = CodexOAuthConfig {
+        client_id: "test-client".into(),
+        issuer: server.uri(),
+        scopes: vec!["openid".into(), "offline_access".into()],
+    };
+    let chain: Arc<dyn CredentialChain> = Arc::new(OpenAiAuthChain::with_oauth(
+        store,
+        config,
+        reqwest::Client::new(),
+    ));
+
+    let gateway = PatternGatewayClient::builder()
+        .with_provider(
+            "openai",
+            chain,
+            Arc::new(pattern_provider::shaper::NoOpShaper),
+            Arc::new(ProviderRateLimiter::openai_default()),
+        )
+        .with_provider_base_url("openai", server.uri())
+        .build()
+        .expect("gateway builds");
+
+    let req = CompletionRequest::new("gpt-5-codex").append_message(ChatMessage::user("hi"));
+    let outcome = gateway.complete(req).await;
+    assert!(
+        matches!(&outcome, Err(ProviderError::RequestFailed { status: 401, .. })),
+        "expected 401 propagation after one reactive retry; got {:?}",
+        outcome.as_ref().err()
+    );
+
+    // The load-bearing assertion: chatgpt-backend hit TWICE, refresh
+    // endpoint hit ONCE. If reactive refresh is broken, backend would
+    // be hit once (no retry); if the refresh loop runs forever, the
+    // counters would exceed 2.
+    assert_eq!(
+        backend_hits.load(Ordering::SeqCst),
+        2,
+        "chatgpt backend must be hit twice (initial + reactive retry)"
+    );
+    assert_eq!(
+        refresh_hits.load(Ordering::SeqCst),
+        1,
+        "OAuth refresh endpoint must be hit exactly once (one reactive refresh)"
+    );
+}
+
+/// Api-key tier 401s must NOT trigger reactive refresh — there's no
+/// refresh path that fixes a bad api key. The gateway must propagate
+/// the 401 immediately after a single hit.
+#[tokio::test]
+async fn api_key_tier_401_does_not_force_refresh() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let server = wiremock::MockServer::start().await;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_clone = hits.clone();
+    wiremock::Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(move |_req: &wiremock::Request| {
+            hits_clone.fetch_add(1, Ordering::SeqCst);
+            wiremock::ResponseTemplate::new(401).set_body_json(json!({"error": "bad key"}))
+        })
+        .mount(&server)
+        .await;
+
+    // Static api-key chain; force_refresh is a no-op (default impl
+    // delegates to resolve()).
+    struct StaticApiKeyChain {
+        token: ProviderCredential,
+    }
+    #[async_trait]
+    impl CredentialChain for StaticApiKeyChain {
+        fn provider(&self) -> &str {
+            "openai"
+        }
+        async fn resolve(&self) -> Result<ResolvedCredential, ProviderError> {
+            Ok(ResolvedCredential {
+                source: AuthTier::ApiKey,
+                token: self.token.clone(),
+            })
+        }
+    }
+
+    let chain: Arc<dyn CredentialChain> = Arc::new(StaticApiKeyChain {
+        token: ProviderCredential {
+            provider: "openai".into(),
+            access_token: SecretString::from("sk-test".to_string()),
+            refresh_token: None,
+            expires_at: None,
+            scope: None,
+            session_id: None,
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
+        },
+    });
+    let gateway = PatternGatewayClient::builder()
+        .with_provider(
+            "openai",
+            chain,
+            Arc::new(pattern_provider::shaper::NoOpShaper),
+            Arc::new(ProviderRateLimiter::openai_default()),
+        )
+        .with_provider_base_url("openai", server.uri())
+        .build()
+        .expect("gateway builds");
+
+    let req = CompletionRequest::new("gpt-5-codex").append_message(ChatMessage::user("hi"));
+    let outcome = gateway.complete(req).await;
+    assert!(
+        matches!(&outcome, Err(ProviderError::RequestFailed { status: 401, .. })),
+        "expected 401 propagation; got {:?}",
+        outcome.as_ref().err()
+    );
+    // Single hit — no reactive retry for api-key tier.
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "api-key tier 401 must not trigger a retry"
+    );
 }

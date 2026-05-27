@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! End-to-end integration test: compile a Haskell agent program, JIT it, run it.
 //!
 //! The agent imports `Pattern.Time` and `Pattern.Log` from the SDK. Compilation

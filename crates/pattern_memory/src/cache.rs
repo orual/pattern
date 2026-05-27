@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! In-memory cache of StructuredDocument instances.
 //!
 //! The v3 refactor replaced the previous `ConstellationDatabases` wrapper
@@ -260,7 +266,9 @@ impl MemoryCache {
     /// configured with a mount path (which spawns the embedding queue).
     /// Used by the session opener to plumb message-embedding dispatch
     /// into `SessionContext::reembed_tx`.
-    pub fn reembed_tx(&self) -> Option<&tokio::sync::mpsc::UnboundedSender<crate::subscriber::event::ReembedRequest>> {
+    pub fn reembed_tx(
+        &self,
+    ) -> Option<&tokio::sync::mpsc::UnboundedSender<crate::subscriber::event::ReembedRequest>> {
         self.reembed_tx.as_ref()
     }
 
@@ -1344,13 +1352,13 @@ impl MemoryCache {
             self.reembed_tx.clone(),
             self.heartbeat_tx.clone(),
         ) {
-            (Some(mount_path), Some(reembed_tx), Some(heartbeat_tx)) => Some(
-                SubscriberStorageConfig {
+            (Some(mount_path), Some(reembed_tx), Some(heartbeat_tx)) => {
+                Some(SubscriberStorageConfig {
                     reembed_tx,
                     heartbeat_tx,
                     mount_path,
-                },
-            ),
+                })
+            }
             _ => None,
         };
 
@@ -1396,7 +1404,8 @@ impl MemoryCache {
                     Some(handle) => match std::thread::scope(|s| {
                         let provider = provider.clone();
                         let q = query.to_string();
-                        s.spawn(move || handle.block_on(provider.embed_query(&q))).join()
+                        s.spawn(move || handle.block_on(provider.embed_query(&q)))
+                            .join()
                     }) {
                         Ok(Ok(embedding)) => Some(embedding),
                         Ok(Err(e)) => {
@@ -1514,7 +1523,9 @@ impl MemoryCache {
                 self.blocks.get(block_id).map(|cb| {
                     let agent_key = cb.doc.agent_id().to_string();
                     let scope = pattern_core::types::memory_types::Scope::from_db_key(&agent_key)
-                        .unwrap_or_else(|| pattern_core::types::memory_types::Scope::global(&agent_key));
+                        .unwrap_or_else(|| {
+                            pattern_core::types::memory_types::Scope::global(&agent_key)
+                        });
                     (scope, smol_str::SmolStr::from(cb.doc.label()))
                 })
             };
@@ -1543,11 +1554,16 @@ impl MemoryCache {
             self.blocks.get(block_id).map(|cb| {
                 let agent_key = cb.doc.agent_id().to_string();
                 let scope = pattern_core::types::memory_types::Scope::from_db_key(&agent_key)
-                    .unwrap_or_else(|| pattern_core::types::memory_types::Scope::global(&agent_key));
+                    .unwrap_or_else(|| {
+                        pattern_core::types::memory_types::Scope::global(&agent_key)
+                    });
                 (scope, smol_str::SmolStr::from(cb.doc.label()))
             })
         };
-        Ok(results.into_iter().map(|r| db_search_result_to_core(r, &resolve)).collect())
+        Ok(results
+            .into_iter()
+            .map(|r| db_search_result_to_core(r, &resolve))
+            .collect())
     }
 }
 
@@ -1867,13 +1883,11 @@ pub(crate) fn spawn_subscriber_for_block(
                 .inner()
                 .subscribe_local_update(Box::new(move |update_bytes| {
                     if !paused_flag.load(std::sync::atomic::Ordering::Acquire) {
-                        observer_for_closure.publish(
-                            pattern_core::observer::MemoryEvent::Delta {
-                                addr: block_addr_for_closure.clone(),
-                                update_bytes: update_bytes.clone(),
-                                origin: None,
-                            },
-                        );
+                        observer_for_closure.publish(pattern_core::observer::MemoryEvent::Delta {
+                            addr: block_addr_for_closure.clone(),
+                            update_bytes: update_bytes.clone(),
+                            origin: None,
+                        });
                     }
                     true
                 }));
@@ -1960,13 +1974,11 @@ pub(crate) fn spawn_subscriber_for_block(
                     block_id: block_id_owned.clone(),
                     update_bytes: update_bytes.clone(),
                 });
-                observer_for_closure.publish(
-                    pattern_core::observer::MemoryEvent::Delta {
-                        addr: block_addr_for_closure.clone(),
-                        update_bytes: update_bytes.clone(),
-                        origin: None,
-                    },
-                );
+                observer_for_closure.publish(pattern_core::observer::MemoryEvent::Delta {
+                    addr: block_addr_for_closure.clone(),
+                    update_bytes: update_bytes.clone(),
+                    origin: None,
+                });
             }
             true
         }));
@@ -2287,8 +2299,13 @@ impl MemoryStore for MemoryCache {
             .iter()
             .find(|entry| {
                 let cb = entry.value();
-                let doc_scope = pattern_core::types::memory_types::Scope::from_db_key(cb.doc.agent_id())
-                    .unwrap_or_else(|| pattern_core::types::memory_types::Scope::Global(cb.doc.agent_id().into()));
+                let doc_scope =
+                    pattern_core::types::memory_types::Scope::from_db_key(cb.doc.agent_id())
+                        .unwrap_or_else(|| {
+                            pattern_core::types::memory_types::Scope::Global(
+                                cb.doc.agent_id().into(),
+                            )
+                        });
                 doc_scope == *scope && cb.doc.label() == label
             })
             .map(|entry| entry.key().clone());
@@ -2312,9 +2329,11 @@ impl MemoryStore for MemoryCache {
                     block_id: block_id.clone(),
                     update_bytes,
                 })
-                .map_err(|e| pattern_core::error::MemoryError::Other(format!(
-                    "push_external_commit: try_send: {e}"
-                )))?;
+                .map_err(|e| {
+                    pattern_core::error::MemoryError::Other(format!(
+                        "push_external_commit: try_send: {e}"
+                    ))
+                })?;
             } else {
                 tracing::debug!(block_id = %block_id, "push_external_commit: observer-only subscriber (storage disabled)");
             }
@@ -2785,7 +2804,8 @@ impl MemoryStore for MemoryCache {
                 Some(handle) => match std::thread::scope(|s| {
                     let provider = provider.clone();
                     let q = query.to_string();
-                    s.spawn(move || handle.block_on(provider.embed_query(&q))).join()
+                    s.spawn(move || handle.block_on(provider.embed_query(&q)))
+                        .join()
                 }) {
                     Ok(Ok(emb)) => Some(emb),
                     Ok(Err(e)) => {
@@ -2857,9 +2877,6 @@ impl MemoryStore for MemoryCache {
                 self.search_impl(Some(&key), query, options)
             }
             MemorySearchScope::Constellation => self.search_impl(None, query, options),
-            _ => Err(MemoryError::Other(
-                "unsupported search scope variant".into(),
-            )),
         }
     }
 
@@ -4618,7 +4635,11 @@ mod tests {
         old_handle.cancel.cancel();
         // Drop the subscription before joining so the channel sender is gone.
         drop(old_handle._subscription);
-        drop(old_handle.event_tx.expect("test subscriber must have event_tx"));
+        drop(
+            old_handle
+                .event_tx
+                .expect("test subscriber must have event_tx"),
+        );
         old_handle
             .thread
             .expect("test subscriber must have thread")
@@ -4656,7 +4677,11 @@ mod tests {
         let (_, respawned) = subscribers.remove(block_id).unwrap();
         respawned.cancel.cancel();
         drop(respawned._subscription);
-        drop(respawned.event_tx.expect("test subscriber must have event_tx"));
+        drop(
+            respawned
+                .event_tx
+                .expect("test subscriber must have event_tx"),
+        );
         respawned
             .thread
             .expect("test subscriber must have thread")
@@ -4919,7 +4944,12 @@ mod tests {
         // Verify the disk_doc (accessed via the subscriber's synced_doc) reflects
         // the edit.
         let sub = cache.subscribers.get(block_id).unwrap();
-        let disk_doc = sub.synced_doc.as_ref().expect("test subscriber must have synced_doc").doc().clone();
+        let disk_doc = sub
+            .synced_doc
+            .as_ref()
+            .expect("test subscriber must have synced_doc")
+            .doc()
+            .clone();
         drop(sub);
 
         let deep = disk_doc.get_movable_list("items").get_deep_value();
@@ -4937,7 +4967,11 @@ mod tests {
         handle.cancel.cancel();
         drop(handle._subscription);
         drop(handle.event_tx.expect("test subscriber must have event_tx"));
-        handle.thread.expect("test subscriber must have thread").join().expect("worker should not panic");
+        handle
+            .thread
+            .expect("test subscriber must have thread")
+            .join()
+            .expect("worker should not panic");
     }
 
     // region: trust-tier override tests (C5-test)
@@ -5050,7 +5084,12 @@ mod tests {
         use crate::fs::markdown_skill::loro_bridge::project_metadata_from_loro;
 
         let sub = cache.subscribers.get(block_id).unwrap();
-        let disk_doc = sub.synced_doc.as_ref().expect("test subscriber must have synced_doc").doc().clone();
+        let disk_doc = sub
+            .synced_doc
+            .as_ref()
+            .expect("test subscriber must have synced_doc")
+            .doc()
+            .clone();
         drop(sub);
 
         let deep = disk_doc.get_deep_value();
@@ -5114,7 +5153,11 @@ mod tests {
         handle.cancel.cancel();
         drop(handle._subscription);
         drop(handle.event_tx.expect("test subscriber must have event_tx"));
-        handle.thread.expect("test subscriber must have thread").join().expect("worker should not panic");
+        handle
+            .thread
+            .expect("test subscriber must have thread")
+            .join()
+            .expect("worker should not panic");
     }
 
     /// `apply_external_edit` with a Skill block whose file path IS under
@@ -5159,7 +5202,11 @@ mod tests {
         handle.cancel.cancel();
         drop(handle._subscription);
         drop(handle.event_tx.expect("test subscriber must have event_tx"));
-        handle.thread.expect("test subscriber must have thread").join().expect("worker should not panic");
+        handle
+            .thread
+            .expect("test subscriber must have thread")
+            .join()
+            .expect("worker should not panic");
     }
 
     /// `apply_external_edit` with a Skill file outside fp_dir that declares
@@ -5236,7 +5283,11 @@ mod tests {
         handle.cancel.cancel();
         drop(handle._subscription);
         drop(handle.event_tx.expect("test subscriber must have event_tx"));
-        handle.thread.expect("test subscriber must have thread").join().expect("worker should not panic");
+        handle
+            .thread
+            .expect("test subscriber must have thread")
+            .join()
+            .expect("worker should not panic");
     }
 
     // endregion: trust-tier override tests (C5-test)
