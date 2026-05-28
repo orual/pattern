@@ -1,7 +1,14 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Integration test for memory block field permissions.
 
-use pattern_core::memory::{
-    BlockSchema, CompositeSection, DocumentError, FieldDef, FieldType, StructuredDocument,
+use pattern_core::memory::StructuredDocument;
+use pattern_core::types::memory_types::{
+    BlockSchema, CompositeSection, DocumentError, FieldDef, FieldType,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -229,12 +236,14 @@ fn test_auto_attribution_sets_commit_message() {
         Some("agent_42".to_string()),
     );
 
-    // Make a change
-    doc.set_text("hello world", true).unwrap();
-
-    // Set attribution and commit
+    // Set attribution BEFORE the mutation so the internal commit fires
+    // with the attribution attached. (StructuredDocument mutators commit
+    // internally now to ensure ops enter the oplog before any subsequent
+    // export — required for write-flush correctness across cache reloads.
+    // Pre-fix, agent code could call auto_attribution after the mutation
+    // and a separate commit() would attach the message to a no-op commit.)
     doc.auto_attribution("append");
-    doc.commit();
+    doc.set_text("hello world", true).unwrap();
 
     // Verify the commit message was set correctly by checking change history
     let loro_doc = doc.inner();

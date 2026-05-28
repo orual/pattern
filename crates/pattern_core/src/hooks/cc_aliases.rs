@@ -1,0 +1,78 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
+//! CC (Claude Code) event alias map.
+//!
+//! Maps CC event names to Pattern hook tags. Applied at plugin-load time
+//! by the CC adapter (Phase 3+). The bus itself only knows Pattern tags.
+
+use std::collections::HashMap;
+
+/// Build the CC → Pattern event alias map.
+///
+/// CC events use camelCase names; Pattern uses dot-separated hierarchical tags.
+/// Some CC events map to multiple Pattern tags (variant-specific targets).
+pub fn cc_alias_map() -> HashMap<&'static str, Vec<&'static str>> {
+    let mut map = HashMap::new();
+
+    // Turn lifecycle
+    map.insert("onTurnStart", vec![super::tags::TURN_BEFORE]);
+    map.insert("onTurnEnd", vec![super::tags::TURN_STOP]);
+
+    // Tool dispatch
+    map.insert("onToolCall", vec![super::tags::TOOL_BEFORE]);
+    map.insert("onToolResult", vec![super::tags::TOOL_AFTER]);
+
+    // Memory
+    map.insert("onMemoryRead", vec![super::tags::MEMORY_READ]);
+    map.insert("onMemoryWrite", vec![super::tags::MEMORY_WRITE]);
+
+    // Shell
+    map.insert("onShellExecute", vec![super::tags::SHELL_EXECUTE_BEFORE]);
+    map.insert("onShellResult", vec![super::tags::SHELL_EXECUTE_AFTER]);
+
+    // Tasks
+    map.insert("onTaskCreated", vec![super::tags::TASK_CREATED]);
+    map.insert("onTaskCompleted", vec![super::tags::TASK_TRANSITIONED_DONE]);
+
+    // File
+    map.insert("onFileRead", vec![super::tags::FILE_READ]);
+    map.insert("onFileWrite", vec![super::tags::FILE_WRITE]);
+
+    // Spawn
+    map.insert("onAgentSpawn", vec![super::tags::SPAWN_EPHEMERAL_START]);
+    map.insert("onAgentExit", vec![super::tags::SPAWN_EPHEMERAL_EXIT]);
+
+    // Session
+    map.insert("onSessionStart", vec![super::tags::SESSION_OPENED]);
+    map.insert("onSessionEnd", vec![super::tags::SESSION_CLOSED]);
+
+    // Message
+    map.insert("onMessageSent", vec![super::tags::MESSAGE_SENT]);
+    map.insert("onMessageReceived", vec![super::tags::MESSAGE_RECEIVED]);
+
+    // CC PascalCase event names (the actual format used in hooks.json).
+    map.entry("PreToolUse").or_default().push(super::tags::TOOL_BEFORE);
+    map.entry("PostToolUse").or_default().push(super::tags::TOOL_AFTER);
+    map.entry("SessionStart").or_default().push(super::tags::SESSION_OPENED);
+    map.entry("Stop").or_default().push(super::tags::TURN_STOP);
+    map.entry("ToolError").or_default().push(super::tags::TOOL_AFTER);
+    map.entry("SubagentStop").or_default().push(super::tags::SPAWN_EPHEMERAL_EXIT);
+    // Notification is a CC event for model output.
+    map.entry("Notification").or_default().push(super::tags::TURN_STOP);
+
+    map
+}
+
+/// Translate a CC event name to Pattern tag(s).
+/// Returns the first matching Pattern tag, or None if unknown.
+pub fn translate_cc(cc_event: &str) -> Option<&'static str> {
+    // Build once; in practice this would be lazy_static or similar,
+    // but for now we build per call (small map, infrequent calls).
+    let map = cc_alias_map();
+    map.get(cc_event).and_then(|tags| tags.first().copied())
+}
+

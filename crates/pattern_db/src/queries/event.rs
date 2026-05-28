@@ -1,260 +1,193 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Event and reminder queries.
 
 use chrono::{DateTime, Utc};
-use sqlx::SqlitePool;
+use rusqlite::OptionalExtension;
 
 use crate::error::DbResult;
 use crate::models::{Event, EventOccurrence, OccurrenceStatus};
+
+// ============================================================================
+// from_row implementations
+// ============================================================================
+
+impl Event {
+    pub(crate) fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            agent_id: row.get("agent_id")?,
+            title: row.get("title")?,
+            description: row.get("description")?,
+            starts_at: row.get("starts_at")?,
+            ends_at: row.get("ends_at")?,
+            rrule: row.get("rrule")?,
+            reminder_minutes: row.get("reminder_minutes")?,
+            all_day: row.get("all_day")?,
+            location: row.get("location")?,
+            external_id: row.get("external_id")?,
+            external_source: row.get("external_source")?,
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
+}
+
+impl EventOccurrence {
+    pub(crate) fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            event_id: row.get("event_id")?,
+            starts_at: row.get("starts_at")?,
+            ends_at: row.get("ends_at")?,
+            status: row.get("status")?,
+            notes: row.get("notes")?,
+            created_at: row.get("created_at")?,
+        })
+    }
+}
 
 // ============================================================================
 // Event CRUD
 // ============================================================================
 
 /// Create a new event.
-pub async fn create_event(pool: &SqlitePool, event: &Event) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        INSERT INTO events (id, agent_id, title, description, starts_at, ends_at, rrule, reminder_minutes, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#,
-        event.id,
-        event.agent_id,
-        event.title,
-        event.description,
-        event.starts_at,
-        event.ends_at,
-        event.rrule,
-        event.reminder_minutes,
-        event.created_at,
-        event.updated_at,
-    )
-    .execute(pool)
-    .await?;
+pub fn create_event(conn: &rusqlite::Connection, event: &Event) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO events (id, agent_id, title, description, starts_at, ends_at, rrule, reminder_minutes, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![event.id, event.agent_id, event.title, event.description, event.starts_at, event.ends_at, event.rrule, event.reminder_minutes, event.created_at, event.updated_at],
+    )?;
     Ok(())
 }
 
 /// Get an event by ID.
-pub async fn get_event(pool: &SqlitePool, id: &str) -> DbResult<Option<Event>> {
-    let event = sqlx::query_as!(
-        Event,
-        r#"
-        SELECT
-            id as "id!",
-            agent_id,
-            title as "title!",
-            description,
-            starts_at as "starts_at!: _",
-            ends_at as "ends_at: _",
-            rrule,
-            reminder_minutes,
-            all_day as "all_day!: bool",
-            location,
-            external_id,
-            external_source,
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM events WHERE id = ?
-        "#,
-        id
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(event)
+pub fn get_event(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<Event>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, title, description, starts_at, ends_at, rrule, reminder_minutes,
+                all_day, location, external_id, external_source, created_at, updated_at
+         FROM events WHERE id = ?1",
+    )?;
+    let result = stmt
+        .query_row(rusqlite::params![id], Event::from_row)
+        .optional()?;
+    Ok(result)
 }
 
 /// List events for an agent (or constellation-level).
-pub async fn list_events(pool: &SqlitePool, agent_id: Option<&str>) -> DbResult<Vec<Event>> {
-    let events = match agent_id {
+pub fn list_events(conn: &rusqlite::Connection, agent_id: Option<&str>) -> DbResult<Vec<Event>> {
+    let mut events = Vec::new();
+    match agent_id {
         Some(aid) => {
-            sqlx::query_as!(
-                Event,
-                r#"
-                SELECT
-                    id as "id!",
-                    agent_id,
-                    title as "title!",
-                    description,
-                    starts_at as "starts_at!: _",
-                    ends_at as "ends_at: _",
-                    rrule,
-                    reminder_minutes,
-                    all_day as "all_day!: bool",
-                    location,
-                    external_id,
-                    external_source,
-                    created_at as "created_at!: _",
-                    updated_at as "updated_at!: _"
-                FROM events WHERE agent_id = ? ORDER BY starts_at ASC
-                "#,
-                aid
-            )
-            .fetch_all(pool)
-            .await?
+            let mut stmt = conn.prepare(
+                "SELECT id, agent_id, title, description, starts_at, ends_at, rrule, reminder_minutes,
+                        all_day, location, external_id, external_source, created_at, updated_at
+                 FROM events WHERE agent_id = ?1 ORDER BY starts_at ASC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![aid], Event::from_row)?;
+            for row in rows {
+                events.push(row?);
+            }
         }
         None => {
-            sqlx::query_as!(
-                Event,
-                r#"
-                SELECT
-                    id as "id!",
-                    agent_id,
-                    title as "title!",
-                    description,
-                    starts_at as "starts_at!: _",
-                    ends_at as "ends_at: _",
-                    rrule,
-                    reminder_minutes,
-                    all_day as "all_day!: bool",
-                    location,
-                    external_id,
-                    external_source,
-                    created_at as "created_at!: _",
-                    updated_at as "updated_at!: _"
-                FROM events WHERE agent_id IS NULL ORDER BY starts_at ASC
-                "#
-            )
-            .fetch_all(pool)
-            .await?
+            let mut stmt = conn.prepare(
+                "SELECT id, agent_id, title, description, starts_at, ends_at, rrule, reminder_minutes,
+                        all_day, location, external_id, external_source, created_at, updated_at
+                 FROM events WHERE agent_id IS NULL ORDER BY starts_at ASC",
+            )?;
+            let rows = stmt.query_map([], Event::from_row)?;
+            for row in rows {
+                events.push(row?);
+            }
         }
-    };
+    }
     Ok(events)
 }
 
 /// Get events in a time range.
-pub async fn get_events_in_range(
-    pool: &SqlitePool,
+pub fn get_events_in_range(
+    conn: &rusqlite::Connection,
     start: DateTime<Utc>,
     end: DateTime<Utc>,
 ) -> DbResult<Vec<Event>> {
-    let events = sqlx::query_as!(
-        Event,
-        r#"
-        SELECT
-            id as "id!",
-            agent_id,
-            title as "title!",
-            description,
-            starts_at as "starts_at!: _",
-            ends_at as "ends_at: _",
-            rrule,
-            reminder_minutes,
-            all_day as "all_day!: bool",
-            location,
-            external_id,
-            external_source,
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM events
-        WHERE starts_at >= ? AND starts_at <= ?
-        ORDER BY starts_at ASC
-        "#,
-        start,
-        end
-    )
-    .fetch_all(pool)
-    .await?;
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, title, description, starts_at, ends_at, rrule, reminder_minutes,
+                all_day, location, external_id, external_source, created_at, updated_at
+         FROM events WHERE starts_at >= ?1 AND starts_at <= ?2 ORDER BY starts_at ASC",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![start, end], Event::from_row)?;
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(row?);
+    }
     Ok(events)
 }
 
 /// Get upcoming events (starting within N hours).
-pub async fn get_upcoming_events(pool: &SqlitePool, hours: i64) -> DbResult<Vec<Event>> {
+pub fn get_upcoming_events(conn: &rusqlite::Connection, hours: i64) -> DbResult<Vec<Event>> {
     let now = Utc::now();
     let deadline = now + chrono::Duration::hours(hours);
-    let events = sqlx::query_as!(
-        Event,
-        r#"
-        SELECT
-            id as "id!",
-            agent_id,
-            title as "title!",
-            description,
-            starts_at as "starts_at!: _",
-            ends_at as "ends_at: _",
-            rrule,
-            reminder_minutes,
-            all_day as "all_day!: bool",
-            location,
-            external_id,
-            external_source,
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM events
-        WHERE starts_at >= ? AND starts_at <= ?
-        ORDER BY starts_at ASC
-        "#,
-        now,
-        deadline
-    )
-    .fetch_all(pool)
-    .await?;
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, title, description, starts_at, ends_at, rrule, reminder_minutes,
+                all_day, location, external_id, external_source, created_at, updated_at
+         FROM events WHERE starts_at >= ?1 AND starts_at <= ?2 ORDER BY starts_at ASC",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![now, deadline], Event::from_row)?;
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(row?);
+    }
     Ok(events)
 }
 
 /// Get events needing reminders (reminder time is now or past, but event hasn't started).
-pub async fn get_events_needing_reminders(pool: &SqlitePool) -> DbResult<Vec<Event>> {
+pub fn get_events_needing_reminders(conn: &rusqlite::Connection) -> DbResult<Vec<Event>> {
     let now = Utc::now();
-    // This query finds events where: starts_at - reminder_minutes <= now < starts_at
-    let events = sqlx::query_as!(
-        Event,
-        r#"
-        SELECT
-            id as "id!",
-            agent_id,
-            title as "title!",
-            description,
-            starts_at as "starts_at!: _",
-            ends_at as "ends_at: _",
-            rrule,
-            reminder_minutes,
-            all_day as "all_day!: bool",
-            location,
-            external_id,
-            external_source,
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM events
-        WHERE reminder_minutes IS NOT NULL
-          AND starts_at > ?
-          AND datetime(starts_at, '-' || reminder_minutes || ' minutes') <= ?
-        ORDER BY starts_at ASC
-        "#,
-        now,
-        now
-    )
-    .fetch_all(pool)
-    .await?;
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, title, description, starts_at, ends_at, rrule, reminder_minutes,
+                all_day, location, external_id, external_source, created_at, updated_at
+         FROM events
+         WHERE reminder_minutes IS NOT NULL
+           AND starts_at > ?1
+           AND datetime(starts_at, '-' || reminder_minutes || ' minutes') <= ?2
+         ORDER BY starts_at ASC",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![now, now], Event::from_row)?;
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(row?);
+    }
     Ok(events)
 }
 
 /// Update an event.
-pub async fn update_event(pool: &SqlitePool, event: &Event) -> DbResult<bool> {
-    let result = sqlx::query!(
-        r#"
-        UPDATE events
-        SET title = ?, description = ?, starts_at = ?, ends_at = ?,
-            rrule = ?, reminder_minutes = ?, updated_at = ?
-        WHERE id = ?
-        "#,
-        event.title,
-        event.description,
-        event.starts_at,
-        event.ends_at,
-        event.rrule,
-        event.reminder_minutes,
-        event.updated_at,
-        event.id,
-    )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() > 0)
+pub fn update_event(conn: &rusqlite::Connection, event: &Event) -> DbResult<bool> {
+    let count = conn.execute(
+        "UPDATE events SET title = ?1, description = ?2, starts_at = ?3, ends_at = ?4,
+             rrule = ?5, reminder_minutes = ?6, updated_at = ?7
+         WHERE id = ?8",
+        rusqlite::params![
+            event.title,
+            event.description,
+            event.starts_at,
+            event.ends_at,
+            event.rrule,
+            event.reminder_minutes,
+            event.updated_at,
+            event.id
+        ],
+    )?;
+    Ok(count > 0)
 }
 
 /// Delete an event.
-pub async fn delete_event(pool: &SqlitePool, id: &str) -> DbResult<bool> {
-    let result = sqlx::query!("DELETE FROM events WHERE id = ?", id)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
+pub fn delete_event(conn: &rusqlite::Connection, id: &str) -> DbResult<bool> {
+    let count = conn.execute("DELETE FROM events WHERE id = ?1", rusqlite::params![id])?;
+    Ok(count > 0)
 }
 
 // ============================================================================
@@ -262,62 +195,44 @@ pub async fn delete_event(pool: &SqlitePool, id: &str) -> DbResult<bool> {
 // ============================================================================
 
 /// Create an event occurrence.
-pub async fn create_occurrence(pool: &SqlitePool, occurrence: &EventOccurrence) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        INSERT INTO event_occurrences (id, event_id, starts_at, ends_at, status, notes, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        "#,
-        occurrence.id,
-        occurrence.event_id,
-        occurrence.starts_at,
-        occurrence.ends_at,
-        occurrence.status,
-        occurrence.notes,
-        occurrence.created_at,
-    )
-    .execute(pool)
-    .await?;
+pub fn create_occurrence(
+    conn: &rusqlite::Connection,
+    occurrence: &EventOccurrence,
+) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO event_occurrences (id, event_id, starts_at, ends_at, status, notes, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![occurrence.id, occurrence.event_id, occurrence.starts_at, occurrence.ends_at, occurrence.status, occurrence.notes, occurrence.created_at],
+    )?;
     Ok(())
 }
 
 /// Get occurrences for an event.
-pub async fn get_event_occurrences(
-    pool: &SqlitePool,
+pub fn get_event_occurrences(
+    conn: &rusqlite::Connection,
     event_id: &str,
 ) -> DbResult<Vec<EventOccurrence>> {
-    let occurrences = sqlx::query_as!(
-        EventOccurrence,
-        r#"
-        SELECT
-            id as "id!",
-            event_id as "event_id!",
-            starts_at as "starts_at!: _",
-            ends_at as "ends_at: _",
-            status as "status!: OccurrenceStatus",
-            notes,
-            created_at as "created_at!: _"
-        FROM event_occurrences WHERE event_id = ? ORDER BY starts_at ASC
-        "#,
-        event_id
-    )
-    .fetch_all(pool)
-    .await?;
+    let mut stmt = conn.prepare(
+        "SELECT id, event_id, starts_at, ends_at, status, notes, created_at
+         FROM event_occurrences WHERE event_id = ?1 ORDER BY starts_at ASC",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![event_id], EventOccurrence::from_row)?;
+    let mut occurrences = Vec::new();
+    for row in rows {
+        occurrences.push(row?);
+    }
     Ok(occurrences)
 }
 
 /// Update occurrence status.
-pub async fn update_occurrence_status(
-    pool: &SqlitePool,
+pub fn update_occurrence_status(
+    conn: &rusqlite::Connection,
     id: &str,
     status: OccurrenceStatus,
 ) -> DbResult<bool> {
-    let result = sqlx::query!(
-        "UPDATE event_occurrences SET status = ? WHERE id = ?",
-        status,
-        id,
-    )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() > 0)
+    let count = conn.execute(
+        "UPDATE event_occurrences SET status = ?1 WHERE id = ?2",
+        rusqlite::params![status, id],
+    )?;
+    Ok(count > 0)
 }

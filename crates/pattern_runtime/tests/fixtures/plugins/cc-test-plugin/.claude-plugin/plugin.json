@@ -1,0 +1,12 @@
+{
+  "name": "cc-test-plugin",
+  "version": "1.0.0",
+  "description": "Test CC plugin for integration tests",
+  "skills": ["skills/"],
+  "hooks": [{
+    "matcher": "Write|Edit",
+    "hooks": [
+      { "type": "command", "command": "echo hook-fired", "event": "PostToolUse" }
+    ]
+  }]
+}

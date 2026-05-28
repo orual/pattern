@@ -1,124 +1,170 @@
-//! Pattern Core - Agent Framework and Memory System
-//!
-//! This crate provides the core agent framework, memory management,
-//! and tool execution system that powers Pattern's multi-agent
-//! cognitive support system.
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
 
-pub mod agent;
-pub mod config;
-pub mod context;
-pub mod coordination;
-pub mod data_source;
-pub mod db;
-pub mod embeddings;
+// Pre-existing style lints in legacy `error/core.rs`, `memory/document.rs`
+// are suppressed crate-wide because they predate the v3 rewrite and are
+// orthogonal to Phase 2's scope.
+#![allow(clippy::type_complexity)] // CoreError::provider_http_parts return types; factoring deferred.
+#![allow(clippy::result_large_err)] // CoreError is a deliberately rich diagnostic enum; boxing regresses ergonomics.
+#![allow(clippy::doc_lazy_continuation)] // Rustdoc list-indent lint on pre-existing comments in memory/document.rs; deferred.
+
+//! # pattern_core
+//!
+//! Traits and types that every Pattern v3 component implements or consumes.
+//!
+//! This crate contains no execution machinery — the runtime lives in
+//! `pattern_runtime`, LLM integration in `pattern_provider`. Memory storage
+//! (loro CRDT + sqlite) will be re-absorbed here once `pattern_runtime`
+//! lands; the concrete `MemoryCache` / `SharedBlockManager` implementations
+//! are staged to `rewrite-staging/runtime_subsystems/memory_v2/` for the
+//! duration of Phase 2 because they depend on plumbing
+//! (`ConstellationDatabases`) that temporarily lives outside this crate.
+//!
+//! See `docs/design-plans/2026-04-16-v3-foundation.md` for the layering
+//! rationale.
+//!
+//! # Quick start
+//!
+//! ```
+//! use pattern_core::{AgentId, UserId, TurnId, new_id, new_snowflake_id};
+//! use smol_str::SmolStr;
+//!
+//! let _agent: AgentId = SmolStr::new("orual-companion");
+//! // UserId: non-ordered — UUID is fine.
+//! let _user: UserId = new_id();
+//! // TurnId: lex-sortable — use snowflake (convention: any ID that
+//! // orders turns/batches/messages must be a snowflake, not a UUID).
+//! let turn: TurnId = new_snowflake_id();
+//! assert!(!turn.is_empty());
+//! ```
+
+pub mod base_instructions;
+pub mod capability;
+#[cfg(feature = "provider")]
+pub mod multimodal;
+#[cfg(feature = "mcp-client")]
+#[cfg(feature = "mcp-client")]
+pub mod mcp;
+pub mod hooks;
+pub mod plugin;
+pub mod constellation;
 pub mod error;
-#[cfg(feature = "export")]
-pub mod export;
-pub mod id;
+pub mod fronting;
 pub mod memory;
-pub mod memory_acl;
-pub mod messages;
-pub mod model;
-pub mod oauth;
+// `memory_acl` module removed: MemoryOp, MemoryGate, and check() are
+// canonical in types::memory_types::core_types (as methods on MemoryGate).
+pub mod paths;
+
+#[cfg(feature = "plugin-transport")]
+pub mod daemon_state;
+pub mod observer;
 pub mod permission;
-pub mod prompt_template;
-pub mod queue;
-pub mod realtime;
-pub mod runtime;
-pub mod tool;
-pub mod users;
+pub mod spawn;
+pub mod traits;
+#[cfg(all(feature = "plugin-transport", feature = "provider"))]
+pub mod wire;
+pub mod types;
 pub mod utils;
 
 #[cfg(test)]
 pub mod test_helpers;
 
-// Macros are automatically available at crate root due to #[macro_export]
+// ── Common re-exports ────────────────────────────────────────────────────────
 
-pub use crate::utils::SnowflakePosition;
-pub use agent::{Agent, AgentState, AgentType};
-pub use context::{CompressionStrategy, ContextBuilder, ContextConfig, MessageCompressor};
-pub use coordination::{AgentGroup, Constellation, CoordinationPattern};
-pub use error::{CoreError, Result};
-pub use id::{
-    AgentId, ConversationId, Did, IdType, MemoryId, MessageId, ModelId, OAuthTokenId,
-    QueuedMessageId, RequestId, SessionId, TaskId, ToolCallId, UserId, WakeupId,
+pub use base_instructions::DEFAULT_BASE_INSTRUCTIONS;
+pub use paths::{PatternRoots, RootsError};
+pub use capability::{
+    CapabilityError, CapabilityFlag, CapabilityParseError, CapabilitySet, EffectCategory,
+    EffectClass, PolicyAction, PolicyContext, PolicyMatcher, PolicyRule, PolicySet, Precedence,
+    RuntimeClassCheck,
 };
-pub use messages::queue::{QueuedMessage, ScheduledWakeup};
-pub use model::ModelCapability;
-pub use model::ModelProvider;
-pub use runtime::{AgentRuntime, RuntimeBuilder, RuntimeConfig};
-pub use tool::{AiTool, DynamicTool, ToolRegistry, ToolResult};
 
-// Data source types
-pub use data_source::{
-    // Helper utilities
-    BlockBuilder,
-    // Manager types
-    BlockEdit,
-    // Core reference types
-    BlockRef,
-    // Schema and status types
-    BlockSchemaSpec,
-    BlockSourceInfo,
-    BlockSourceStatus,
-    // Block source types
-    ConflictResolution,
-    // Core traits
-    DataBlock,
-    DataStream,
-    EditFeedback,
-    EphemeralBlockCache,
-    FileChange,
-    FileChangeType,
-    Notification,
-    NotificationBuilder,
-    PermissionRule,
-    ReconcileResult,
-    SourceManager,
-    StreamCursor,
-    StreamSourceInfo,
-    StreamStatus,
-    VersionInfo,
+/// Reserved memory-block label for the agent's persona content.
+/// Segment 1 reads this block to inject persona into the system prompt.
+pub const PERSONA_LABEL: &str = "persona";
+pub use error::{
+    ConfigError, CoreError, EmbeddingError, MemoryError, MemoryResult, ProviderError, Result,
+    RuntimeError,
 };
-/// Re-export commonly used types
-pub mod prelude {
-    pub use crate::{
-        Agent, AgentId, AgentState, AgentType, AiTool, CompressionStrategy, ContextBuilder,
-        ContextConfig, CoreError, DynamicTool, IdType, MessageCompressor, ModelCapability,
-        ModelProvider, Result, ToolRegistry, ToolResult,
-    };
-}
 
-#[derive(Debug, Clone)]
-pub struct PatternHttpClient {
-    pub client: reqwest::Client,
-}
+// ── Trait re-exports ─────────────────────────────────────────────────────────
+// Explicit (no wildcard) so the public surface is greppable.
 
-impl Default for PatternHttpClient {
-    fn default() -> Self {
-        Self {
-            client: pattern_reqwest_client(),
-        }
-    }
-}
+#[cfg(feature = "provider")]
+pub use traits::{
+    AgentRuntime, Endpoint, EndpointRegistry, ProviderClient, Session,
+};
+pub use traits::EmbeddingProvider;
+pub use traits::MemoryStore;
 
-pub fn pattern_reqwest_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent(concat!("pattern/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(10)) // 10 second timeout for constellation API calls
-        .connect_timeout(std::time::Duration::from_secs(5)) // 5 second connection timeout
-        .build()
-        .unwrap() // panics for the same reasons Client::new() would: https://docs.rs/reqwest/latest/reqwest/struct.Client.html#panics
-}
+// ── Type re-exports ──────────────────────────────────────────────────────────
 
-impl jacquard::http_client::HttpClient for PatternHttpClient {
-    type Error = reqwest::Error;
+// IDs and identity — all `SmolStr` aliases. `new_id()` mints fresh UUIDs
+// for non-ordered IDs; `new_snowflake_id()` mints lex-sortable snowflake
+// IDs for anything that must order by creation time (TurnId, BatchId,
+// message `position`).
+pub use types::ids::{
+    AgentId, BatchId, ConstellationId, ConversationId, DiscordIdentityId, EventId, GroupId,
+    MemoryId, MessageId, ModelId, OAuthTokenId, PersonaId, ProjectId, QueuedMessageId, RelationId,
+    RequestId, SessionId, TaskId, ToolCallId, UserId, WakeupId, WorkspaceId, new_id,
+    new_snowflake_id,
+};
 
-    fn send_http(
-        &self,
-        request: http::Request<Vec<u8>>,
-    ) -> impl Future<Output = core::result::Result<http::Response<Vec<u8>>, Self::Error>> + Send
-    {
-        async { self.client.send_http(request).await }
-    }
-}
+// Message / batch (gated: pulls genai)
+#[cfg(feature = "provider")]
+pub use types::batch::{BatchType, MessageBatch};
+pub use types::block_ref::BlockRef;
+#[cfg(feature = "provider")]
+pub use types::message::{Message, ResponseMeta};
+
+// Block value types
+pub use types::block::{BlockCreate, BlockHandle, BlockWrite, BlockWriteKind};
+
+// Origin / provenance
+pub use types::origin::{AgentAuthor, Author, Human, MessageOrigin, Partner, Sphere, SystemReason};
+
+// Turn types (gated: pulls genai)
+#[cfg(feature = "provider")]
+pub use types::turn::{StepReply, StopReason, TurnCacheMetrics, TurnId, TurnInput, TurnOutput};
+
+// Snapshot / persona types (gated: pulls genai)
+#[cfg(feature = "provider")]
+pub use types::snapshot::{PersonaSnapshot, SessionSnapshot};
+
+// Embedding value types
+pub use types::embedding::{Embedding, EmbeddingResult};
+
+// Spawn-config types — multi-agent session spawning primitives.
+pub use spawn::{
+    EphemeralConfig, ForkConfig, ForkIsolation, PersonaConfig, RelationshipKind, SiblingConfig,
+    SiblingPersona,
+};
+
+// Provider request / response types + genai re-exports for callers that
+// want `use pattern_core::*` without also depending on genai directly.
+#[cfg(feature = "provider")]
+pub use types::provider::{
+    CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent, CompletionRequest,
+    ProviderCredential, ReasoningEffort, StreamEnd, SystemBlock, TokenCount, Tool, ToolCall,
+    ToolResponse, Usage,
+};
+
+// ── Constellation + fronting types ───────────────────────────────────────────
+
+pub use constellation::{
+    ConstellationRegistry, EdgeDirection, PersonaGroup, PersonaRecord, PersonaStatus,
+    RegistryError, RegistryScope, RelationshipEdge, RelationshipSpec,
+};
+// `EmptyConstellationRegistry` is test-only: no production path uses it after
+// Phase 6. External test crates needing a stub should use
+// `pattern_runtime::testing::InMemoryConstellationRegistry`.
+#[cfg(test)]
+pub use constellation::EmptyConstellationRegistry;
+
+pub use fronting::{
+    FrontingLoadError, FrontingResolver, FrontingSet, MessagePattern, ResolveOutcome, RoutingRule,
+    RoutingTable, parse_direct_address,
+};

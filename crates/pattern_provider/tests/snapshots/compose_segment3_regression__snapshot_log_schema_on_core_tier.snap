@@ -1,0 +1,11 @@
+---
+source: crates/pattern_provider/tests/compose_segment3_regression.rs
+expression: text
+---
+<system-reminder>
+[memory:current_state]
+
+<block:system_log type="core" permission="Read, Append, Write">
+[2026-04-19T10:00:00Z]
+</block:system_log>
+</system-reminder>

@@ -12,51 +12,63 @@ name = "pattern"
 path = "src/main.rs"
 
 [features]
-default = ["oauth", "discord"]
-oauth = ["pattern-core/oauth"]
-discord = ["pattern-discord"]
-legacy-convert = ["dep:pattern-surreal-compat"]
+default = ["oauth"]
+oauth = ["pattern-provider/subscription-oauth"]
 
 [dependencies]
 # Workspace dependencies
-pattern-core = { path = "../pattern_core", features = ["export"] }
-pattern-discord = { path = "../pattern_discord", optional = true }
+pattern-core = { path = "../pattern_core" }
 pattern-db = { path = "../pattern_db"}
-pattern-surreal-compat = { path = "../pattern_surreal_compat", optional = true }
-pattern-auth = { path = "../pattern_auth" }
-genai = { workspace = true }
+pattern-memory = { path = "../pattern_memory" }
+pattern-runtime = { path = "../pattern_runtime" }
+pattern-provider = { path = "../pattern_provider" }
+pattern-server = { path = "../pattern_server" }
+nix = { version = "0.29", features = ["signal", "process"] }
+which = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-toml = { workspace = true }
-toml_edit = "0.22"
 miette = { workspace = true, features = ["fancy", "syntect-highlighter"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 clap = { workspace = true }
-uuid = { workspace = true }
-chrono = { workspace = true }
 futures = { workspace = true }
+irpc = { workspace = true }
 async-trait = { workspace = true }
 
+jiff = { workspace = true }
+secrecy = { workspace = true }
+
 # CLI-specific dependencies
-crossterm = "0.28"
-ratatui = "0.29"
 indicatif = "0.17"
 comfy-table = "7.1"
 owo-colors = "4.2"
-termimad = "0.31"
 dialoguer = "0.11"
 dirs = { workspace = true }
 dotenvy = { workspace = true }
 rustyline-async = "0.4"
 rpassword = "7.3"
-
-# ATProto dependencies
+ratatui = "0.30.0"
+ratatui-textarea = "0.9.1"
+ratatui-widgets = { version = "0.3.0", features = ["unstable-rendered-line-info"] }
+ratatui-crossterm = { version = "0.1.0" }
+crossterm = { version = "0.29", features = ["event-stream"] }
+nucleo = { workspace = true }
+tui-markdown = { workspace = true }
+smol_str = { workspace = true }
+serde_json = { workspace = true }
+arboard = { workspace = true }
+base64 = { workspace = true }
+blake3 = { workspace = true }
+unicode-width = { workspace = true }
+unicase = { workspace = true }
+askama = { workspace = true }
+# Used by `pattern auth login openai` for the OAuth refresh HTTP client
+# and to open the user's browser to the authorize URL.
 reqwest = { workspace = true }
-jacquard.workspace = true
+open = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+insta = { workspace = true }
+kdl = { workspace = true }

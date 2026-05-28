@@ -1,0 +1,12 @@
+---
+source: crates/pattern_cli/src/tui/autocomplete.rs
+expression: output
+---
+
+
+
+
+
+status          Show runtime status
+shutdown        Stop the daemon
+agents          List active agents

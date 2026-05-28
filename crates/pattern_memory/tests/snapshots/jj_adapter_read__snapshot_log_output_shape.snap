@@ -1,0 +1,12 @@
+---
+source: crates/pattern_memory/tests/jj_adapter_read.rs
+assertion_line: 362
+expression: normalized
+---
+[
+    NormalizedLogEntry {
+        change_id: "<change_id>",
+        commit_id: "<commit_id>",
+        description: "snapshot log test commit",
+    },
+]

@@ -1,0 +1,17 @@
+---
+source: crates/pattern_cli/src/tui/app.rs
+assertion_line: 1531
+expression: output
+---
+
+
+
+
+
+
+
+
+
+❯
+
+ no fronting configured │ 0 agents │ 0 ctx │ ● disconnected

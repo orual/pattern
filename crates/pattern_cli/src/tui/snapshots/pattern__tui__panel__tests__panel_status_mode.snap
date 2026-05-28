@@ -1,0 +1,8 @@
+---
+source: crates/pattern_cli/src/tui/panel.rs
+assertion_line: 338
+expression: output
+---
+ panel ───────────────────────
+supervisor: active
+pattern-nd: idle

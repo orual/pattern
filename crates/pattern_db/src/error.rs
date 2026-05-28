@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Error types for the database layer.
 
 use miette::Diagnostic;
@@ -8,52 +14,57 @@ pub type DbResult<T> = Result<T, DbError>;
 
 /// Database error types.
 #[derive(Debug, Error, Diagnostic)]
+#[non_exhaustive]
 pub enum DbError {
-    /// SQLite/sqlx error
-    #[error("Database error: {0}")]
-    Sqlx(#[from] sqlx::Error),
+    /// rusqlite error from a query or connection operation.
+    #[error("database error: {0}")]
+    Rusqlite(#[from] rusqlite::Error),
 
-    /// Migration error
-    #[error("Migration error: {0}")]
-    Migration(#[from] sqlx::migrate::MigrateError),
+    /// r2d2 pool error (timeout, exhaustion, init failure).
+    #[error("connection pool error: {0}")]
+    Pool(#[from] r2d2::Error),
 
-    /// Loro document error
-    #[error("Loro error: {0}")]
+    /// Schema migration error.
+    #[error("migration error: {0}")]
+    Migration(#[from] rusqlite_migration::Error),
+
+    /// Loro document error.
+    #[error("loro error: {0}")]
     Loro(String),
 
-    /// Entity not found
+    /// Entity not found.
     #[error("{entity_type} not found: {id}")]
     NotFound {
         entity_type: &'static str,
         id: String,
     },
 
-    /// Duplicate entity
+    /// Duplicate entity.
     #[error("{entity_type} already exists: {id}")]
     AlreadyExists {
         entity_type: &'static str,
         id: String,
     },
 
-    /// Invalid data
-    #[error("Invalid data: {message}")]
+    /// Invalid data.
+    #[error("invalid data: {message}")]
     InvalidData { message: String },
 
-    /// Serialization error
-    #[error("Serialization error: {0}")]
+    /// Serialization error.
+    #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
-    /// IO error (for filesystem operations if needed)
-    #[error("IO error: {0}")]
+    /// IO error (for filesystem operations if needed).
+    #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Constraint violation
-    #[error("Constraint violation: {message}")]
+    /// Constraint violation.
+    #[error("constraint violation: {message}")]
     ConstraintViolation { message: String },
 
-    /// SQLite extension error
-    #[error("Extension error: {0}")]
-    #[diagnostic(help("Ensure sqlite-vec is properly initialized before database operations"))]
+    /// SQLite extension load/init error.
+    #[error("extension error: {0}")]
+    #[diagnostic(help("ensure sqlite-vec is properly initialized before database operations"))]
     Extension(String),
 }
 

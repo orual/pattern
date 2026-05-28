@@ -1,25 +1,12 @@
-//! Application state
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
 
-use crate::{config::ServerConfig, error::ServerResult};
-#[derive(Clone)]
-pub struct AppState {
-    pub config: ServerConfig,
-    //pub db: Surreal<Any>,
-    pub jwt_encoding_key: jsonwebtoken::EncodingKey,
-    pub jwt_decoding_key: jsonwebtoken::DecodingKey,
-}
+//! Daemon state file management — moved to `pattern_core::daemon_state`.
+//!
+//! Re-export shim so existing `pattern_server::state::DaemonState` imports keep working.
+//! New code should use `pattern_core::daemon_state::DaemonState` directly.
 
-impl AppState {
-    pub async fn new(config: ServerConfig) -> ServerResult<Self> {
-        // Create JWT keys
-        let jwt_encoding_key = jsonwebtoken::EncodingKey::from_secret(config.jwt_secret.as_bytes());
-        let jwt_decoding_key = jsonwebtoken::DecodingKey::from_secret(config.jwt_secret.as_bytes());
-
-        Ok(Self {
-            config,
-            //db,
-            jwt_encoding_key,
-            jwt_decoding_key,
-        })
-    }
-}
+pub use pattern_core::daemon_state::*;

@@ -1,48 +1,339 @@
-//! Pattern API Server
-//!
-//! Unified backend providing HTTP/WebSocket APIs, MCP integration, and Discord bot
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
 
-use miette::IntoDiagnostic;
-use pattern_server::{ServerConfig, start_server};
-use tracing_subscriber::EnvFilter;
+//! Pattern daemon binary.
+//!
+//! Provides `start`, `stop`, and `status` subcommands for managing the
+//! background daemon that owns the agent runtime and exposes it over QUIC.
+//!
+//! On `start`, the daemon:
+//! 1. Checks whether an instance is already running (via state file + process check).
+//! 2. Optionally mounts memory and builds provider infrastructure (unless `--echo`).
+//! 3. Spawns the [`DaemonServer`] actor (echo mode or real session mode).
+//! 4. Creates a QUIC endpoint with a self-signed certificate.
+//! 5. Sets up a QUIC listener that forwards remote `PatternProtocol` messages
+//!    into the actor's channel.
+//! 6. Writes PID, bind address, and certificate to `~/.pattern/daemon/`.
+//! 7. Blocks until SIGTERM or Ctrl-C, then cleans up state.
+
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+use clap::{Parser, Subcommand};
+use tracing::info;
+
+use irpc::rpc::RemoteService;
+use pattern_server::protocol::PatternProtocol;
+use pattern_server::server::{DaemonServer, SessionConfig};
+use pattern_server::state::DaemonState;
+
+#[derive(Parser)]
+#[command(name = "pattern-server", about = "Pattern daemon process")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Start the daemon.
+    Start {
+        /// Port to listen on (0 = OS-assigned).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+
+        /// Run in echo mode (no LLM, echoes messages back). Used for testing.
+        #[arg(long)]
+        echo: bool,
+    },
+    /// Stop a running daemon.
+    Stop,
+    /// Show daemon status.
+    Status,
+}
 
 #[tokio::main]
 async fn main() -> miette::Result<()> {
-    // Load .env file if it exists
-    //let _ = dotenvy::dotenv();
-    miette::set_hook(Box::new(|_| {
-        Box::new(
-            miette::MietteHandlerOpts::new()
-                .terminal_links(true)
-                .rgb_colors(miette::RgbColors::Preferred)
-                .with_cause_chain()
-                .with_syntax_highlighting(miette::highlighters::SyntectHighlighter::default())
-                .color(true)
-                .context_lines(5)
-                .tab_width(2)
-                .break_words(true)
-                .build(),
-        )
-    }))?;
-    miette::set_panic_hook();
-    // Initialize tracing
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "warn,pattern_server=info,pattern_runtime=info,pattern_provider=info, pattern_db=info,pattern_memory=info,loro_internal=warn,loro=warn".into());
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(
-            "pattern_api=debug,pattern_server=debug,pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug",
-        ))
-        .with_file(true)
-        .with_line_number(true) // Show target module
-        .with_thread_ids(false)
-        .with_thread_names(false)
-        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339()) // Local time in RFC 3339 format
-        .pretty()
+        .json()
+        .with_env_filter(filter)
         .init();
 
-    // Load config (for now use defaults)
-    let config = ServerConfig::default();
+    let cli = Cli::parse();
 
-    // Start server
-    start_server(config).await.into_diagnostic()?;
+    match cli.command {
+        Command::Start { port, echo } => cmd_start(port, echo).await,
+        Command::Stop => cmd_stop(),
+        Command::Status => cmd_status(),
+    }
+}
 
+async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
+    // Check if already running.
+    if let Ok(state) = DaemonState::load() {
+        if state.is_process_alive() {
+            return Err(miette::miette!(
+                "daemon already running (pid {}, addr {})",
+                state.pid,
+                state.addr
+            ));
+        }
+        // Stale state file — clean it up before starting fresh.
+        DaemonState::clear().ok();
+    }
+
+    // Daemon-shared plugin route table. Threaded into SessionConfig so
+    // per-mount session-open populates entries for OOP plugins from the
+    // registry. Also wired into the iroh Router's host-ALPN accept handler
+    // (SessionRoutingProtocolHandler) so accept-time pubkey lookup hits the
+    // same table.
+    let plugin_routes = Arc::new(pattern_core::plugin::auth::PluginRouteTable::new());
+    let gated_host_arc = Arc::new(
+        pattern_core::plugin::auth::SessionRoutingProtocolHandler::new(Arc::clone(&plugin_routes)),
+    );
+    // Parallel routing handler for the memory-sync ALPN. Same PluginRouteTable
+    // (pubkey → session_id mapping is shared), but each protocol gets its own
+    // routing handler so per-session registration is keyed per-protocol.
+    let gated_memory_sync_arc = Arc::new(
+        pattern_core::plugin::auth::SessionRoutingProtocolHandler::new(Arc::clone(&plugin_routes)),
+    );
+
+    // Bind iroh endpoint FIRST so SessionConfig can hold it for native-plugin
+    // OOP spawn at session-open. Phase 6 Task 5 — replaces noq-cert-pinning
+    // with iroh node-identity-pinning. Load secret_key from prior state if
+    // present (stable node_id across restarts), else generate fresh.
+    let bind_addr: SocketAddr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into();
+    let secret_key = match DaemonState::load()
+        .ok()
+        .and_then(|s| s.load_secret_bytes().ok())
+    {
+        Some(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            iroh::SecretKey::from_bytes(&arr)
+        }
+        _ => iroh::SecretKey::generate(),
+    };
+    let node_id = secret_key.public();
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
+        .secret_key(secret_key.clone())
+        .bind_addr(bind_addr)
+        .map_err(|e| miette::miette!("failed to set bind addr: {e}"))?
+        .bind()
+        .await
+        .map_err(|e| miette::miette!("failed to bind iroh endpoint: {e}"))?;
+    let local_addr = endpoint
+        .bound_sockets()
+        .into_iter()
+        .next()
+        .ok_or_else(|| miette::miette!("iroh endpoint has no bound socket"))?;
+
+    // Spawn the server actor — echo mode or real session mode.
+    // Projects are mounted on demand via InitSession from the TUI client.
+    let handle = if echo {
+        info!("starting daemon in echo mode");
+        DaemonServer::spawn()
+    } else {
+        // Build provider with the full auth chain: stored OAuth (keyring/JSON
+        // fallback) → API key env var → session pickup (~/.claude/.credentials.json).
+        // This mirrors pattern-test-cli's `build_chain` — the daemon should try
+        // every credential source the user might have configured.
+        let chain: Arc<dyn pattern_provider::auth::CredentialChain> = {
+            use pattern_provider::auth::{PkceTier, SessionPickupTier};
+            use pattern_provider::creds_store::{
+                CredsStore, CredsStoreResolver, JsonFallbackStore, KeyringStore,
+            };
+
+            let session_pickup = SessionPickupTier::default();
+            let pkce = Arc::new(PkceTier::anthropic());
+            let primary: Arc<dyn CredsStore> = Arc::new(KeyringStore::new());
+            let fallback: Arc<dyn CredsStore> = Arc::new(
+                JsonFallbackStore::new()
+                    .map_err(|e| miette::miette!("failed to init creds fallback store: {e}"))?,
+            );
+            let creds_store: Arc<dyn CredsStore> =
+                Arc::new(CredsStoreResolver::new(primary, fallback));
+
+            Arc::new(pattern_provider::auth::AnthropicAuthChain::with_oauth(
+                session_pickup,
+                pkce,
+                creds_store,
+            ))
+        };
+        let limiter =
+            Arc::new(pattern_provider::ratelimit::ProviderRateLimiter::anthropic_default());
+        let shaper_cfg = pattern_provider::shaper::ShaperConfig::default();
+        let shaper = Arc::new(
+            pattern_provider::shaper::HonestPatternShaper::new(shaper_cfg)
+                .map_err(|e| miette::miette!("failed to create shaper: {e}"))?,
+        );
+        let counter = Arc::new(pattern_provider::token_count::TokenCounter::anthropic(
+            limiter.clone(),
+        ));
+        // OpenAI provider: codex-OAuth-aware chain + NoOpShaper (the
+        // Anthropic shaper would inject the claude-code routing literal,
+        // which is structurally wrong for OpenAI traffic; gateway shaper
+        // dispatch is keyed on provider name so registering NoOpShaper
+        // here makes it impossible for the Anthropic shaper to fire on
+        // OpenAI requests). The codex storage uses default $CODEX_HOME
+        // resolution ($CODEX_HOME env var or ~/.codex); FileOnly mode is
+        // not used in production — keyring is primary, file is interop.
+        let openai_chain: Arc<dyn pattern_provider::auth::CredentialChain> = {
+            use pattern_provider::auth::{CodexAuthStore, CodexOAuthConfig, OpenAiAuthChain};
+            let store = match CodexAuthStore::from_env() {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not resolve $CODEX_HOME; openai chain falls back to api-key only");
+                    return Err(miette::miette!("codex storage init: {e}"));
+                }
+            };
+            Arc::new(OpenAiAuthChain::with_oauth(
+                store,
+                CodexOAuthConfig::codex(),
+                reqwest::Client::new(),
+            ))
+        };
+        let openai_limiter =
+            Arc::new(pattern_provider::ratelimit::ProviderRateLimiter::openai_default());
+        let openai_shaper: Arc<dyn pattern_provider::shaper::RequestShaper> =
+            Arc::new(pattern_provider::shaper::NoOpShaper);
+
+        let gateway = pattern_provider::gateway::PatternGatewayClient::builder()
+            .with_provider("anthropic", chain, shaper, limiter)
+            .with_provider("openai", openai_chain, openai_shaper, openai_limiter)
+            .with_token_counter("anthropic", counter)
+            .build()
+            .map_err(|e| miette::miette!("failed to build gateway: {e}"))?;
+        let provider: Arc<dyn pattern_core::ProviderClient> = Arc::new(gateway);
+
+        // Resolve SDK location.
+        let sdk = pattern_runtime::sdk::SdkLocation::default();
+
+        // Use `with_runtime_ports` (NOT `new`) so the daemon's registry
+        // ships HttpPort and any other runtime-provided ports. Building
+        // the registry via `new` directly leaves the daemon with no
+        // HTTP capability and breaks `Port.call("http", ...)` at
+        // dispatch time — surfaced by the v3-sandbox-io final review.
+        let port_registry = std::sync::Arc::new(
+            pattern_runtime::port_registry::PortRegistryImpl::with_runtime_ports(
+                &tokio::runtime::Handle::current(),
+            ),
+        );
+        let config = SessionConfig {
+            sdk,
+            provider,
+            port_registry,
+            plugin_routes: Some(Arc::clone(&plugin_routes)),
+            plugin_routing_handler: Some(Arc::clone(&gated_host_arc)),
+            plugin_memory_sync_handler: Some(Arc::clone(&gated_memory_sync_arc)),
+            daemon_endpoint: Some(endpoint.clone()),
+        };
+
+        info!("starting daemon");
+        DaemonServer::spawn_with_config(config)
+    };
+
+    let local = handle
+        .client
+        .as_local()
+        .expect("freshly-spawned server client must be local");
+    let handler = PatternProtocol::remote_handler(local);
+
+    // Plugin-host accept (Phase A.2 — per-session dispatch). Sessions register
+    // their own host_handler at open time, carrying a HostApiContext bundle for
+    // dispatch into the session's runtime state. Daemon main constructed the
+    // routing handler above + threaded it into SessionConfig; here we clone the
+    // struct (cheap — internal Arcs) to attach to the iroh Router.
+    use pattern_core::plugin::protocol::{PLUGIN_HOST_ALPN, PLUGIN_MEMORY_SYNC_ALPN};
+    use std::sync::Arc;
+
+    let gated_host = (*gated_host_arc).clone();
+    let gated_memory_sync = (*gated_memory_sync_arc).clone();
+
+    // Multi-ALPN router. pattern/1 carries the TUI/client protocol;
+    // pattern-plugin-host/1 carries Plugin→Runtime callbacks + memory ops,
+    // session-gated by PluginRouteTable lookup.
+    // Future: pattern-plugin-guest/1 (Runtime→Plugin) lives client-side in
+    // OutOfProcessPluginConnection; pattern-plugin-memory-sync/1 gets its own
+    // accept when MemorySyncProtocol handler ships.
+    let _router = iroh::protocol::Router::builder(endpoint)
+        .accept(b"pattern/1", irpc_iroh::IrohProtocol::new(handler))
+        .accept(PLUGIN_HOST_ALPN, gated_host)
+        .accept(PLUGIN_MEMORY_SYNC_ALPN, gated_memory_sync)
+        .spawn();
+
+    // plugin_routes is now threaded through SessionConfig → SessionRegistries
+    // → SessionContext, so per-mount session-open populates from PluginRegistry
+    // and Drop on SessionContext clears entries. The Arc here + Arc in SessionConfig
+    // both point at the same dashmap-backed table.
+
+    let state = DaemonState {
+        pid: std::process::id(),
+        addr: local_addr,
+        node_id: node_id.to_string(),
+    };
+    state
+        .save(&secret_key.to_bytes())
+        .map_err(|e| miette::miette!("failed to write state: {e}"))?;
+
+    info!("daemon listening on {}", local_addr);
+    info!("state written to {}", DaemonState::state_path().display());
+
+    // Block until Ctrl-C (or SIGTERM via the OS — tokio only catches Ctrl-C
+    // portably; SIGTERM handling is done by the calling process or init system).
+    tokio::signal::ctrl_c()
+        .await
+        .map_err(|e| miette::miette!("failed to wait for ctrl-c: {e}"))?;
+
+    info!("shutting down");
+    DaemonState::clear().ok();
+
+    Ok(())
+}
+
+fn cmd_stop() -> miette::Result<()> {
+    let state =
+        DaemonState::load().map_err(|_| miette::miette!("daemon not running (no state file)"))?;
+
+    if !state.is_process_alive() {
+        DaemonState::clear().ok();
+        return Err(miette::miette!(
+            "daemon not running (stale state file cleaned up)"
+        ));
+    }
+
+    // Send SIGTERM via the nix crate — a safe, typed wrapper around kill(2).
+    use nix::sys::signal::{self, Signal};
+    use nix::unistd::Pid;
+    signal::kill(Pid::from_raw(state.pid as i32), Signal::SIGTERM)
+        .map_err(|e| miette::miette!("failed to send SIGTERM to pid {}: {e}", state.pid))?;
+
+    DaemonState::clear().ok();
+    println!("daemon stopped (pid {})", state.pid);
+    Ok(())
+}
+
+fn cmd_status() -> miette::Result<()> {
+    let state = match DaemonState::load() {
+        Ok(s) => s,
+        Err(_) => {
+            println!("daemon not running");
+            return Ok(());
+        }
+    };
+
+    if !state.is_process_alive() {
+        DaemonState::clear().ok();
+        println!("daemon not running (stale state file cleaned up)");
+        return Ok(());
+    }
+
+    println!("daemon running");
+    println!("  pid:  {}", state.pid);
+    println!("  addr: {}", state.addr);
     Ok(())
 }

@@ -4,6 +4,9 @@
 .direnv
 .pattern_cache
 .DS_Store
+.playwright-mcp
+**.yaml
+
 pattern.toml
 pattern-bsky.toml
 **.env
@@ -18,12 +21,18 @@ mcp-wrapper.sh
 **.txt
 **.car
 **.log.**
-**.json
-!**/.sqlx/*.json
+!crates/*/tests/data/*.json
 **.sql
-!**/migrations/*.sql
+!**/migrations/**/*.sql
 **.surql
 **/**.output
+pattern-convert.json
+/docs/reading/*
+**/target/
 
 # Deciduous database (local)
 .deciduous/
+.pattern/transient/
+.pattern/shared/.jj/
+.pattern/shared/memory.db-wal
+.pattern/shared/memory.db-shm

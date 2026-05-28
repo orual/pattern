@@ -1,0 +1,82 @@
+[package]
+name = "pattern-memory"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Memory subsystem implementation for Pattern (MemoryCache, StructuredDocument, SharedBlockManager)"
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+pattern-core = { path = "../pattern_core" }
+pattern-db = { path = "../pattern_db" }
+
+# jj CLI adapter
+which = { workspace = true }
+semver = "1"
+
+# Runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Data
+loro = { version = "1.10", features = ["counter"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Serialization formats
+kdl = { workspace = true }
+saphyr = { workspace = true }
+blake3 = { workspace = true }
+
+# Sync subscriber worker
+crossbeam-channel = "0.5"
+tokio-util = { version = "0.7", features = ["rt"] }
+jiff = { workspace = true }
+rusqlite = { version = "0.39", features = ["bundled-full"] }
+metrics = { workspace = true }
+
+# File system watcher
+notify = "8"
+notify-debouncer-full = "0.5"
+
+# Errors + logging
+thiserror = { workspace = true }
+miette = { workspace = true, features = ["fancy"] }
+tracing = { workspace = true }
+
+# Zero-allocation file extension strings (bridge SmolStr::new_static constants).
+smol_str = { workspace = true }
+
+# Utilities inherited from the original pattern_core::memory surface
+dashmap = { version = "6.1.0", features = ["serde"] }
+chrono = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }
+
+# Config parsing + VCS detection
+knus = "3.3"
+gix-discover = { version = "0.49", features = ["sha1"] }
+
+# Atomic rename-into-place for snapshot writes (must be a regular dep,
+# not dev-dep, because create_snapshot uses NamedTempFile in production code).
+tempfile = { workspace = true }
+
+[[test]]
+name = "scope_isolation"
+required-features = ["test-support"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+tempfile = { workspace = true }
+proptest = "1"
+insta = { version = "1", features = ["yaml"] }
+futures = { workspace = true }
+metrics-util = { version = "0.20.1", features = ["debugging"] }
+
+[lints]
+workspace = true

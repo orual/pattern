@@ -8,18 +8,22 @@ repository.workspace = true
 description = "SQLite storage backend for Pattern"
 
 [dependencies]
+# Workspace crates
+pattern-core = { path = "../pattern_core", features = ["sqlite"] }
+smol_str = { workspace = true }
+
 # Async runtime
 tokio = { workspace = true }
+async-trait = { workspace = true }
 
-# Database - bundled SQLite for consistent builds and extension support
-# The "sqlite" feature bundles SQLite; "sqlite-unbundled" would use system lib
-sqlx = { version = "0.8", features = [
-    "runtime-tokio",
-    "sqlite",
-    "migrate",
-    "json",
-    "chrono",
-] }
+# Database - rusqlite with bundled SQLite for consistent builds
+rusqlite = { version = "0.39", features = ["bundled-full", "load_extension", "serde_json"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.33"
+rusqlite_migration = "2.5"
+
+# Vector search extension - bundles C source, compiles via cc
+sqlite-vec = "0.1.9"
 
 # Serialization
 serde = { workspace = true }
@@ -34,24 +38,26 @@ tracing = { workspace = true }
 
 # Utilities
 chrono = { workspace = true, features = ["serde"] }
+jiff = { workspace = true }
 uuid = { workspace = true }
 
 # Loro for CRDT memory blocks
 loro = "1.6"
 
-# Vector search extension - bundles C source, compiles via cc
-sqlite-vec = "0.1.7-alpha.2"
-
-# Pin to match sqlx's bundled sqlite (linkage is semver-exempt per sqlx docs)
-# Required for sqlite3_auto_extension to register sqlite-vec globally
-libsqlite3-sys = "=0.30.1"
-
 # For efficient vector serialization (zero-copy f32 slices to bytes)
 zerocopy = { version = "0.8", features = ["derive"] }
+
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tempfile = "3"
+insta = { version = "1", features = ["yaml"] }
+# Re-specify for integration tests that need direct access.
+rusqlite = { version = "0.39", features = ["bundled-full"] }
+rusqlite_migration = "2.5"
+loro = "1.6"
+serde_json = { workspace = true }
+smol_str = { workspace = true }
 
 [features]
 default = ["vector-search"]

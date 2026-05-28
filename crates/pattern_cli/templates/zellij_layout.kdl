@@ -1,0 +1,32 @@
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        children
+        pane size=1 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+
+    tab name="Pattern" focus=true {
+{% for pane in chat_panes %}
+        pane{% if let Some(pct) = pane.size_pct %} size="{{ pct }}%"{% endif %}{% if let Some(name) = &pane.name %} name="{{ name }}"{% endif %} {
+            command "{{ pane.command }}"
+{% if !pane.args.is_empty() %}
+            args{% for arg in &pane.args %} "{{ arg }}"{% endfor %}
+{% endif %}
+        }
+{% endfor %}
+    }
+{% if let Some(daemon) = &daemon %}
+    tab name="pattern-daemon" {
+        pane {
+            command "{{ daemon.command }}"
+{% if !daemon.args.is_empty() %}
+            args{% for arg in &daemon.args %} "{{ arg }}"{% endfor %}
+{% endif %}
+        }
+    }
+{% endif %}
+}

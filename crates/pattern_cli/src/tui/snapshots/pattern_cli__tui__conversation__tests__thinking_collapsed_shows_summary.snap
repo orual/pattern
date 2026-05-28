@@ -1,0 +1,9 @@
+---
+source: crates/pattern_cli/src/tui/conversation.rs
+expression: output
+---
+[you] Think about this
+
+▸ thinking: Let me consider the options carefully...
+I have thought about it.
+Stop: EndTurn

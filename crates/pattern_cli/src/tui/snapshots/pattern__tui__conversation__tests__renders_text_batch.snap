@@ -1,0 +1,8 @@
+---
+source: crates/pattern_cli/src/tui/conversation.rs
+expression: output
+---
+[you] Hello agent
+
+The answer is 42.
+Stop: EndTurn

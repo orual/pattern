@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Loro document operations for structured memory blocks
 
 use loro::{
@@ -5,8 +11,10 @@ use loro::{
 };
 use serde_json::Value as JsonValue;
 
-use crate::memory::schema::{BlockSchema, FieldType, LogEntrySchema};
-use crate::memory::{BlockMetadata, BlockType};
+use crate::types::memory_types::{
+    BlockMetadata, BlockSchema, CompositeSection, DocumentError, FieldType, LogEntrySchema,
+    MemoryBlockType,
+};
 
 /// Wrapper around LoroDoc for schema-aware operations.
 ///
@@ -23,43 +31,17 @@ pub struct StructuredDocument {
 
     /// Block metadata including schema, permissions, and identity.
     metadata: BlockMetadata,
-}
 
-/// Errors that can occur during document operations
-#[derive(Debug, thiserror::Error)]
-pub enum DocumentError {
-    #[error("Failed to import document: {0}")]
-    ImportFailed(String),
-
-    #[error("Failed to export document: {0}")]
-    ExportFailed(String),
-
-    #[error("Field not found: {0}")]
-    FieldNotFound(String),
-
-    #[error("Schema mismatch: expected {expected}, got {actual}")]
-    SchemaMismatch { expected: String, actual: String },
-
-    #[error("Field '{0}' is read-only and cannot be modified by agent")]
-    ReadOnlyField(String),
-
-    #[error("Section '{0}' is read-only and cannot be modified by agent")]
-    ReadOnlySection(String),
-
-    #[error("Operation '{operation}' not supported for schema {schema}")]
-    InvalidSchemaForOperation { operation: String, schema: String },
-
-    #[error(
-        "Permission denied: {operation} requires {required} permission, but block has {actual}"
-    )]
-    PermissionDenied {
-        operation: String,
-        required: pattern_db::models::MemoryPermission,
-        actual: pattern_db::models::MemoryPermission,
-    },
-
-    #[error("{0}")]
-    Other(String),
+    /// Pending attribution to attach to the next commit. Set via
+    /// `set_attribution` / `auto_attribution`. Mutators (set_text,
+    /// append_text, etc.) read this BEFORE their internal commit:
+    /// if Some, they attach the message to the commit; either way,
+    /// the field is cleared after the commit fires.
+    ///
+    /// Wrapped in Arc<Mutex> so derived Clone gives shared state
+    /// across StructuredDocument clones (consistent with LoroDoc's
+    /// reference-clone semantics).
+    pending_attribution: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl StructuredDocument {
@@ -71,6 +53,7 @@ impl StructuredDocument {
             doc: LoroDoc::new(),
             accessor_agent_id,
             metadata,
+            pending_attribution: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -89,6 +72,7 @@ impl StructuredDocument {
             doc,
             accessor_agent_id,
             metadata,
+            pending_attribution: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -106,6 +90,7 @@ impl StructuredDocument {
             doc,
             accessor_agent_id: None,
             metadata,
+            pending_attribution: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -135,7 +120,7 @@ impl StructuredDocument {
     #[deprecated(note = "Use new_with_metadata instead")]
     pub fn new_with_permission(
         schema: BlockSchema,
-        permission: pattern_db::models::MemoryPermission,
+        permission: crate::types::memory_types::MemoryPermission,
     ) -> Self {
         let mut metadata = BlockMetadata::standalone(schema);
         metadata.permission = permission;
@@ -147,7 +132,7 @@ impl StructuredDocument {
     pub fn from_snapshot_with_permission(
         snapshot: &[u8],
         schema: BlockSchema,
-        permission: pattern_db::models::MemoryPermission,
+        permission: crate::types::memory_types::MemoryPermission,
     ) -> Result<Self, DocumentError> {
         let mut metadata = BlockMetadata::standalone(schema);
         metadata.permission = permission;
@@ -160,12 +145,90 @@ impl StructuredDocument {
         Self::from_snapshot_with_metadata(snapshot, BlockMetadata::standalone(schema), None)
     }
 
-    /// Apply updates to the document
+    /// Apply updates to the document.
+    ///
+    /// Accepts any byte slice produced by `LoroDoc::export_snapshot()` or
+    /// `LoroDoc::export(ExportMode::updates(...))`. Used by the lightweight
+    /// fork `merge_back` path.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::memory::StructuredDocument;
+    ///
+    /// let source = StructuredDocument::new_text();
+    /// source.set_text("hello", true).unwrap();
+    /// let snapshot = source.export_snapshot().unwrap();
+    ///
+    /// let target = StructuredDocument::new_text();
+    /// target.apply_updates(&snapshot).unwrap();
+    /// assert_eq!(target.text_content(), "hello");
+    /// ```
     pub fn apply_updates(&self, updates: &[u8]) -> Result<(), DocumentError> {
         self.doc
             .import(updates)
             .map_err(|e| DocumentError::ImportFailed(e.to_string()))?;
         Ok(())
+    }
+
+    // ========== Fork / isolation helpers ==========
+
+    /// Fork the underlying `LoroDoc`, returning a new `StructuredDocument` whose
+    /// CRDT state diverges from the parent after this point.
+    ///
+    /// The forked document inherits all committed ops from the source at fork
+    /// time. Subsequent writes on either side do not propagate until an explicit
+    /// `apply_updates` call imports the snapshot. Metadata fields (label, schema,
+    /// permissions) are cloned verbatim; use [`retag_owner`](Self::retag_owner)
+    /// to rewrite ownership on the child.
+    pub fn fork(&self) -> Self {
+        let forked_doc = self.doc.fork();
+        Self::from_forked_doc(forked_doc, self.metadata_snapshot())
+    }
+
+    /// Construct a `StructuredDocument` from a pre-forked `LoroDoc` and a
+    /// metadata snapshot.
+    ///
+    /// The `accessor_agent_id` is left blank on the forked copy; the caller
+    /// may set it after construction if attribution is required.
+    pub fn from_forked_doc(doc: LoroDoc, metadata: BlockMetadata) -> Self {
+        Self {
+            doc,
+            accessor_agent_id: None,
+            metadata,
+            pending_attribution: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Clone the current block metadata.
+    ///
+    /// Used by [`fork`](Self::fork) to carry metadata into the child without
+    /// holding a borrow across the `LoroDoc::fork()` call.
+    pub fn metadata_snapshot(&self) -> BlockMetadata {
+        self.metadata.clone()
+    }
+
+    /// Rewrite the owning agent recorded in the embedded metadata.
+    ///
+    /// Called by `MemoryCache::fork_for_child` after forking each block to
+    /// attribute the forked copy to the child agent rather than the parent.
+    pub fn retag_owner(&mut self, new_owner: &str) {
+        self.metadata.agent_id = new_owner.to_string();
+    }
+
+    /// Override the Loro peer ID used to author new operations on this document.
+    ///
+    /// Normally the Loro runtime assigns a random peer ID. This method allows
+    /// callers to set a deterministic value — useful for reproducible test
+    /// fixtures, migration tools, and scenarios where you need consistent
+    /// vector-clock ordering across multiple documents.
+    ///
+    /// Returns an error if the document already has uncommitted ops with a
+    /// different peer (see `loro::LoroDoc::set_peer_id`).
+    pub fn set_peer_id(&self, peer_id: u64) -> Result<(), DocumentError> {
+        self.doc
+            .set_peer_id(peer_id)
+            .map_err(|e| DocumentError::Other(e.to_string()))
     }
 
     // ========== Metadata Accessors ==========
@@ -186,12 +249,12 @@ impl StructuredDocument {
     }
 
     /// Get the effective permission for this document.
-    pub fn permission(&self) -> pattern_db::models::MemoryPermission {
+    pub fn permission(&self) -> crate::types::memory_types::MemoryPermission {
         self.metadata.permission
     }
 
     /// Set the effective permission for this document (DB is source of truth).
-    pub fn set_permission(&mut self, permission: pattern_db::models::MemoryPermission) {
+    pub fn set_permission(&mut self, permission: crate::types::memory_types::MemoryPermission) {
         self.metadata.permission = permission;
     }
 
@@ -229,7 +292,7 @@ impl StructuredDocument {
     }
 
     /// Get the block type.
-    pub fn block_type(&self) -> BlockType {
+    pub fn block_type(&self) -> MemoryBlockType {
         self.metadata.block_type
     }
 
@@ -259,29 +322,31 @@ impl StructuredDocument {
     /// Returns Ok(()) if allowed, or PermissionDenied error if not.
     fn check_permission(
         &self,
-        op: pattern_db::models::MemoryOp,
+        op: crate::types::memory_types::MemoryOp,
         is_system: bool,
     ) -> Result<(), DocumentError> {
         if is_system {
             return Ok(());
         }
 
-        let gate = pattern_db::models::MemoryGate::check(op, self.metadata.permission);
+        let gate = crate::types::memory_types::MemoryGate::check(op, self.metadata.permission);
         if gate.is_allowed() {
             Ok(())
         } else {
             // Determine required permission based on operation
             let required = match op {
-                pattern_db::models::MemoryOp::Read => {
-                    pattern_db::models::MemoryPermission::ReadOnly
+                crate::types::memory_types::MemoryOp::Read => {
+                    crate::types::memory_types::MemoryPermission::ReadOnly
                 }
-                pattern_db::models::MemoryOp::Append => {
-                    pattern_db::models::MemoryPermission::Append
+                crate::types::memory_types::MemoryOp::Append => {
+                    crate::types::memory_types::MemoryPermission::Append
                 }
-                pattern_db::models::MemoryOp::Overwrite => {
-                    pattern_db::models::MemoryPermission::ReadWrite
+                crate::types::memory_types::MemoryOp::Overwrite => {
+                    crate::types::memory_types::MemoryPermission::ReadWrite
                 }
-                pattern_db::models::MemoryOp::Delete => pattern_db::models::MemoryPermission::Admin,
+                crate::types::memory_types::MemoryOp::Delete => {
+                    crate::types::memory_types::MemoryPermission::Admin
+                }
             };
             Err(DocumentError::PermissionDenied {
                 operation: format!("{:?}", op),
@@ -302,18 +367,18 @@ impl StructuredDocument {
     /// Set text content (replaces all).
     /// If is_system is false, checks that the document has Overwrite permission.
     pub fn set_text(&self, content: &str, is_system: bool) -> Result<(), DocumentError> {
-        self.check_permission(pattern_db::models::MemoryOp::Overwrite, is_system)?;
+        self.check_permission(crate::types::memory_types::MemoryOp::Overwrite, is_system)?;
 
         let text = self.doc.get_text("content");
         let current_len = text.len_unicode();
 
-        // Delete all current content, then insert new
         if current_len > 0 {
             text.delete(0, current_len)
                 .map_err(|e| DocumentError::Other(e.to_string()))?;
         }
         text.insert(0, content)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
 
         Ok(())
     }
@@ -321,12 +386,19 @@ impl StructuredDocument {
     /// Append text to existing content.
     /// If is_system is false, checks that the document has Append permission.
     pub fn append_text(&self, content: &str, is_system: bool) -> Result<(), DocumentError> {
-        self.check_permission(pattern_db::models::MemoryOp::Append, is_system)?;
+        self.check_permission(crate::types::memory_types::MemoryOp::Append, is_system)?;
 
         let text = self.doc.get_text("content");
         let pos = text.len_unicode();
         text.insert(pos, content)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        // Loro `text.insert` adds ops to a pending buffer; until `commit` is
+        // called, they don't enter the oplog. Without this, the immediately-
+        // following `persist_block` would call `export_updates_since(last
+        // _persisted_frontier)` on a frontier that doesn't include these ops,
+        // produce an empty blob, skip storage, and silently advance the
+        // frontier — losing this append entirely.
+        self.commit();
         Ok(())
     }
 
@@ -370,7 +442,7 @@ impl StructuredDocument {
         replace: &str,
         is_system: bool,
     ) -> Result<bool, DocumentError> {
-        self.check_permission(pattern_db::models::MemoryOp::Overwrite, is_system)?;
+        self.check_permission(crate::types::memory_types::MemoryOp::Overwrite, is_system)?;
 
         let text = self.doc.get_text("content");
         let current = text.to_string();
@@ -395,6 +467,7 @@ impl StructuredDocument {
             // Surgical splice: delete unicode_len chars and insert replace
             text.splice(unicode_pos, unicode_len, replace)
                 .map_err(|e| DocumentError::Other(format!("Splice failed: {}", e)))?;
+            self.commit();
             Ok(true)
         } else {
             Ok(false)
@@ -424,16 +497,15 @@ impl StructuredDocument {
         is_system: bool,
     ) -> Result<(), DocumentError> {
         // Check read-only if not system
-        if !is_system {
-            if let Some(true) = self.metadata.schema.is_field_read_only(field) {
-                return Err(DocumentError::ReadOnlyField(field.to_string()));
-            }
+        if !is_system && let Some(true) = self.metadata.schema.is_field_read_only(field) {
+            return Err(DocumentError::ReadOnlyField(field.to_string()));
         }
 
         let map = self.doc.get_map("fields");
         let loro_value = json_to_loro(&value);
         map.insert(field, loro_value)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(())
     }
 
@@ -474,16 +546,15 @@ impl StructuredDocument {
         is_system: bool,
     ) -> Result<(), DocumentError> {
         // Check read-only if not system
-        if !is_system {
-            if let Some(true) = self.metadata.schema.is_field_read_only(field) {
-                return Err(DocumentError::ReadOnlyField(field.to_string()));
-            }
+        if !is_system && let Some(true) = self.metadata.schema.is_field_read_only(field) {
+            return Err(DocumentError::ReadOnlyField(field.to_string()));
         }
 
         let list = self.doc.get_list(format!("list_{field}"));
         let loro_value = json_to_loro(&item);
         list.push(loro_value)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(())
     }
 
@@ -496,10 +567,8 @@ impl StructuredDocument {
         is_system: bool,
     ) -> Result<(), DocumentError> {
         // Check read-only if not system
-        if !is_system {
-            if let Some(true) = self.metadata.schema.is_field_read_only(field) {
-                return Err(DocumentError::ReadOnlyField(field.to_string()));
-            }
+        if !is_system && let Some(true) = self.metadata.schema.is_field_read_only(field) {
+            return Err(DocumentError::ReadOnlyField(field.to_string()));
         }
 
         let list = self.doc.get_list(format!("list_{field}"));
@@ -512,6 +581,7 @@ impl StructuredDocument {
         }
         list.delete(index, 1)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(())
     }
 
@@ -532,16 +602,15 @@ impl StructuredDocument {
         is_system: bool,
     ) -> Result<i64, DocumentError> {
         // Check read-only if not system
-        if !is_system {
-            if let Some(true) = self.metadata.schema.is_field_read_only(field) {
-                return Err(DocumentError::ReadOnlyField(field.to_string()));
-            }
+        if !is_system && let Some(true) = self.metadata.schema.is_field_read_only(field) {
+            return Err(DocumentError::ReadOnlyField(field.to_string()));
         }
 
         let counter = self.doc.get_counter(format!("counter_{field}"));
         counter
             .increment(delta as f64)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(counter.get_value() as i64)
     }
 
@@ -558,10 +627,8 @@ impl StructuredDocument {
         is_system: bool,
     ) -> Result<(), DocumentError> {
         // Check section read-only permission
-        if !is_system {
-            if let Some(true) = self.metadata.schema.is_section_read_only(section) {
-                return Err(DocumentError::ReadOnlySection(section.to_string()));
-            }
+        if !is_system && let Some(true) = self.metadata.schema.is_section_read_only(section) {
+            return Err(DocumentError::ReadOnlySection(section.to_string()));
         }
 
         // Get section schema and check field read-only permission
@@ -571,10 +638,8 @@ impl StructuredDocument {
             .get_section_schema(section)
             .ok_or_else(|| DocumentError::FieldNotFound(section.to_string()))?;
 
-        if !is_system {
-            if let Some(true) = section_schema.is_field_read_only(field) {
-                return Err(DocumentError::ReadOnlyField(field.to_string()));
-            }
+        if !is_system && let Some(true) = section_schema.is_field_read_only(field) {
+            return Err(DocumentError::ReadOnlyField(field.to_string()));
         }
 
         // Get the section's map container and set the field
@@ -583,7 +648,7 @@ impl StructuredDocument {
         let loro_value = json_to_loro(&value.into());
         map.insert(field, loro_value)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
-
+        self.commit();
         Ok(())
     }
 
@@ -596,10 +661,8 @@ impl StructuredDocument {
         is_system: bool,
     ) -> Result<(), DocumentError> {
         // Check section read-only permission
-        if !is_system {
-            if let Some(true) = self.metadata.schema.is_section_read_only(section) {
-                return Err(DocumentError::ReadOnlySection(section.to_string()));
-            }
+        if !is_system && let Some(true) = self.metadata.schema.is_section_read_only(section) {
+            return Err(DocumentError::ReadOnlySection(section.to_string()));
         }
 
         // Verify section exists
@@ -621,7 +684,7 @@ impl StructuredDocument {
         }
         text.insert(0, content)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
-
+        self.commit();
         Ok(())
     }
 
@@ -659,12 +722,13 @@ impl StructuredDocument {
     /// Push an item to the end of the list.
     /// If is_system is false, checks that the document has Append permission.
     pub fn push_item(&self, item: JsonValue, is_system: bool) -> Result<(), DocumentError> {
-        self.check_permission(pattern_db::models::MemoryOp::Append, is_system)?;
+        self.check_permission(crate::types::memory_types::MemoryOp::Append, is_system)?;
 
         let list = self.doc.get_list("items");
         let loro_value = json_to_loro(&item);
         list.push(loro_value)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(())
     }
 
@@ -676,7 +740,7 @@ impl StructuredDocument {
         item: JsonValue,
         is_system: bool,
     ) -> Result<(), DocumentError> {
-        self.check_permission(pattern_db::models::MemoryOp::Append, is_system)?;
+        self.check_permission(crate::types::memory_types::MemoryOp::Append, is_system)?;
 
         let list = self.doc.get_list("items");
         if index > list.len() {
@@ -689,13 +753,14 @@ impl StructuredDocument {
         let loro_value = json_to_loro(&item);
         list.insert(index, loro_value)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(())
     }
 
     /// Delete an item at a specific index.
     /// If is_system is false, checks that the document has Delete permission (Admin).
     pub fn delete_item(&self, index: usize, is_system: bool) -> Result<(), DocumentError> {
-        self.check_permission(pattern_db::models::MemoryOp::Delete, is_system)?;
+        self.check_permission(crate::types::memory_types::MemoryOp::Delete, is_system)?;
 
         let list = self.doc.get_list("items");
         if index >= list.len() {
@@ -707,6 +772,7 @@ impl StructuredDocument {
         }
         list.delete(index, 1)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(())
     }
 
@@ -724,7 +790,7 @@ impl StructuredDocument {
         let len = list.len();
 
         // Determine how many to return
-        let display_limit = limit.or_else(|| {
+        let display_limit = limit.or({
             if let BlockSchema::Log { display_limit, .. } = &self.metadata.schema {
                 Some(*display_limit)
             } else {
@@ -748,12 +814,13 @@ impl StructuredDocument {
     /// Append a log entry.
     /// If is_system is false, checks that the document has Append permission.
     pub fn append_log_entry(&self, entry: JsonValue, is_system: bool) -> Result<(), DocumentError> {
-        self.check_permission(pattern_db::models::MemoryOp::Append, is_system)?;
+        self.check_permission(crate::types::memory_types::MemoryOp::Append, is_system)?;
 
         let list = self.doc.get_list("entries");
         let loro_value = json_to_loro(&entry);
         list.push(loro_value)
             .map_err(|e| DocumentError::Other(e.to_string()))?;
+        self.commit();
         Ok(())
     }
 
@@ -785,48 +852,6 @@ impl StructuredDocument {
     pub fn export_as_json(&self) -> Option<JsonValue> {
         let deep_value = self.doc.get_deep_value();
         loro_to_json(&deep_value)
-    }
-
-    /// Export the document state as a TOML string for editing.
-    ///
-    /// The format depends on the schema:
-    /// - Text: returns the raw text content
-    /// - Map/List/Log/Composite: returns TOML representation
-    pub fn export_for_editing(&self) -> String {
-        match &self.metadata.schema {
-            BlockSchema::Text { .. } => {
-                // For text, just return the rendered content
-                self.render()
-            }
-            _ => {
-                // For structured schemas, export as TOML
-                if let Some(json) = self.export_as_json() {
-                    // Convert JSON to TOML
-                    match toml::to_string_pretty(&json) {
-                        Ok(toml_str) => {
-                            // Add schema comment at top
-                            let schema_name = match &self.metadata.schema {
-                                BlockSchema::Text { .. } => "Text",
-                                BlockSchema::Map { .. } => "Map",
-                                BlockSchema::List { .. } => "List",
-                                BlockSchema::Log { .. } => "Log",
-                                BlockSchema::Composite { .. } => "Composite",
-                            };
-                            format!(
-                                "# Schema: {}\n# Edit the values below, then save.\n\n{}",
-                                schema_name, toml_str
-                            )
-                        }
-                        Err(_) => {
-                            // Fall back to JSON if TOML conversion fails
-                            serde_json::to_string_pretty(&json).unwrap_or_else(|_| self.render())
-                        }
-                    }
-                } else {
-                    self.render()
-                }
-            }
-        }
     }
 
     /// Import content from a JSON value based on schema.
@@ -913,6 +938,58 @@ impl StructuredDocument {
                     self.append_log_entry(entry, true)?;
                 }
             }
+            BlockSchema::TaskList { .. } => {
+                // TaskList: expect array or object with "items" field.
+                let items = if let Some(arr) = value.as_array() {
+                    arr.clone()
+                } else if let Some(items) = value.get("items").and_then(|v| v.as_array()) {
+                    items.clone()
+                } else {
+                    return Err(DocumentError::Other(
+                        "TaskList schema expects array or object with 'items' field".to_string(),
+                    ));
+                };
+
+                // Clear the existing movable list and re-insert each item as
+                // a nested LoroMap CONTAINER (not a value-map snapshot). This
+                // preserves field-level CRDT merge semantics on subsequent
+                // in-place mutations. `comments` and `blocks` nested lists
+                // are likewise stored as LoroList containers for correct
+                // multi-writer append semantics.
+                let list = self.doc.get_movable_list("items");
+                for i in (0..list.len()).rev() {
+                    let _ = list.delete(i, 1);
+                }
+                for item in items {
+                    let Some(obj) = item.as_object() else {
+                        return Err(DocumentError::Other(format!(
+                            "TaskList item must be a JSON object, got: {item}"
+                        )));
+                    };
+                    let item_map = list
+                        .push_container(loro::LoroMap::new())
+                        .map_err(|e| DocumentError::Other(e.to_string()))?;
+                    for (key, value) in obj {
+                        match (key.as_str(), value) {
+                            ("comments" | "blocks", JsonValue::Array(arr)) => {
+                                let nested = item_map
+                                    .insert_container(key, loro::LoroList::new())
+                                    .map_err(|e| DocumentError::Other(e.to_string()))?;
+                                for elem in arr {
+                                    nested
+                                        .push(json_to_loro(elem))
+                                        .map_err(|e| DocumentError::Other(e.to_string()))?;
+                                }
+                            }
+                            _ => {
+                                item_map
+                                    .insert(key, json_to_loro(value))
+                                    .map_err(|e| DocumentError::Other(e.to_string()))?;
+                            }
+                        }
+                    }
+                }
+            }
             BlockSchema::Composite { sections } => {
                 // Composite: expect object with section keys
                 let obj = value.as_object().ok_or_else(|| {
@@ -940,7 +1017,64 @@ impl StructuredDocument {
                     }
                 }
             }
+            BlockSchema::Skill { .. } => {
+                // Skill: treat the body as text content, mirroring the Text arm.
+                //
+                // The YAML frontmatter lives in the "metadata" LoroMap and is
+                // populated by `markdown_skill::write_skill_to_loro_doc` on the
+                // external-edit inbound path. `import_from_json` handles only
+                // the bare body string (for programmatic creation/seeding of a
+                // body without metadata); it intentionally does NOT replicate
+                // the loro_bridge logic.
+                //
+                // Accepted input shapes:
+                //   - `Value::String(body)` — the body string directly.
+                //   - `Value::Object` with exactly one `"body"` key — an
+                //     object that contains ONLY the body.
+                //
+                // Rejected: any object with keys beyond `"body"`. Callers that
+                // need to write metadata must use `write_skill_to_loro_doc`.
+                let text = if let Some(s) = value.as_str() {
+                    s.to_string()
+                } else if let Some(obj) = value.as_object() {
+                    // Check for stray keys — any key other than "body" means
+                    // the caller is trying to write structured metadata through
+                    // the wrong API path.
+                    let extra_keys: Vec<&str> = obj
+                        .keys()
+                        .filter(|k| *k != "body")
+                        .map(|k| k.as_str())
+                        .collect();
+                    if !extra_keys.is_empty() {
+                        return Err(DocumentError::Other(format!(
+                            "Skill blocks with structured metadata must use \
+                             write_skill_to_loro_doc; import_from_json only accepts \
+                             bare body strings. Got keys: {{{}}}",
+                            extra_keys.join(", ")
+                        )));
+                    }
+                    obj.get("body")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            DocumentError::Other(
+                                "Skill schema object must contain a string 'body' field"
+                                    .to_string(),
+                            )
+                        })?
+                        .to_string()
+                } else {
+                    return Err(DocumentError::Other(
+                        "Skill schema expects a string body or an object with a single 'body' field"
+                            .to_string(),
+                    ));
+                };
+                let body_text = self.doc.get_text("content");
+                body_text
+                    .update(&text, Default::default())
+                    .map_err(|e| DocumentError::Other(e.to_string()))?;
+            }
         }
+        self.commit();
         Ok(())
     }
 
@@ -995,6 +1129,10 @@ impl StructuredDocument {
             BlockSchema::List { .. } => self.doc.get_list("items").id(),
             BlockSchema::Log { .. } => self.doc.get_list("entries").id(),
             BlockSchema::Composite { .. } => self.doc.get_map("root").id(),
+            BlockSchema::TaskList { .. } => self.doc.get_movable_list("items").id(),
+            // Skill blocks store the markdown body in a LoroText container named
+            // "body", mirroring the Text variant's "content" container convention.
+            BlockSchema::Skill { .. } => self.doc.get_text("content").id(),
         };
         self.doc.subscribe(&container_id, callback)
     }
@@ -1003,16 +1141,28 @@ impl StructuredDocument {
     ///
     /// Changes made to containers (text, map, list, counter) are batched until
     /// commit is called. This triggers all subscriptions with the accumulated changes.
+    /// If `pending_attribution` is set, attaches it as the commit message and
+    /// clears the pending field. Mutators call this internally so the
+    /// attribution flows through to the change record.
     pub fn commit(&self) {
+        if let Some(msg) = self.pending_attribution.lock().unwrap().take() {
+            self.doc.set_next_commit_message(&msg);
+        }
         self.doc.commit();
     }
 
     /// Set attribution for the next commit.
     ///
-    /// The attribution message will be included in the change metadata,
-    /// allowing tracking of who or what made the change.
+    /// The attribution message is staged on the StructuredDocument and
+    /// attached to the next commit (whether triggered explicitly via
+    /// `commit()` or implicitly via a mutator like `set_text` / `append_text`).
+    /// Cleared after the commit fires.
+    ///
+    /// Order matters: call this BEFORE the mutation you want attributed.
+    /// Mutators commit internally, so a post-mutation set_attribution would
+    /// attach to a no-op subsequent commit.
     pub fn set_attribution(&self, attribution: &str) {
-        self.doc.set_next_commit_message(attribution);
+        *self.pending_attribution.lock().unwrap() = Some(attribution.to_string());
     }
 
     /// Commit with an attribution message.
@@ -1022,6 +1172,9 @@ impl StructuredDocument {
     pub fn commit_with_attribution(&self, attribution: &str) {
         self.doc.set_next_commit_message(attribution);
         self.doc.commit();
+        // Clear any unrelated pending attribution (we just committed with
+        // the explicit message).
+        *self.pending_attribution.lock().unwrap() = None;
     }
 
     // ========== Rendering ==========
@@ -1032,7 +1185,7 @@ impl StructuredDocument {
     }
 
     /// Render a Composite schema's sections recursively
-    fn render_composite(&self, sections: &[crate::memory::schema::CompositeSection]) -> String {
+    fn render_composite(&self, sections: &[CompositeSection]) -> String {
         let mut output = Vec::new();
 
         for section in sections {
@@ -1076,8 +1229,7 @@ impl StructuredDocument {
                                 total_lines
                             )
                         } else {
-                            let visible: Vec<&str> =
-                                lines[start_idx..end_idx].iter().copied().collect();
+                            let visible: Vec<&str> = lines[start_idx..end_idx].to_vec();
                             let header = format!(
                                 "[Showing lines {}-{} of {}]\n",
                                 start_idx + 1,
@@ -1170,6 +1322,255 @@ impl StructuredDocument {
             }
 
             BlockSchema::Composite { sections } => self.render_composite(sections),
+
+            BlockSchema::TaskList {
+                display_limit,
+                default_status,
+                default_owner,
+            } => {
+                let items_list = self.doc.get_movable_list("items");
+                let total = items_list.len();
+                let shown = display_limit.map(|lim| lim.min(total)).unwrap_or(total);
+                let mut out = String::new();
+                out.push_str(&format!("TaskList ({total} items"));
+                if shown < total {
+                    out.push_str(&format!(", showing {shown}"));
+                }
+                if let Some(s) = default_status {
+                    out.push_str(&format!("; default_status={s:?}"));
+                }
+                if let Some(o) = default_owner {
+                    out.push_str(&format!("; default_owner=@{o}"));
+                }
+                out.push_str(")\n");
+
+                // Use get_deep_value() to get fully-resolved LoroValues
+                // (LoroMovableList::get returns ValueOrContainer, not LoroValue).
+                let deep = items_list.get_deep_value();
+                let all_items = match &deep {
+                    LoroValue::List(l) => l.as_ref(),
+                    _ => &[] as &[LoroValue],
+                };
+
+                for value in all_items.iter().take(shown) {
+                    if let LoroValue::Map(map) = value {
+                        let id = map
+                            .get("id")
+                            .and_then(|v| match v {
+                                LoroValue::String(s) => Some(s.as_ref()),
+                                _ => None,
+                            })
+                            .unwrap_or("?");
+                        let subject = map
+                            .get("subject")
+                            .and_then(|v| match v {
+                                LoroValue::String(s) => Some(s.as_ref()),
+                                _ => None,
+                            })
+                            .unwrap_or("");
+                        let status = map
+                            .get("status")
+                            .and_then(|v| match v {
+                                LoroValue::String(s) => Some(s.to_string()),
+                                _ => None,
+                            })
+                            .unwrap_or_default();
+                        let owner = map.get("owner").and_then(|v| match v {
+                            LoroValue::String(s) => Some(s.to_string()),
+                            _ => None,
+                        });
+                        let active_form = map.get("active_form").and_then(|v| match v {
+                            LoroValue::String(s) => Some(s.to_string()),
+                            _ => None,
+                        });
+                        let description = map
+                            .get("description")
+                            .and_then(|v| match v {
+                                LoroValue::String(s) => Some(s.to_string()),
+                                _ => None,
+                            })
+                            .unwrap_or_default();
+
+                        // Build the item line.
+                        // subject and active_form are rendered with Debug-format
+                        // quoting ({:?}) so that values containing `"` are escaped
+                        // rather than producing malformed output.
+                        let mut line = format!("- id={id} subject={subject:?} status={status}");
+                        if let Some(ref o) = owner {
+                            // AgentId values are stored without a leading `@`
+                            // (the convention in pattern_core types/ids.rs).
+                            // We prepend it here only at render time. Strip any
+                            // pre-existing `@` first so we never emit `@@agent`.
+                            let bare = o.trim_start_matches('@');
+                            line.push_str(&format!(" owner=@{bare}"));
+                        }
+                        if let Some(ref af) = active_form {
+                            line.push_str(&format!(" active_form={af:?}"));
+                        }
+                        out.push_str(&line);
+                        out.push('\n');
+
+                        // Blocks.
+                        if let Some(LoroValue::List(blocks)) = map.get("blocks")
+                            && !blocks.is_empty()
+                        {
+                            let block_strs: Vec<String> = blocks
+                                .iter()
+                                .filter_map(|b| match b {
+                                    LoroValue::Map(m) => {
+                                        let handle = m.get("block").and_then(|v| match v {
+                                            LoroValue::String(s) => Some(s.to_string()),
+                                            _ => None,
+                                        })?;
+                                        let item_id = m.get("task_item").and_then(|v| match v {
+                                            LoroValue::String(s) => Some(s.to_string()),
+                                            _ => None,
+                                        });
+                                        Some(match item_id {
+                                            Some(id) => {
+                                                format!("(block)\"{handle}#{id}\"")
+                                            }
+                                            None => format!("(block)\"{handle}\""),
+                                        })
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            if !block_strs.is_empty() {
+                                out.push_str(&format!("    blocks: {}\n", block_strs.join(", ")));
+                            }
+                        }
+
+                        // Description excerpt
+                        if !description.is_empty() {
+                            out.push_str(&format!("    description: {description}\n"));
+                        }
+                    } else {
+                        // Non-map item — render as debug.
+                        out.push_str(&format!("- {value:?}\n"));
+                    }
+                }
+
+                if let Some(lim) = display_limit
+                    && shown < total
+                {
+                    out.push_str(&format!(
+                        "\n... {} more items not shown (display_limit={})\n",
+                        total - shown,
+                        lim,
+                    ));
+                }
+
+                out
+            }
+
+            BlockSchema::Skill { .. } => {
+                // Render name + description + keywords + body into a single
+                // preview string so all fields are covered by the FTS5 index.
+                // The FTS5 `content_preview` column is updated from the return
+                // value of this function via `update_block_preview`.
+                //
+                // Metadata lives in a `"metadata"` LoroMap whose scalar fields
+                // are stored as plain LoroValue strings. We project them here
+                // with a minimal inline projection rather than importing
+                // `pattern_memory::fs::markdown_skill::project_metadata_from_loro`
+                // (which would create a circular dependency — pattern_core must
+                // never depend on pattern_memory). The inline logic is strictly
+                // read-only and tolerates missing or malformed fields by
+                // substituting empty strings.
+                let deep = self.doc.get_deep_value();
+                let mut out = String::new();
+
+                let metadata_map = match &deep {
+                    LoroValue::Map(root) => match root.get("metadata") {
+                        Some(LoroValue::Map(m)) => Some(m.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+
+                if let Some(meta) = &metadata_map {
+                    // Name field.
+                    if let Some(LoroValue::String(name)) = meta.get("name") {
+                        out.push_str(name);
+                        out.push('\n');
+                    }
+
+                    // Description field (optional — stored as String or Null).
+                    if let Some(LoroValue::String(desc)) = meta.get("description") {
+                        out.push_str(desc);
+                        out.push('\n');
+                    }
+
+                    // Keywords — stored as a JSON-encoded array string.
+                    // Missing `keywords_json` is valid (means no keywords);
+                    // only a present-but-malformed or wrong-type value fires
+                    // the metric.
+                    if let Some(LoroValue::String(kw_json)) = meta.get("keywords_json") {
+                        match serde_json::from_str::<serde_json::Value>(kw_json) {
+                            Ok(serde_json::Value::Array(kws)) => {
+                                let joined: Vec<&str> =
+                                    kws.iter().filter_map(|v| v.as_str()).collect();
+                                if !joined.is_empty() {
+                                    out.push_str(&joined.join(" "));
+                                    out.push('\n');
+                                }
+                            }
+                            Ok(_) | Err(_) => {
+                                // keywords_json contains unparseable JSON or a
+                                // non-array JSON value. Emit a warning so the
+                                // condition is observable in production.
+                                // Fires with `kind=malformed` label so the
+                                // metric time-series is symmetric with the
+                                // wrong-type branch below.
+                                metrics::counter!(
+                                    "memory.skill.render_keywords_json_failed",
+                                    "kind" => "malformed"
+                                )
+                                .increment(1);
+                                tracing::warn!(
+                                    block_id = %self.metadata().id,
+                                    "Skill block 'keywords_json' could not be parsed as a JSON array; keywords omitted from render"
+                                );
+                            }
+                        }
+                    } else if let Some(other) = meta.get("keywords_json") {
+                        // keywords_json is present but stored as a non-string
+                        // LoroValue — this indicates a schema corruption or a
+                        // bug in the writer path. Fire a metric with a
+                        // distinct label so it's distinguishable from the
+                        // JSON-parse-failure case above.
+                        metrics::counter!(
+                            "memory.skill.render_keywords_json_failed",
+                            "kind" => "wrong_type"
+                        )
+                        .increment(1);
+                        tracing::warn!(
+                            block_id = %self.metadata().id,
+                            loro_kind = ?std::mem::discriminant(other),
+                            "Skill block 'keywords_json' has unexpected non-string LoroValue; \
+                             keywords omitted from render"
+                        );
+                    }
+                }
+
+                // Body text — read from "content" (unified container),
+                // falling back to "body" for legacy skill blocks.
+                let body = {
+                    let content = self.doc.get_text("content").to_string();
+                    if content.is_empty() {
+                        self.doc.get_text("body").to_string()
+                    } else {
+                        content
+                    }
+                };
+                if !body.is_empty() {
+                    out.push('\n');
+                    out.push_str(&body);
+                }
+
+                out
+            }
         }
     }
 }
@@ -1259,17 +1660,17 @@ fn format_log_entry(entry: &JsonValue, schema: &LogEntrySchema) -> String {
         let mut parts = Vec::new();
 
         // Add timestamp if present and enabled in schema
-        if schema.timestamp {
-            if let Some(timestamp) = obj.get("timestamp").and_then(|v| v.as_str()) {
-                parts.push(format!("[{}]", timestamp));
-            }
+        if schema.timestamp
+            && let Some(timestamp) = obj.get("timestamp").and_then(|v| v.as_str())
+        {
+            parts.push(format!("[{}]", timestamp));
         }
 
         // Add agent_id if present and enabled in schema
-        if schema.agent_id {
-            if let Some(agent_id) = obj.get("agent_id").and_then(|v| v.as_str()) {
-                parts.push(format!("({})", agent_id));
-            }
+        if schema.agent_id
+            && let Some(agent_id) = obj.get("agent_id").and_then(|v| v.as_str())
+        {
+            parts.push(format!("({})", agent_id));
         }
 
         // Add other fields
@@ -1308,7 +1709,7 @@ pub fn text_from_snapshot(snapshot: &[u8]) -> Result<String, DocumentError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::schema::{FieldDef, LogEntrySchema};
+    use crate::types::memory_types::{FieldDef, LogEntrySchema};
 
     #[test]
     fn test_text_document() {
@@ -1676,7 +2077,7 @@ mod tests {
 
     #[test]
     fn test_structured_document_section_operations() {
-        use crate::memory::schema::CompositeSection;
+        use crate::types::memory_types::CompositeSection;
 
         let schema = BlockSchema::Composite {
             sections: vec![
@@ -1725,7 +2126,7 @@ mod tests {
 
     #[test]
     fn test_section_field_level_read_only() {
-        use crate::memory::schema::CompositeSection;
+        use crate::types::memory_types::CompositeSection;
 
         let schema = BlockSchema::Composite {
             sections: vec![CompositeSection {
@@ -1784,7 +2185,7 @@ mod tests {
 
     #[test]
     fn test_section_not_found() {
-        use crate::memory::schema::CompositeSection;
+        use crate::types::memory_types::CompositeSection;
 
         let schema = BlockSchema::Composite {
             sections: vec![CompositeSection {
@@ -1925,7 +2326,7 @@ mod tests {
 
     #[test]
     fn test_render_composite_read_only_section_indicator() {
-        use crate::memory::schema::CompositeSection;
+        use crate::types::memory_types::CompositeSection;
 
         let schema = BlockSchema::Composite {
             sections: vec![
@@ -2003,4 +2404,299 @@ mod tests {
         // Subscription should have fired
         assert!(changed.load(Ordering::SeqCst));
     }
+
+    // ========== TaskList schema dispatch tests (Task 8) ==========
+
+    fn make_task_list_schema() -> BlockSchema {
+        BlockSchema::TaskList {
+            default_owner: None,
+            default_status: Some(crate::types::memory_types::TaskStatus::Pending),
+            display_limit: Some(3),
+        }
+    }
+
+    fn make_task_item_json(id: &str, subject: &str, status: &str) -> JsonValue {
+        serde_json::json!({
+            "id": id,
+            "subject": subject,
+            "description": "",
+            "status": status,
+            "blocks": [],
+            "metadata": {},
+            "comments": [],
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        })
+    }
+
+    #[test]
+    fn test_task_list_import_from_json_populates_movable_list() {
+        let doc = StructuredDocument::new(make_task_list_schema());
+        let items = serde_json::json!({
+            "items": [
+                make_task_item_json("a1", "write spec", "pending"),
+                make_task_item_json("a2", "review spec", "in-progress"),
+            ]
+        });
+        doc.import_from_json(&items).unwrap();
+
+        let list = doc.doc.get_movable_list("items");
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn test_task_list_import_from_json_accepts_bare_array() {
+        let doc = StructuredDocument::new(make_task_list_schema());
+        let items = serde_json::json!([make_task_item_json("b1", "task one", "pending"),]);
+        doc.import_from_json(&items).unwrap();
+
+        let list = doc.doc.get_movable_list("items");
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn test_task_list_import_from_json_rejects_malformed() {
+        let doc = StructuredDocument::new(make_task_list_schema());
+        let bad = serde_json::json!({ "wrong": "shape" });
+        assert!(doc.import_from_json(&bad).is_err());
+    }
+
+    #[test]
+    fn test_task_list_subscribe_content_returns_movable_list() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let doc = StructuredDocument::new(make_task_list_schema());
+
+        // Call the production code path: subscribe_content should wire up the
+        // LoroMovableList container. If the subscription fires on item insertion
+        // we know (a) subscribe_content ran, (b) it chose the correct container.
+        let fired = Arc::new(AtomicU32::new(0));
+        let fired_clone = fired.clone();
+        let _sub = doc.subscribe_content(Arc::new(move |_event| {
+            fired_clone.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        // Insert an item via the production API to trigger the subscription.
+        let item = make_task_item_json("sub1", "subscription test", "pending");
+        let payload = serde_json::json!({ "items": [item] });
+        doc.import_from_json(&payload).unwrap();
+        doc.commit();
+
+        assert!(
+            fired.load(Ordering::SeqCst) > 0,
+            "subscribe_content subscription must fire when an item is inserted into the MovableList"
+        );
+
+        // Also verify the container type by inspecting what subscribe_content
+        // subscribed to: get_movable_list returns a LoroMovableList, and its
+        // ContainerID reports type MovableList.
+        let container_id = doc.doc.get_movable_list("items").id();
+        assert_eq!(
+            format!("{:?}", container_id.container_type()),
+            "MovableList",
+            "TaskList subscribe_content must target the MovableList container"
+        );
+    }
+
+    #[test]
+    fn test_task_list_render_schema_empty() {
+        let doc = StructuredDocument::new(BlockSchema::TaskList {
+            default_owner: None,
+            default_status: None,
+            display_limit: None,
+        });
+        let rendered = doc.render();
+        assert!(
+            rendered.starts_with("TaskList (0 items)"),
+            "Expected empty task list header, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn test_task_list_render_schema_respects_display_limit() {
+        let schema = BlockSchema::TaskList {
+            default_owner: None,
+            default_status: None,
+            display_limit: Some(2),
+        };
+        let doc = StructuredDocument::new(schema);
+        // Insert 4 items.
+        let items = serde_json::json!({
+            "items": [
+                make_task_item_json("c1", "one", "pending"),
+                make_task_item_json("c2", "two", "pending"),
+                make_task_item_json("c3", "three", "pending"),
+                make_task_item_json("c4", "four", "pending"),
+            ]
+        });
+        doc.import_from_json(&items).unwrap();
+        doc.commit();
+
+        let rendered = doc.render();
+        assert!(
+            rendered.contains("TaskList (4 items, showing 2)"),
+            "Expected truncated header, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("... 2 more items not shown"),
+            "Expected truncation indicator, got: {rendered}"
+        );
+        // Should show only 2 item lines.
+        let item_lines: Vec<&str> = rendered
+            .lines()
+            .filter(|l| l.starts_with("- id="))
+            .collect();
+        assert_eq!(item_lines.len(), 2);
+    }
+
+    #[test]
+    fn test_task_list_render_schema_shows_blocks_and_description() {
+        let doc = StructuredDocument::new(BlockSchema::TaskList {
+            default_owner: Some("agent-r".into()),
+            default_status: Some(crate::types::memory_types::TaskStatus::InProgress),
+            display_limit: None,
+        });
+        let items = serde_json::json!({
+            "items": [{
+                "id": "x1",
+                "subject": "do thing",
+                "description": "First line of desc\nSecond line",
+                "status": "in-progress",
+                "owner": "agent-r",
+                "active_form": "doing the thing",
+                "blocks": [
+                    { "block": "alpha", "task_item": null },
+                    { "block": "beta", "task_item": "y2" }
+                ],
+                "metadata": {},
+                "comments": [],
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }]
+        });
+        doc.import_from_json(&items).unwrap();
+        doc.commit();
+
+        let rendered = doc.render();
+        assert!(rendered.contains("owner=@agent-r"), "missing owner");
+        assert!(
+            rendered.contains("active_form=\"doing the thing\""),
+            "missing active_form"
+        );
+        assert!(
+            rendered.contains("(block)\"alpha\""),
+            "missing block-only edge"
+        );
+        assert!(
+            rendered.contains("(block)\"beta#y2\""),
+            "missing block#item edge"
+        );
+        assert!(
+            rendered.contains("description: First line of desc"),
+            "missing description excerpt"
+        );
+    }
+
+    // region: Skill import_from_json
+
+    /// Skill `import_from_json` accepts `{"body": "text content"}` and writes
+    /// the body text into the LoroDoc's `"body"` LoroText container.
+    #[test]
+    fn test_skill_import_from_json_accepts_body_object() {
+        let doc = StructuredDocument::new(BlockSchema::Skill {
+            expected_keys: vec![],
+        });
+        doc.import_from_json(&serde_json::json!({"body": "text content"}))
+            .expect("Skill import_from_json should accept {\"body\": \"...\"}");
+        doc.commit();
+        // The body text must match exactly what was written.
+        // Skills now use the unified "content" container.
+        assert_eq!(
+            doc.text_content(),
+            "text content",
+            "content should contain the written string"
+        );
+    }
+
+    /// Skill `import_from_json` rejects objects with keys beyond `"body"` and
+    /// returns a `DocumentError::Other` that names the offending key(s) and
+    /// points callers toward `write_skill_to_loro_doc`.
+    #[test]
+    fn test_skill_import_from_json_rejects_extra_keys() {
+        let doc = StructuredDocument::new(BlockSchema::Skill {
+            expected_keys: vec![],
+        });
+        let err = doc
+            .import_from_json(&serde_json::json!({"body": "x", "name": "bogus"}))
+            .expect_err("Skill import_from_json must reject extra keys beyond 'body'");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("write_skill_to_loro_doc"),
+            "error message should point callers to write_skill_to_loro_doc; got: {msg}"
+        );
+        assert!(
+            msg.contains("name"),
+            "error message should name the offending key 'name'; got: {msg}"
+        );
+    }
+
+    // endregion: Skill import_from_json
+
+    // region: fork
+
+    /// `StructuredDocument::fork` snapshot-matches the source at fork time,
+    /// and diverges independently after writes.
+    #[test]
+    fn fork_matches_source_at_fork_time_and_diverges_after_writes() {
+        let parent = StructuredDocument::new_text();
+        parent.set_text("initial", true).unwrap();
+
+        let child = parent.fork();
+
+        // At fork time: both see "initial".
+        assert_eq!(
+            parent.text_content(),
+            "initial",
+            "parent should still read 'initial' after fork"
+        );
+        assert_eq!(
+            child.text_content(),
+            "initial",
+            "child should read 'initial' at fork time"
+        );
+
+        // After divergent writes: each side sees only its own content.
+        parent.set_text("parent-change", true).unwrap();
+        child.set_text("child-change", true).unwrap();
+
+        assert_eq!(
+            parent.text_content(),
+            "parent-change",
+            "parent should read its own write"
+        );
+        assert_eq!(
+            child.text_content(),
+            "child-change",
+            "child should read its own write without seeing parent's write"
+        );
+    }
+
+    /// `retag_owner` replaces the `agent_id` in the embedded metadata.
+    #[test]
+    fn retag_owner_changes_agent_id() {
+        let mut doc = StructuredDocument::new_text();
+        // Manually seed an agent_id via metadata_mut (the public path).
+        doc.metadata_mut().agent_id = "original-agent".to_string();
+
+        doc.retag_owner("new-agent");
+
+        assert_eq!(
+            doc.agent_id(),
+            "new-agent",
+            "retag_owner should update agent_id in metadata"
+        );
+    }
+
+    // endregion: fork
 }

@@ -1,0 +1,62 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
+//! Runtime-side policy machinery: built-in defaults, locked rules, and
+//! the merger that composes Rust defaults + KDL config + runtime
+//! overrides into a single [`pattern_core::PolicySet`] at session
+//! open.
+//!
+//! Pure-data rule types live in `pattern_core::capability::policy`;
+//! this module owns the conservative baseline (`defaults`) and the
+//! Phase 1 Task 12 / Task 14 wiring that layers KDL on top.
+
+pub mod config_guard;
+pub mod defaults;
+
+pub use config_guard::{ConfigGuardVerdict, is_pattern_config_kdl};
+pub use defaults::rust_defaults;
+
+/// Error-message prefix used by handlers to flag a policy denial. Tests
+/// pattern-match on this prefix to assert the gate fired without
+/// scraping the rest of the message.
+///
+/// We pack the denial signal into [`tidepool_effect::EffectError::Handler`]
+/// (via a string prefix) rather than introducing a new variant in the
+/// upstream `tidepool_effect` crate — variant additions there require an
+/// upstream patch + `flake.lock` bump, out of scope for Phase 1. When
+/// enough handlers accumulate this pattern, promote to a dedicated
+/// variant.
+pub const PERMISSION_DENIED_PREFIX: &str = "PermissionDenied: ";
+
+/// Error-message prefix flagging that the policy gate fired and
+/// approval was granted, but the handler's real implementation lands
+/// in a later plan. Used by Shell (Task 10) and File (Task 15) stubs.
+pub const GATE_APPROVED_PREFIX: &str = "GateApproved: ";
+
+/// Error-message prefix used by handlers to flag a static capability
+/// (`CapabilityFlag`) denial — distinct from a runtime
+/// [`PolicySet`]/`PermissionBroker` denial. Tests and UI code key off
+/// this prefix to discriminate "missing flag in persona caps" from
+/// "policy gate denied this action".
+///
+/// The companion suffix is the kebab-case flag name from
+/// [`pattern_core::CapabilityFlag::name`] (e.g.
+/// `"CapabilityDenied: wake-condition-registration"`), so a single
+/// `starts_with(CAPABILITY_DENIED_PREFIX)` check identifies the
+/// category and the trailing token names the missing flag.
+pub const CAPABILITY_DENIED_PREFIX: &str = "CapabilityDenied: ";
+
+/// Error-message prefix used by [`crate::sdk::handlers::fronting::FrontingHandler`]
+/// when it is invoked on a session that has no `FrontingSet` wired.
+///
+/// A missing fronting set means the daemon's Block B (T3) has not yet wired
+/// `SessionContext::with_fronting_set` — appropriate for test sessions and
+/// non-daemon paths. After T3 lands the daemon always wires a set on session open,
+/// so this prefix should only appear in test sessions.
+///
+/// Tests that verify the not-wired path match on this prefix to distinguish
+/// from capability-denial or other handler errors without parsing free-form prose.
+pub const FRONTING_NOT_WIRED_PREFIX: &str = "FrontingNotWired: ";

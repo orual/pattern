@@ -1,0 +1,15 @@
+---
+source: crates/pattern_db/tests/vector_regression.rs
+assertion_line: 69
+expression: snapshot
+---
+- - cluster_1_vec_0
+  - 0
+- - cluster_1_vec_1
+  - 0.0232
+- - cluster_1_vec_2
+  - 0.0465
+- - cluster_1_vec_3
+  - 0.0697
+- - cluster_1_vec_4
+  - 0.093

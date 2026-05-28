@@ -1,9 +1,14 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Agent-related models.
 
+use crate::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-use sqlx::types::Json;
 
 // ============================================================================
 // Model Routing Configuration
@@ -104,7 +109,7 @@ pub enum RoutingCondition {
 // ============================================================================
 
 /// An agent in the constellation.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     /// Unique identifier
     pub id: String,
@@ -145,99 +150,17 @@ pub struct Agent {
 }
 
 /// Agent status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum AgentStatus {
     /// Agent is active and can process messages
+    #[default]
     Active,
     /// Agent is hibernated (not processing, but data preserved)
     Hibernated,
     /// Agent is archived (read-only)
     Archived,
-}
-
-impl Default for AgentStatus {
-    fn default() -> Self {
-        Self::Active
-    }
-}
-
-/// An agent group for coordination.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct AgentGroup {
-    /// Unique identifier
-    pub id: String,
-
-    /// Human-readable name (unique within constellation)
-    pub name: String,
-
-    /// Optional description
-    pub description: Option<String>,
-
-    /// Coordination pattern type
-    pub pattern_type: PatternType,
-
-    /// Pattern-specific configuration as JSON
-    pub pattern_config: Json<serde_json::Value>,
-
-    /// Creation timestamp
-    pub created_at: DateTime<Utc>,
-
-    /// Last update timestamp
-    pub updated_at: DateTime<Utc>,
-}
-
-/// Coordination pattern types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
-#[serde(rename_all = "snake_case")]
-pub enum PatternType {
-    /// Round-robin message distribution
-    RoundRobin,
-    /// Dynamic routing based on selector
-    Dynamic,
-    /// Pipeline of sequential processing
-    Pipeline,
-    /// Supervisor delegates to workers
-    Supervisor,
-    /// Voting-based consensus
-    Voting,
-    /// Background monitoring (sleeptime)
-    Sleeptime,
-}
-
-/// Group membership.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct GroupMember {
-    /// Group ID
-    pub group_id: String,
-
-    /// Agent ID
-    pub agent_id: String,
-
-    /// Role within the group (pattern-specific), stored as JSON
-    pub role: Option<crate::Json<GroupMemberRole>>,
-
-    /// Capabilities this member provides (stored as JSON array)
-    pub capabilities: crate::Json<Vec<String>>,
-
-    /// When the agent joined the group
-    pub joined_at: DateTime<Utc>,
-}
-
-/// Member roles within a group.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum GroupMemberRole {
-    /// Supervisor role (for supervisor pattern)
-    Supervisor,
-    /// Regular role
-    Regular,
-    /// Observer (receives messages but doesn't respond)
-    Observer,
-    /// Specialist with a specific domain
-    Specialist { domain: String },
 }
 
 // ============================================================================
@@ -254,7 +177,7 @@ pub const ENDPOINT_TYPE_BLUESKY: &str = "bluesky";
 ///
 /// This enables agents to post to Bluesky or interact with ATProto services
 /// using a specific identity. The DID references a session stored in auth.db.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentAtprotoEndpoint {
     /// Agent ID (references agents table)
     pub agent_id: String,

@@ -1,9 +1,14 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Message-related models.
 
-use chrono::{DateTime, Utc};
+use crate::Json;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-use sqlx::types::Json;
 
 /// A message in an agent's conversation history.
 ///
@@ -12,7 +17,7 @@ use sqlx::types::Json;
 ///
 /// The content is stored as JSON to support all MessageContent variants
 /// from the domain layer without data loss.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     /// Unique identifier
     pub id: String,
@@ -34,10 +39,10 @@ pub struct Message {
 
     /// Message content stored as JSON to support all variants:
     /// - Text(String)
-    /// - Parts(Vec<ContentPart>)
-    /// - ToolCalls(Vec<ToolCall>)
-    /// - ToolResponses(Vec<ToolResponse>)
-    /// - Blocks(Vec<ContentBlock>)
+    /// - Parts(`Vec<ContentPart>`)
+    /// - ToolCalls(`Vec<ToolCall>`)
+    /// - ToolResponses(`Vec<ToolResponse>`)
+    /// - Blocks(`Vec<ContentBlock>`)
     pub content_json: Json<serde_json::Value>,
 
     /// Text preview for FTS and quick access (extracted from content_json)
@@ -52,6 +57,30 @@ pub struct Message {
     /// Source-specific metadata (channel ID, message ID, etc.)
     pub source_metadata: Option<Json<serde_json::Value>>,
 
+    /// Pattern-level [`MessageAttachment`] vec, serialized as a JSON array.
+    /// `None` is equivalent to an empty Vec.
+    ///
+    /// Attachments are write-once metadata that render onto the wire at
+    /// compose-time but live separately from the stored ChatMessage. They
+    /// must round-trip across process restart so the splice machinery
+    /// produces stable wire bytes (cache-stability invariant).
+    ///
+    /// [`MessageAttachment`]: https://docs.rs/pattern_core/latest/pattern_core/types/message/enum.MessageAttachment.html
+    pub attachments_json: Option<Json<serde_json::Value>>,
+
+    /// Pattern-level [`MessageOrigin`] (author + sphere + transport_hint),
+    /// serialized as JSON. Origin is turn-scoped on `TurnInput` but stored
+    /// redundantly on every message of a turn so single-message queries keep
+    /// origin context; turn restoration uses the first message's origin per
+    /// batch.
+    ///
+    /// `None` falls back to `infer_origin_from_batch_type` for pre-migration
+    /// rows. Eventually expected to subsume `source` + `source_metadata`,
+    /// which are kept as separate columns for now and likely to be deprecated.
+    ///
+    /// [`MessageOrigin`]: https://docs.rs/pattern_core/latest/pattern_core/types/origin/struct.MessageOrigin.html
+    pub origin_json: Option<Json<serde_json::Value>>,
+
     /// Whether this message has been archived (compressed into a summary)
     pub is_archived: bool,
 
@@ -59,16 +88,17 @@ pub struct Message {
     /// Tombstoned messages should be treated as if they don't exist.
     pub is_deleted: bool,
 
-    /// Creation timestamp
-    pub created_at: DateTime<Utc>,
+    /// Creation timestamp (RFC 3339 UTC, stored as TEXT in SQLite).
+    pub created_at: Timestamp,
 }
 
 /// Message roles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum MessageRole {
     /// User/human message
+    #[default]
     User,
     /// Assistant/agent response
     Assistant,
@@ -76,12 +106,6 @@ pub enum MessageRole {
     System,
     /// Tool call or result
     Tool,
-}
-
-impl Default for MessageRole {
-    fn default() -> Self {
-        Self::User
-    }
 }
 
 impl std::fmt::Display for MessageRole {
@@ -96,8 +120,7 @@ impl std::fmt::Display for MessageRole {
 }
 
 /// Batch type for categorizing message processing cycles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchType {
     /// User-initiated interaction
@@ -118,7 +141,7 @@ pub enum BatchType {
 ///
 /// Summaries can be chained: when multiple summaries accumulate, they can be
 /// summarized again into a higher-level summary (summary of summaries).
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiveSummary {
     /// Unique identifier
     pub id: String,
@@ -146,12 +169,12 @@ pub struct ArchiveSummary {
     /// Depth of summary chain (0 = direct message summary, 1+ = summary of summaries)
     pub depth: i64,
 
-    /// Creation timestamp
-    pub created_at: DateTime<Utc>,
+    /// Creation timestamp (RFC 3339 UTC, stored as TEXT in SQLite).
+    pub created_at: Timestamp,
 }
 
 /// Lightweight message projection for listing/searching.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageSummary {
     /// Message ID
     pub id: String,
@@ -168,15 +191,15 @@ pub struct MessageSummary {
     /// Source platform
     pub source: Option<String>,
 
-    /// Creation timestamp
-    pub created_at: DateTime<Utc>,
+    /// Creation timestamp (RFC 3339 UTC, stored as TEXT in SQLite).
+    pub created_at: Timestamp,
 }
 
 /// A queued message for agent-to-agent communication.
 ///
 /// Used by the MessageRouter to queue messages between agents
 /// when the target agent is not immediately available.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedMessage {
     /// Unique identifier
     pub id: String,
@@ -199,11 +222,11 @@ pub struct QueuedMessage {
     /// Priority (higher = more urgent)
     pub priority: i64,
 
-    /// Creation timestamp
-    pub created_at: DateTime<Utc>,
+    /// Creation timestamp (RFC 3339 UTC, stored as TEXT in SQLite).
+    pub created_at: Timestamp,
 
-    /// Processing timestamp (NULL until processed)
-    pub processed_at: Option<DateTime<Utc>>,
+    /// Processing timestamp (RFC 3339 UTC, NULL until processed).
+    pub processed_at: Option<Timestamp>,
 
     // === New fields for full message preservation ===
     /// Full MessageContent as JSON (Text, Parts, ToolCalls, etc.)

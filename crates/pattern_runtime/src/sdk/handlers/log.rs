@@ -1,0 +1,218 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
+//! Fully-implemented handler for `Pattern.Log`.
+//!
+//! Routes each `LogReq` variant through `tracing` at the matching level
+//! with structured `session` and `source` fields so Rust-side subscribers
+//! (tests, telemetry, CLI) can observe agent-originated log events.
+
+use tidepool_effect::{EffectContext, EffectError, EffectHandler};
+use tidepool_eval::Value;
+use tracing::{debug, error, info, warn};
+
+use crate::sdk::describe::{DescribeEffect, EffectDecl};
+use crate::sdk::requests::LogReq;
+use crate::session::HasCapabilities;
+
+/// Handler for `Pattern.Log`. Holds an optional session identifier so
+/// correlated turns can be grouped in log output. Set by the `Session`
+/// at open time.
+#[derive(Default, Clone)]
+pub struct LogHandler {
+    /// Session identifier propagated as a `session` field on every event.
+    pub session_id: Option<String>,
+}
+
+impl LogHandler {
+    /// Construct a handler tagged with the given session identifier.
+    pub fn for_session(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: Some(session_id.into()),
+        }
+    }
+}
+
+impl DescribeEffect for LogHandler {
+    fn effect_decl() -> EffectDecl {
+        EffectDecl {
+            type_name: "Log",
+            description: "Structured agent logging at debug/info/warn/error levels",
+            constructors: std::borrow::Cow::Borrowed(&[
+                "Debug :: Text -> Log ()",
+                "Info  :: Text -> Log ()",
+                "Warn  :: Text -> Log ()",
+                "Error :: Text -> Log ()",
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[]),
+            helpers: std::borrow::Cow::Borrowed(&[
+                "debug :: Member Log effs => Text -> Eff effs ()\ndebug msg = Freer.send (Debug msg)",
+                "info :: Member Log effs => Text -> Eff effs ()\ninfo msg = Freer.send (Info msg)",
+                "warn :: Member Log effs => Text -> Eff effs ()\nwarn msg = Freer.send (Warn msg)",
+                "error :: Member Log effs => Text -> Eff effs ()\nerror msg = Freer.send (Error msg)",
+            ]),
+        }
+    }
+}
+
+impl<U> EffectHandler<U> for LogHandler
+where
+    U: crate::session::HasCancelState + HasCapabilities,
+{
+    type Request = LogReq;
+
+    fn handle(&mut self, req: LogReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
+        // Soft-cancel cooperative check (see TimeHandler).
+        if cx
+            .user()
+            .cancel_state()
+            .cancellation
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(EffectError::Handler(format!(
+                "{}: log handler cancelled at entry",
+                crate::timeout::CANCELLED_SENTINEL,
+            )));
+        }
+        // Effect-class runtime guard. All Log constructors are Observe/Enforce.
+        let constructor_name = match &req {
+            LogReq::Debug(_) => "Debug",
+            LogReq::Info(_) => "Info",
+            LogReq::Warn(_) => "Warn",
+            LogReq::Error(_) => "Error",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "Log",
+            constructor_name,
+        )?;
+
+        let sid = self.session_id.as_deref().unwrap_or("unknown");
+        match req {
+            LogReq::Debug(msg) => debug!(session = sid, source = "agent", "{msg}"),
+            LogReq::Info(msg) => info!(session = sid, source = "agent", "{msg}"),
+            LogReq::Warn(msg) => warn!(session = sid, source = "agent", "{msg}"),
+            LogReq::Error(msg) => error!(session = sid, source = "agent", "{msg}"),
+        }
+        cx.respond(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::standard_datacon_table;
+    use tidepool_repr::{DataCon, DataConId};
+    use tracing_test::traced_test;
+
+    /// Build a test DataConTable that includes the `()` constructor required by
+    /// `ToCore<()>` / `cx.respond(())`. `standard_datacon_table()` already covers
+    /// the boxing constructors.
+    fn handler_table() -> tidepool_repr::DataConTable {
+        let mut table = standard_datacon_table();
+        // `()` (GHC.Tuple) is a primitive tuple type, not in the stdlib set.
+        table.insert(DataCon {
+            id: DataConId(100),
+            name: "()".to_string(),
+            tag: 1,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: Some("GHC.Tuple.()".to_string()),
+        });
+        table
+    }
+
+    /// Verify that `Info` events are emitted via tracing with the expected
+    /// message and structured fields.
+    #[traced_test]
+    #[test]
+    fn log_info_is_observed_via_tracing() {
+        let table = handler_table();
+        let cx = EffectContext::with_user(&table, &());
+        let mut h = LogHandler::for_session("sess_123");
+        let v = h
+            .handle(LogReq::Info("hello from agent".into()), &cx)
+            .unwrap();
+        // Return value is Haskell unit.
+        match v {
+            Value::Con(_, ref fields) if fields.is_empty() => {}
+            other => panic!("expected unit Value::Con(_, []), got {other:?}"),
+        }
+        assert!(logs_contain("hello from agent"));
+        assert!(logs_contain("sess_123"));
+        assert!(logs_contain("agent"));
+    }
+
+    /// Verify that `Warn` events are emitted and captured.
+    #[traced_test]
+    #[test]
+    fn log_warn_is_observed_via_tracing() {
+        let table = handler_table();
+        let cx = EffectContext::with_user(&table, &());
+        let mut h = LogHandler::for_session("sess_warn");
+        h.handle(LogReq::Warn("warn message".into()), &cx).unwrap();
+        assert!(logs_contain("warn message"));
+        assert!(logs_contain("sess_warn"));
+    }
+
+    /// Verify that `Error` events are emitted and captured.
+    #[traced_test]
+    #[test]
+    fn log_error_is_observed_via_tracing() {
+        let table = handler_table();
+        let cx = EffectContext::with_user(&table, &());
+        let mut h = LogHandler::for_session("sess_err");
+        h.handle(LogReq::Error("error message".into()), &cx)
+            .unwrap();
+        assert!(logs_contain("error message"));
+        assert!(logs_contain("sess_err"));
+    }
+
+    /// Verify that `Debug` events are emitted and captured.
+    #[traced_test]
+    #[test]
+    fn log_debug_is_observed_via_tracing() {
+        let table = handler_table();
+        let cx = EffectContext::with_user(&table, &());
+        let mut h = LogHandler::for_session("sess_dbg");
+        h.handle(LogReq::Debug("debug message".into()), &cx)
+            .unwrap();
+        assert!(logs_contain("debug message"));
+        assert!(logs_contain("sess_dbg"));
+    }
+
+    /// Verify that events logged without a session id fall back to "unknown".
+    #[traced_test]
+    #[test]
+    fn log_without_session_uses_unknown() {
+        let table = handler_table();
+        let cx = EffectContext::with_user(&table, &());
+        let mut h = LogHandler::default();
+        h.handle(LogReq::Info("no session".into()), &cx).unwrap();
+        assert!(logs_contain("no session"));
+        assert!(logs_contain("unknown"));
+    }
+
+    /// Verify that all four levels complete without error (dispatch-level smoke test).
+    #[test]
+    fn log_all_levels_return_unit() {
+        let table = handler_table();
+        let cx = EffectContext::with_user(&table, &());
+        let mut h = LogHandler::default();
+        for req in [
+            LogReq::Debug("d".into()),
+            LogReq::Info("i".into()),
+            LogReq::Warn("w".into()),
+            LogReq::Error("e".into()),
+        ] {
+            let v = h.handle(req, &cx).unwrap();
+            match v {
+                Value::Con(_, ref fields) if fields.is_empty() => {}
+                other => panic!("expected unit Value::Con(_, []), got {other:?}"),
+            }
+        }
+    }
+}

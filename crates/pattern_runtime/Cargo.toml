@@ -1,0 +1,126 @@
+[package]
+name = "pattern-runtime"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["subscription-oauth"]
+
+# Expose test-only hooks on pattern_runtime's public surface so
+# integration tests can deterministically drive paths that the
+# production API deliberately hides (e.g. session poisoning). Never
+# enable this for downstream consumers — the hooks are not part of the
+# stable API contract.
+test-hooks = []
+
+# Expose the `pattern_runtime::testing` module (MockProviderClient,
+# InMemoryMemoryStore, test_db, etc.) on the public surface. Gated
+# so the test fixtures do not ship in production binaries or library
+# builds used by downstream crates. Enable it in integration tests via
+# the dev-dependency self-ref below; enable it in any binary that needs
+# the test doubles (e.g. `pattern-test-cli`).
+#
+# Also enables `tidepool-testing` as a real dependency (needed by
+# `populated_spawn_test_table` and `standard_datacon_table`), because
+# when this feature is active in a non-test lib build (e.g. the
+# dev-dep self-reference compiles the lib with test-support before
+# building integration test binaries), dev-dependencies are not in scope.
+#
+# Also enables `pattern-memory/test-support` so that test-only helpers
+# on `LoroSyncedFile` (e.g. `clear_saved_frontier_for_test`) are
+# visible to integration tests in `tests/`.
+test-support = ["dep:tidepool-testing", "pattern-memory/test-support", "dep:tokio-stream"]
+
+# Forward pattern-provider's subscription-oauth feature. When enabled,
+# the `pattern-test-cli` bin exposes the interactive PKCE flow and the
+# session-pickup + OAuth tiers of the Anthropic credential chain.
+subscription-oauth = ["pattern-provider/subscription-oauth"]
+
+[dependencies]
+pattern-core   = { path = "../pattern_core", features = ["mcp-client", "plugin-transport"] }
+pattern-db     = { path = "../pattern_db" }
+pattern-memory = { path = "../pattern_memory" }
+# pattern-provider: consumed by the `pattern-test-cli` bin for live-tier
+# auth + completion verification (AC3.1, AC4.1, AC4.3, Task 20). Phase 5
+# integrates it into the TidepoolRuntime proper; holding the dep here
+# means the bin + the Phase 5 wiring share a single edge in the dep graph.
+pattern-provider = { path = "../pattern_provider" }
+tidepool-runtime = { workspace = true }
+tidepool-codegen = { workspace = true }
+tidepool-effect  = { workspace = true }
+tidepool-bridge  = { workspace = true }
+tidepool-bridge-derive = { workspace = true }
+tidepool-repr    = { workspace = true }
+tidepool-eval    = { workspace = true }
+# Optional: enabled by `test-support` feature. Required because the dev-dep
+# self-reference compiles the lib with test-support active in non-test mode,
+# where dev-dependencies (including tidepool-testing) are not in scope.
+tidepool-testing = { workspace = true, optional = true }
+genai            = { workspace = true }
+
+tokio-stream     = { workspace = true, optional = true }
+frunk            = { workspace = true }
+which            = { workspace = true }
+async-trait      = { workspace = true }
+tokio            = { workspace = true, features = ["rt", "time", "sync", "macros", "process", "fs"] }
+tracing          = { workspace = true }
+metrics          = { workspace = true }
+thiserror        = { workspace = true }
+miette           = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+knus             = "3.3"
+kdl              = { workspace = true }
+jiff             = { workspace = true }
+loro             = { version = "1.10", features = ["counter"] }
+rusqlite         = { version = "0.39", features = ["bundled-full"] }
+smol_str         = { workspace = true }
+irpc             = { workspace = true }
+irpc-iroh        = { workspace = true }
+iroh             = { workspace = true }
+postcard         = { workspace = true }
+parking_lot      = { workspace = true }
+dashmap          = { version = "6.1.0", features = ["serde"] }
+html2md          = { workspace = true }
+url              = { workspace = true }
+regex            = { workspace = true }
+scraper          = { workspace = true }
+# Stable content hashing for snapshot delta detection.
+blake3           = { workspace = true }
+# jiff::Timestamp → chrono::DateTime<Utc> conversion for pattern_db persistence.
+chrono           = { workspace = true }
+futures          = { workspace = true }
+secrecy          = { workspace = true }
+globset          = { workspace = true }
+crossbeam-channel = "0.5"
+tokio-util       = { version = "0.7", features = ["rt"] }
+dirs             = { workspace = true }
+pty-process      = "0.5"
+strip-ansi-escapes = "0.2"
+uuid             = { workspace = true, features = ["v4"] }
+nix              = { version = "0.29", features = ["poll"] }
+reqwest          = { workspace = true }
+tempfile         = { workspace = true }
+
+[dev-dependencies]
+tokio          = { workspace = true, features = ["rt-multi-thread", "test-util", "macros"] }
+tidepool-testing = { workspace = true }
+tracing-test   = { workspace = true }
+tracing-subscriber = { workspace = true }
+insta          = { version = "1", features = ["yaml"] }
+proptest       = "1"
+# v3-sandbox-io Phase 5 Task 1: wiremock for HttpPort integration tests.
+wiremock       = { workspace = true }
+# Self-reference enabling the `test-hooks` and `test-support` features
+# for this crate's own integration tests. Cargo permits `dep:self`
+# style reachability: the integration test binaries link against the
+# library crate with the features enabled, while downstream users see
+# no feature turned on unless they opt in explicitly.
+pattern-runtime = { path = ".", features = ["test-hooks", "test-support"] }
+# For the MemorySync in-process integration test (tests/memory_sync_e2e.rs):
+# exercises the plugin-side MemoryStore impl against the daemon-side handler
+# via irpc's Client::local mode (no iroh dial).
+pattern-plugin-sdk = { path = "../pattern_plugin_sdk" }

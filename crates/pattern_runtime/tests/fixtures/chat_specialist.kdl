@@ -1,0 +1,29 @@
+// chat_specialist.kdl — chat specialist fixture for the Phase 5 T7 integration test.
+//
+// Routing target for messages containing "chat". Does not need FrontingControl —
+// it is a routing target only.
+
+name "chat-specialist"
+agent-id "chat-specialist"
+
+system-prompt "You are the chat specialist. You handle conversational messages containing the word chat."
+
+model provider="anthropic" model-id="claude-sonnet-4-6" {
+    temperature 0.0
+    max-tokens 256
+}
+
+capabilities {
+    effects {
+        memory
+        message
+    }
+}
+
+memory {
+    persona content="Chat specialist persona for Pattern project routing tests." {
+        memory-type "core"
+        permission "read_only"
+        pinned true
+    }
+}

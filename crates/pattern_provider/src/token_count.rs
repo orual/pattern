@@ -1,0 +1,615 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
+//! Pre-request token counting via Anthropic's
+//! `/v1/messages/count_tokens` endpoint.
+//!
+//! Separate from the chat-completion path because:
+//!
+//! - It's a distinct HTTP round trip (the caller chooses when to spend
+//!   the cost).
+//! - It's metered independently server-side. AC5b.5 requires pattern's
+//!   rate limiter to mirror that — count_tokens consumption must not
+//!   block chat completions.
+//!
+//! The rebased rust-genai fork doesn't expose this endpoint directly,
+//! so we call it via `reqwest` reusing the same auth + shaper
+//! identification headers as chat completions.
+
+use std::sync::Arc;
+
+use pattern_core::error::ProviderError;
+use reqwest::StatusCode;
+use secrecy::ExposeSecret;
+use serde::{Deserialize, Serialize};
+
+use crate::auth::{AuthTier, ResolvedCredential};
+use crate::ratelimit::ProviderRateLimiter;
+use crate::shaper::{RequestShaper, ShapeContext};
+
+/// Request payload for Anthropic's `/v1/messages/count_tokens`.
+///
+/// Carries pre-converted Anthropic-wire-shape JSON for `system`, `messages`,
+/// and `tools`. This is intentional: the count_tokens endpoint expects the
+/// SAME wire shape as `/v1/messages`, including Anthropic's role rewrites
+/// (notably `ChatRole::Tool` -> `"user"` with `tool_result` content blocks).
+/// Serializing `genai::chat::ChatMessage` directly via serde would emit
+/// `"role": "tool"`, which the endpoint rejects with HTTP 400.
+///
+/// Construct via [`CountTokensRequest::from_chat_request`], which routes
+/// through [`genai::adapter::AnthropicAdapter::into_anthropic_request_parts`]
+/// to perform the conversion once, in one place.
+#[derive(Debug, Clone, Serialize)]
+pub struct CountTokensRequest {
+    pub model: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<serde_json::Value>,
+
+    pub messages: Vec<serde_json::Value>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<serde_json::Value>>,
+}
+
+impl CountTokensRequest {
+    /// Build a `CountTokensRequest` from a model id and a `genai::chat::ChatRequest`,
+    /// running the Anthropic adapter's wire conversion so role rewrites and
+    /// system-block shaping match what `/v1/messages` would emit.
+    pub fn from_chat_request(
+        model: impl Into<String>,
+        chat: genai::chat::ChatRequest,
+    ) -> Result<Self, ProviderError> {
+        let parts = genai::adapter::AnthropicAdapter::into_anthropic_request_parts(chat).map_err(
+            |e| ProviderError::TokenCountFailed {
+                reason: format!("anthropic wire conversion failed: {e}"),
+            },
+        )?;
+        Ok(Self {
+            model: model.into(),
+            system: parts.system,
+            messages: parts.messages,
+            tools: parts.tools,
+        })
+    }
+}
+
+/// Detailed provider-reported token breakdown. `pattern_core`'s
+/// [`pattern_core::types::provider::TokenCount`] is a simpler shape;
+/// [`From<TokenCountDetails> for TokenCount`] narrows to the basic
+/// input-tokens count for consumers that only need that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenCountDetails {
+    pub input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+}
+
+impl From<TokenCountDetails> for pattern_core::types::provider::TokenCount {
+    fn from(d: TokenCountDetails) -> Self {
+        // TokenCount::input_tokens is u64, matching the provider's native type.
+        // No truncation possible.
+        Self {
+            input_tokens: d.input_tokens,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenCountResponse {
+    input_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+}
+
+// ---- Post-response Usage capture (Task 17 / AC5b.2) ----
+
+/// Provider-reported token usage captured from a chat-completion response.
+///
+/// The gateway surfaces this through its `complete()` return shape and
+/// through the stream-end event for streaming calls. Callers (especially
+/// Phase 5's compaction path) use these counts directly instead of
+/// re-running heuristic estimates.
+///
+/// Conversion is lossy by design — some upstream fields map to several
+/// detail buckets in Anthropic's response. Where both kinds of cache
+/// accounting are reported we preserve both; where only an aggregate
+/// is present it's stored under `cache_read_input_tokens` and the
+/// creation bucket stays zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub reasoning_tokens: u64,
+}
+
+impl Usage {
+    /// Best-effort conversion from upstream genai `Usage`. Negative values
+    /// (upstream uses `i32`) and absent fields map to zero rather than
+    /// erroring — a missing count is not a protocol failure.
+    pub fn from_genai(g: &genai::chat::Usage) -> Self {
+        fn u(x: Option<i32>) -> u64 {
+            x.filter(|v| *v >= 0).map(|v| v as u64).unwrap_or(0)
+        }
+
+        let prompt = u(g.prompt_tokens);
+        let completion = u(g.completion_tokens);
+        let cache_creation = g
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cache_creation_tokens)
+            .filter(|v| *v >= 0)
+            .map(|v| v as u64)
+            .unwrap_or(0);
+        let cache_read = g
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens)
+            .filter(|v| *v >= 0)
+            .map(|v| v as u64)
+            .unwrap_or(0);
+        let reasoning = g
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens)
+            .filter(|v| *v >= 0)
+            .map(|v| v as u64)
+            .unwrap_or(0);
+
+        Self {
+            input_tokens: prompt,
+            output_tokens: completion,
+            cache_creation_input_tokens: cache_creation,
+            cache_read_input_tokens: cache_read,
+            reasoning_tokens: reasoning,
+        }
+    }
+}
+
+impl From<&genai::chat::Usage> for Usage {
+    fn from(g: &genai::chat::Usage) -> Self {
+        Self::from_genai(g)
+    }
+}
+
+/// Async wrapper for the `/v1/messages/count_tokens` endpoint.
+///
+/// Holds its own rate-limiter reference so count_tokens calls go through
+/// their dedicated bucket (AC5b.5). One instance per provider, typically
+/// held by the gateway.
+pub struct TokenCounter {
+    http: reqwest::Client,
+    /// Base URL of the provider, e.g. `https://api.anthropic.com`. No
+    /// trailing slash.
+    base_url: String,
+    rate_limiter: Arc<ProviderRateLimiter>,
+    /// `anthropic-version` header value. Defaults to `"2023-06-01"` per
+    /// the fork's pinned constant.
+    anthropic_version: String,
+}
+
+impl TokenCounter {
+    pub fn new(base_url: impl Into<String>, rate_limiter: Arc<ProviderRateLimiter>) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            base_url: base_url.into(),
+            rate_limiter,
+            anthropic_version: "2023-06-01".into(),
+        }
+    }
+
+    /// Anthropic preset — `https://api.anthropic.com` + shared rate limiter.
+    pub fn anthropic(rate_limiter: Arc<ProviderRateLimiter>) -> Self {
+        Self::new("https://api.anthropic.com", rate_limiter)
+    }
+
+    /// Call the count_tokens endpoint.
+    ///
+    /// Errors (all as [`ProviderError::TokenCountFailed`] per AC5b.4):
+    /// - network error
+    /// - non-2xx response (status + body included in the reason)
+    /// - malformed JSON response
+    ///
+    /// The caller is responsible for deciding whether to fall back to a
+    /// heuristic estimate — pattern never silently falls back.
+    pub async fn count(
+        &self,
+        auth: &ResolvedCredential,
+        shaper: &dyn RequestShaper,
+        shape_ctx: &ShapeContext<'_>,
+        request: &CountTokensRequest,
+    ) -> Result<TokenCountDetails, ProviderError> {
+        // AC5b.5: acquire from the count_tokens bucket specifically.
+        self.rate_limiter.acquire_count_tokens().await;
+
+        let url = format!("{}/v1/messages/count_tokens", self.base_url);
+
+        let mut req_builder = self
+            .http
+            .post(&url)
+            .header("anthropic-version", self.anthropic_version.clone());
+
+        // Identification + beta headers from the shaper.
+        for (k, v) in shaper.identification_headers(shape_ctx)? {
+            req_builder = req_builder.header(k, v);
+        }
+
+        // Auth — `x-api-key` for API-key tier, `Authorization: Bearer`
+        // otherwise (session-pickup / PKCE both produce Bearer tokens on
+        // Anthropic). Note: the `oauth-2025-04-20` beta marker is handled
+        // by the shaper's identification_headers() call above (via
+        // `build_beta_header_value`) — see the Phase 4 code-review fix for
+        // why it must NOT be set here as a separate header (it would
+        // overwrite the shaper's capability markers).
+        req_builder = match auth.source {
+            AuthTier::ApiKey => req_builder.header(
+                "x-api-key",
+                auth.token.access_token.expose_secret().to_string(),
+            ),
+            #[cfg(feature = "subscription-oauth")]
+            AuthTier::SessionPickup | AuthTier::Pkce | AuthTier::StoredOauth => req_builder.header(
+                "Authorization",
+                format!("Bearer {}", auth.token.access_token.expose_secret()),
+            ),
+        };
+
+        let response = req_builder.json(request).send().await.map_err(|e| {
+            ProviderError::TokenCountFailed {
+                reason: format!("HTTP request failed: {e}"),
+            }
+        })?;
+
+        let status = response.status();
+        if status != StatusCode::OK {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ProviderError::TokenCountFailed {
+                reason: format!("provider returned HTTP {status}: {body}"),
+            });
+        }
+
+        let parsed: TokenCountResponse =
+            response
+                .json()
+                .await
+                .map_err(|e| ProviderError::TokenCountFailed {
+                    reason: format!("response parse failed: {e}"),
+                })?;
+
+        Ok(TokenCountDetails {
+            input_tokens: parsed.input_tokens,
+            cache_creation_input_tokens: parsed.cache_creation_input_tokens,
+            cache_read_input_tokens: parsed.cache_read_input_tokens,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jiff::Timestamp;
+    use secrecy::SecretString;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::auth::AuthTier;
+    use crate::session_uuid::SessionUuidRotator;
+    use crate::shaper::{HonestPatternShaper, ShapeContext, ShaperCompatMode, ShaperConfig};
+    use pattern_core::types::provider::ProviderCredential;
+
+    fn min_shaper_config() -> ShaperConfig {
+        ShaperConfig {
+            x_app: "pattern".into(),
+            compat_mode: ShaperCompatMode::HonestPattern,
+            target_is_first_party: false,
+            enable_interleaved_thinking: false,
+            enable_dev_full_thinking: false,
+            enable_context_management: false,
+            enable_extended_cache_ttl: false,
+            enable_1m_context: false,
+        }
+    }
+
+    fn api_key_credential(key: &str) -> ResolvedCredential {
+        let now = Timestamp::now();
+        ResolvedCredential {
+            source: AuthTier::ApiKey,
+            token: ProviderCredential {
+                provider: "anthropic".into(),
+                access_token: SecretString::from(key.to_string()),
+                refresh_token: None,
+                expires_at: None,
+                scope: None,
+                session_id: None,
+                created_at: now,
+                updated_at: now,
+            },
+        }
+    }
+
+    fn sample_count_request() -> CountTokensRequest {
+        CountTokensRequest::from_chat_request(
+            "claude-opus-4-7",
+            genai::chat::ChatRequest::from_user("hello"),
+        )
+        .expect("sample CountTokensRequest builds")
+    }
+
+    #[tokio::test]
+    async fn count_ok_parses_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages/count_tokens"))
+            .and(header("anthropic-version", "2023-06-01"))
+            .and(header("x-api-key", "sk-ant-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "input_tokens": 1234,
+                "cache_creation_input_tokens": 10,
+                "cache_read_input_tokens": 20
+            })))
+            .mount(&server)
+            .await;
+
+        let limiter = Arc::new(ProviderRateLimiter::anthropic_default());
+        let counter = TokenCounter::new(server.uri(), limiter);
+        let shaper = HonestPatternShaper::new(min_shaper_config()).unwrap();
+        let uuid_rotator = SessionUuidRotator::new();
+        let session = uuid_rotator.current();
+        let ctx = ShapeContext {
+            session_uuid: &session,
+            model: "claude-opus-4-7",
+            auth_tier: AuthTier::ApiKey,
+            persona: "",
+            system_instructions_override: None,
+            extra_long_lived_blocks: &[],
+        };
+
+        let auth = api_key_credential("sk-ant-test");
+        let details = counter
+            .count(&auth, &shaper, &ctx, &sample_count_request())
+            .await
+            .expect("count ok");
+
+        assert_eq!(details.input_tokens, 1234);
+        assert_eq!(details.cache_creation_input_tokens, 10);
+        assert_eq!(details.cache_read_input_tokens, 20);
+    }
+
+    #[tokio::test]
+    async fn non_2xx_surfaces_as_token_count_failed() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages/count_tokens"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .mount(&server)
+            .await;
+
+        let limiter = Arc::new(ProviderRateLimiter::anthropic_default());
+        let counter = TokenCounter::new(server.uri(), limiter);
+        let shaper = HonestPatternShaper::new(min_shaper_config()).unwrap();
+        let uuid_rotator = SessionUuidRotator::new();
+        let session = uuid_rotator.current();
+        let ctx = ShapeContext {
+            session_uuid: &session,
+            model: "claude-opus-4-7",
+            auth_tier: AuthTier::ApiKey,
+            persona: "",
+            system_instructions_override: None,
+            extra_long_lived_blocks: &[],
+        };
+
+        let err = counter
+            .count(
+                &api_key_credential("sk-ant-test"),
+                &shaper,
+                &ctx,
+                &sample_count_request(),
+            )
+            .await
+            .expect_err("500 → error");
+        assert!(matches!(
+            &err,
+            ProviderError::TokenCountFailed { reason } if reason.contains("500")
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_response_surfaces_as_token_count_failed() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages/count_tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{not valid json"))
+            .mount(&server)
+            .await;
+
+        let limiter = Arc::new(ProviderRateLimiter::anthropic_default());
+        let counter = TokenCounter::new(server.uri(), limiter);
+        let shaper = HonestPatternShaper::new(min_shaper_config()).unwrap();
+        let uuid_rotator = SessionUuidRotator::new();
+        let session = uuid_rotator.current();
+        let ctx = ShapeContext {
+            session_uuid: &session,
+            model: "claude-opus-4-7",
+            auth_tier: AuthTier::ApiKey,
+            persona: "",
+            system_instructions_override: None,
+            extra_long_lived_blocks: &[],
+        };
+
+        let err = counter
+            .count(
+                &api_key_credential("sk-ant-test"),
+                &shaper,
+                &ctx,
+                &sample_count_request(),
+            )
+            .await
+            .expect_err("malformed → error");
+        assert!(matches!(
+            &err,
+            ProviderError::TokenCountFailed { reason } if reason.contains("parse failed")
+        ));
+    }
+
+    #[test]
+    fn token_count_details_narrows_to_pattern_core_token_count() {
+        let details = TokenCountDetails {
+            input_tokens: 1234,
+            cache_creation_input_tokens: 10,
+            cache_read_input_tokens: 20,
+        };
+        let narrowed: pattern_core::types::provider::TokenCount = details.into();
+        assert_eq!(narrowed.input_tokens, 1234);
+    }
+
+    #[test]
+    fn usage_from_genai_captures_all_buckets() {
+        let g = genai::chat::Usage {
+            prompt_tokens: Some(100),
+            prompt_tokens_details: Some(genai::chat::PromptTokensDetails {
+                cache_creation_tokens: Some(10),
+                cache_creation_details: None,
+                cached_tokens: Some(20),
+                audio_tokens: None,
+            }),
+            completion_tokens: Some(50),
+            completion_tokens_details: Some(genai::chat::CompletionTokensDetails {
+                accepted_prediction_tokens: None,
+                rejected_prediction_tokens: None,
+                reasoning_tokens: Some(15),
+                audio_tokens: None,
+            }),
+            total_tokens: Some(150),
+        };
+        let usage = Usage::from_genai(&g);
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.cache_creation_input_tokens, 10);
+        assert_eq!(usage.cache_read_input_tokens, 20);
+        assert_eq!(usage.reasoning_tokens, 15);
+    }
+
+    #[test]
+    fn usage_from_genai_treats_missing_fields_as_zero() {
+        let g = genai::chat::Usage {
+            prompt_tokens: None,
+            prompt_tokens_details: None,
+            completion_tokens: Some(50),
+            completion_tokens_details: None,
+            total_tokens: None,
+        };
+        let usage = Usage::from_genai(&g);
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+        assert_eq!(usage.cache_read_input_tokens, 0);
+        assert_eq!(usage.reasoning_tokens, 0);
+    }
+
+    #[test]
+    fn usage_from_genai_clamps_negatives_to_zero() {
+        let g = genai::chat::Usage {
+            prompt_tokens: Some(-5),
+            prompt_tokens_details: None,
+            completion_tokens: Some(50),
+            completion_tokens_details: None,
+            total_tokens: None,
+        };
+        let usage = Usage::from_genai(&g);
+        assert_eq!(
+            usage.input_tokens, 0,
+            "negative upstream value must clamp to zero"
+        );
+    }
+
+    /// Regression test: messages with `ChatRole::Tool` must NOT appear on the
+    /// count_tokens wire as `"role": "tool"`. Anthropic's
+    /// `/v1/messages/count_tokens` endpoint accepts only `"user"` and
+    /// `"assistant"` (mirroring `/v1/messages`); a tool result must be
+    /// emitted as a user-role message whose content is a `tool_result`
+    /// block, not a top-level `"role": "tool"` message.
+    ///
+    /// History: an earlier shape serialized `Vec<genai::chat::ChatMessage>`
+    /// directly via serde, which (after `#[serde(rename_all = "lowercase")]`
+    /// landed on `ChatRole`) emitted `"role": "tool"`. Anthropic rejected
+    /// the request with HTTP 400 `Unexpected role "tool"`. Routing through
+    /// `AnthropicAdapter::into_anthropic_request_parts` performs the same
+    /// rewrite the live `/v1/messages` path does.
+    #[test]
+    fn count_tokens_request_rewrites_tool_role_to_user_with_tool_result() {
+        use genai::chat::{ChatMessage, ChatRequest, ContentPart, MessageContent, ToolCall, ToolResponse};
+        use serde_json::json;
+
+        // Build a complete tool-use round-trip: user prompt → assistant
+        // tool_use → tool result. The adapter emits the tool message as
+        // user-role with a tool_result block.
+        let assistant_msg = ChatMessage::assistant(MessageContent::from_parts(vec![
+            ContentPart::ToolCall(ToolCall {
+                call_id: "toolu_test".into(),
+                fn_name: "echo".into(),
+                fn_arguments: json!({"text": "hi"}),
+                thought_signatures: None,
+                thought_signatures_provenance: None,
+            }),
+        ]));
+        let tool_result_msg = ChatMessage::tool(ToolResponse::new("toolu_test", "hi"));
+
+        let chat = ChatRequest::new(vec![
+            ChatMessage::system("be terse"),
+            ChatMessage::user("say hi"),
+            assistant_msg,
+            tool_result_msg,
+        ]);
+
+        let req = CountTokensRequest::from_chat_request("claude-sonnet-4-6", chat)
+            .expect("CountTokensRequest builds from ChatRequest");
+
+        let json = serde_json::to_string(&req).expect("CountTokensRequest serializes");
+
+        // Roles that appear MUST be lowercase user / assistant. No `"tool"`
+        // role, no capital variants.
+        assert!(
+            json.contains(r#""role":"user""#),
+            "expected lowercase user role on the wire; got: {json}"
+        );
+        assert!(
+            json.contains(r#""role":"assistant""#),
+            "expected lowercase assistant role on the wire; got: {json}"
+        );
+        assert!(
+            !json.contains(r#""role":"tool""#),
+            "ChatRole::Tool must be rewritten as user-with-tool_result, not emitted as a top-level role; got: {json}"
+        );
+        assert!(
+            !json.contains(r#""role":"System""#) && !json.contains(r#""role":"Tool""#),
+            "no capitalised role names on the wire; got: {json}"
+        );
+
+        // The tool result must surface as a tool_result block on a user message.
+        assert!(
+            json.contains(r#""type":"tool_result""#),
+            "tool result must be emitted as a tool_result content block; got: {json}"
+        );
+        assert!(
+            json.contains(r#""tool_use_id":"toolu_test""#),
+            "tool_result block must reference the tool_use id; got: {json}"
+        );
+
+        // System messages get hoisted into the top-level `system` field, not
+        // emitted as a `"role":"system"` message.
+        assert!(
+            req.system.is_some(),
+            "system message must be hoisted into the top-level system field"
+        );
+        assert!(
+            !json.contains(r#""role":"system""#),
+            "system content must not appear as a role; got: {json}"
+        );
+    }
+}

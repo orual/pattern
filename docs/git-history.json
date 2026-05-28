@@ -1,0 +1,194 @@
+[
+  {
+    "hash": "ba2dff7e3fccc40a32c003e1c73875a7631d0d9a",
+    "short_hash": "ba2dff7",
+    "author": "Orual",
+    "date": "2026-01-05T17:18:25-05:00",
+    "message": "Merge pull request #22 from orual/rewrite\n\nRewrite done",
+    "files_changed": 0
+  },
+  {
+    "hash": "41b514c6740e3e466cabda8ac6768fbcadd8b9b0",
+    "short_hash": "41b514c",
+    "author": "Orual",
+    "date": "2026-01-04T13:46:52-05:00",
+    "message": "config system rework",
+    "files_changed": 17
+  },
+  {
+    "hash": "e8a9db2c42b46a8816b436ed32f890fa6f93f6ed",
+    "short_hash": "e8a9db2",
+    "author": "Orual",
+    "date": "2026-01-03T13:51:29-05:00",
+    "message": "undo support for block edits",
+    "files_changed": 37
+  },
+  {
+    "hash": "c4b918cd0349790a121d99a16b3bd83bc30d9de3",
+    "short_hash": "c4b918c",
+    "author": "Orual",
+    "date": "2026-01-02T20:36:00-05:00",
+    "message": "shell tool andd other fixes",
+    "files_changed": 2
+  },
+  {
+    "hash": "14aa01b6c1b6872be237bca8db9e6e87e1d2f1e0",
+    "short_hash": "14aa01b",
+    "author": "Orual",
+    "date": "2025-12-31T20:41:11-05:00",
+    "message": "big docs pass",
+    "files_changed": 2
+  },
+  {
+    "hash": "b87bed0ef444b6922eb428bb587caa2bf5fa95d3",
+    "short_hash": "b87bed0",
+    "author": "Orual",
+    "date": "2025-12-31T11:54:37-05:00",
+    "message": "legacy (and letta) import",
+    "files_changed": 13
+  },
+  {
+    "hash": "c3168d53d10f257cd8b87466e23fa57b35d6d00c",
+    "short_hash": "c3168d5",
+    "author": "Orual",
+    "date": "2025-12-31T00:44:55-05:00",
+    "message": "new export/import utilities",
+    "files_changed": 27
+  },
+  {
+    "hash": "0dc5ab241ba8d7f913962a804e828407592cd886",
+    "short_hash": "0dc5ab2",
+    "author": "Orual",
+    "date": "2025-12-30T20:52:27-05:00",
+    "message": "bluesky source works, message queue fixes",
+    "files_changed": 38
+  },
+  {
+    "hash": "7793ce46408b63b6b04f541153d1a093175fc879",
+    "short_hash": "7793ce4",
+    "author": "Orual",
+    "date": "2025-12-29T17:57:22-05:00",
+    "message": "cli rework, agent/group builder tui",
+    "files_changed": 55
+  },
+  {
+    "hash": "458303c9eafeb05edf0464e09a5a962103a3f14c",
+    "short_hash": "458303c",
+    "author": "Orual",
+    "date": "2025-12-29T00:27:16-05:00",
+    "message": "and better still file tool stuff",
+    "files_changed": 18
+  },
+  {
+    "hash": "3ee6b14e368ad7aea66c501235f8ae7158ff9297",
+    "short_hash": "3ee6b14",
+    "author": "Orual",
+    "date": "2025-12-26T20:58:37-05:00",
+    "message": "rewrite mega-commit, mostly done",
+    "files_changed": 408
+  },
+  {
+    "hash": "28162cc304c7e67b5240723a998f764174734012",
+    "short_hash": "28162cc",
+    "author": "Orual",
+    "date": "2025-12-23T12:33:55-05:00",
+    "message": "db module done enough",
+    "files_changed": 22
+  },
+  {
+    "hash": "29028effd4daebdc21b549e337cf700540d5e301",
+    "short_hash": "29028ef",
+    "author": "Orual",
+    "date": "2025-11-28T17:34:10-05:00",
+    "message": "rewrite the damn thing part the first",
+    "files_changed": 31
+  },
+  {
+    "hash": "a0d68ef1dae54f33e1071fa3a80e41147753aa61",
+    "short_hash": "a0d68ef",
+    "author": "Orual",
+    "date": "2025-09-06T15:58:52Z",
+    "message": "runtime restart discord command (admin-only)",
+    "files_changed": 8
+  },
+  {
+    "hash": "4a6a829c9191d5c37afa7c9a6d1532efb7a751a6",
+    "short_hash": "4a6a829",
+    "author": "Orual",
+    "date": "2025-09-05T15:33:23Z",
+    "message": "big pile of fixes to discord, message batch handling/waiting, and finally got round to some failing tests",
+    "files_changed": 21
+  },
+  {
+    "hash": "9f05e8c9438827abcbb5e224ba592e94c0799a38",
+    "short_hash": "9f05e8c",
+    "author": "Orual",
+    "date": "2025-09-05T04:54:21Z",
+    "message": "ok. new tool permissions stuff (still needs testing), also discord toml config, including multiple channels!",
+    "files_changed": 33
+  },
+  {
+    "hash": "90bb8f2a8abf86932778a338498c51ea00956edd",
+    "short_hash": "90bb8f2",
+    "author": "Orual",
+    "date": "2025-09-04T22:53:45Z",
+    "message": "tool permissions system part 1",
+    "files_changed": 20
+  },
+  {
+    "hash": "bc22bead77064ab09aa9dfc5521dc177d652b9d6",
+    "short_hash": "bc22bea",
+    "author": "Orual",
+    "date": "2025-08-30T21:07:33-04:00",
+    "message": "multi-model support IN! pattern and lasa can see!\n\nanother jetstream feed filter toggle",
+    "files_changed": 7
+  },
+  {
+    "hash": "9815ae383f63374c901fed72a81c83a0cb72f662",
+    "short_hash": "9815ae3",
+    "author": "Orual",
+    "date": "2025-07-06T15:24:33-04:00",
+    "message": "Typed tool trait",
+    "files_changed": 17
+  },
+  {
+    "hash": "e8a4ac924f757dc27ce0957202cc078ee7a1e900",
+    "short_hash": "e8a4ac9",
+    "author": "Orual",
+    "date": "2025-07-06T12:10:47-04:00",
+    "message": "cache refactor done-ish, sleeptime tools",
+    "files_changed": 21
+  },
+  {
+    "hash": "482118697d720b5d09130f782ed09acb639df8f1",
+    "short_hash": "4821186",
+    "author": "Orual",
+    "date": "2025-07-04T17:45:21-04:00",
+    "message": "Big refactor and ongoing development",
+    "files_changed": 47
+  },
+  {
+    "hash": "2c76287225ce87857433306b39d59484c3eb839d",
+    "short_hash": "2c76287",
+    "author": "Orual",
+    "date": "2025-07-02T14:24:15-04:00",
+    "message": "multiagent and discord bot stuff",
+    "files_changed": 16
+  },
+  {
+    "hash": "ade36297555db61257c052b42b38e0459c6fb9ba",
+    "short_hash": "ade3629",
+    "author": "Orual",
+    "date": "2025-07-01T23:38:58-04:00",
+    "message": "basic mcp server",
+    "files_changed": 13
+  },
+  {
+    "hash": "abdbcd8a73281390d4b30b89a09e47aa3bf770d3",
+    "short_hash": "abdbcd8",
+    "author": "Orual",
+    "date": "2025-07-01T21:49:00-04:00",
+    "message": "initial commit",
+    "files_changed": 0
+  }
+]

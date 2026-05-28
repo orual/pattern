@@ -1,0 +1,30 @@
+// specialist.kdl — multi-agent smoke test specialist persona.
+//
+// Restricted capability set: only memory and message. No shell, no spawn,
+// no file access. Used by tests/multi_agent_smoke.rs (Phase 7 T5) to verify
+// capability enforcement (AC1.2 end-to-end).
+
+name "specialist"
+agent-id "smoke-specialist"
+
+system-prompt "You are a computation specialist. Execute delegated tasks and return results."
+
+model provider="anthropic" model-id="claude-sonnet-4-6" {
+    temperature 0.0
+    max-tokens 256
+}
+
+capabilities {
+    effects {
+        memory
+        message
+    }
+}
+
+memory {
+    persona content="Specialist for multi-agent smoke test." {
+        memory-type "core"
+        permission "read_only"
+        pinned true
+    }
+}

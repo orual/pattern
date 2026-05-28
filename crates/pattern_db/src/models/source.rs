@@ -1,3 +1,9 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Data source models.
 //!
 //! Data sources represent external integrations that feed content into the constellation:
@@ -7,16 +13,15 @@
 //! - RSS feeds
 //! - etc.
 
+use crate::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-use sqlx::types::Json;
 
 /// A configured data source.
 ///
 /// Data sources can push content into the constellation, which gets
 /// routed to subscribed agents based on notification templates.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataSource {
     /// Unique identifier
     pub id: String,
@@ -56,8 +61,7 @@ pub struct DataSource {
 }
 
 /// Types of data sources.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceType {
     // ===== File & Code =====
@@ -128,7 +132,7 @@ impl std::fmt::Display for SourceType {
 ///
 /// When the data source receives content, it gets formatted using
 /// the notification template and sent to the agent.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDataSource {
     /// Agent receiving notifications
     pub agent_id: String,

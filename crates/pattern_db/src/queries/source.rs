@@ -1,199 +1,160 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Data source queries.
 
 use chrono::Utc;
-use sqlx::SqlitePool;
+use rusqlite::OptionalExtension;
 
 use crate::error::DbResult;
-use crate::models::{AgentDataSource, DataSource, SourceType};
+use crate::models::{AgentDataSource, DataSource};
+
+// ============================================================================
+// from_row implementations
+// ============================================================================
+
+impl DataSource {
+    pub(crate) fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            name: row.get("name")?,
+            source_type: row.get("source_type")?,
+            config: row.get("config")?,
+            last_sync_at: row.get("last_sync_at")?,
+            sync_cursor: row.get("sync_cursor")?,
+            enabled: row.get("enabled")?,
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
+}
+
+impl AgentDataSource {
+    pub(crate) fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            agent_id: row.get("agent_id")?,
+            source_id: row.get("source_id")?,
+            notification_template: row.get("notification_template")?,
+        })
+    }
+}
 
 // ============================================================================
 // DataSource CRUD
 // ============================================================================
 
 /// Create a new data source.
-pub async fn create_data_source(pool: &SqlitePool, source: &DataSource) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        INSERT INTO data_sources (id, name, source_type, config, last_sync_at, sync_cursor, enabled, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#,
-        source.id,
-        source.name,
-        source.source_type,
-        source.config,
-        source.last_sync_at,
-        source.sync_cursor,
-        source.enabled,
-        source.created_at,
-        source.updated_at,
-    )
-    .execute(pool)
-    .await?;
+pub fn create_data_source(conn: &rusqlite::Connection, source: &DataSource) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO data_sources (id, name, source_type, config, last_sync_at, sync_cursor, enabled, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![source.id, source.name, source.source_type, source.config, source.last_sync_at, source.sync_cursor, source.enabled, source.created_at, source.updated_at],
+    )?;
     Ok(())
 }
 
 /// Get a data source by ID.
-pub async fn get_data_source(pool: &SqlitePool, id: &str) -> DbResult<Option<DataSource>> {
-    let source = sqlx::query_as!(
-        DataSource,
-        r#"
-        SELECT
-            id as "id!",
-            name as "name!",
-            source_type as "source_type!: SourceType",
-            config as "config!: _",
-            last_sync_at as "last_sync_at: _",
-            sync_cursor,
-            enabled as "enabled!: bool",
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM data_sources WHERE id = ?
-        "#,
-        id
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(source)
+pub fn get_data_source(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<DataSource>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, source_type, config, last_sync_at, sync_cursor, enabled, created_at, updated_at
+         FROM data_sources WHERE id = ?1",
+    )?;
+    let result = stmt
+        .query_row(rusqlite::params![id], DataSource::from_row)
+        .optional()?;
+    Ok(result)
 }
 
 /// Get a data source by name.
-pub async fn get_data_source_by_name(
-    pool: &SqlitePool,
+pub fn get_data_source_by_name(
+    conn: &rusqlite::Connection,
     name: &str,
 ) -> DbResult<Option<DataSource>> {
-    let source = sqlx::query_as!(
-        DataSource,
-        r#"
-        SELECT
-            id as "id!",
-            name as "name!",
-            source_type as "source_type!: SourceType",
-            config as "config!: _",
-            last_sync_at as "last_sync_at: _",
-            sync_cursor,
-            enabled as "enabled!: bool",
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM data_sources WHERE name = ?
-        "#,
-        name
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(source)
+    let mut stmt = conn.prepare(
+        "SELECT id, name, source_type, config, last_sync_at, sync_cursor, enabled, created_at, updated_at
+         FROM data_sources WHERE name = ?1",
+    )?;
+    let result = stmt
+        .query_row(rusqlite::params![name], DataSource::from_row)
+        .optional()?;
+    Ok(result)
 }
 
 /// List all data sources.
-pub async fn list_data_sources(pool: &SqlitePool) -> DbResult<Vec<DataSource>> {
-    let sources = sqlx::query_as!(
-        DataSource,
-        r#"
-        SELECT
-            id as "id!",
-            name as "name!",
-            source_type as "source_type!: SourceType",
-            config as "config!: _",
-            last_sync_at as "last_sync_at: _",
-            sync_cursor,
-            enabled as "enabled!: bool",
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM data_sources ORDER BY name
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
+pub fn list_data_sources(conn: &rusqlite::Connection) -> DbResult<Vec<DataSource>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, source_type, config, last_sync_at, sync_cursor, enabled, created_at, updated_at
+         FROM data_sources ORDER BY name",
+    )?;
+    let rows = stmt.query_map([], DataSource::from_row)?;
+    let mut sources = Vec::new();
+    for row in rows {
+        sources.push(row?);
+    }
     Ok(sources)
 }
 
 /// List enabled data sources.
-pub async fn list_enabled_data_sources(pool: &SqlitePool) -> DbResult<Vec<DataSource>> {
-    let sources = sqlx::query_as!(
-        DataSource,
-        r#"
-        SELECT
-            id as "id!",
-            name as "name!",
-            source_type as "source_type!: SourceType",
-            config as "config!: _",
-            last_sync_at as "last_sync_at: _",
-            sync_cursor,
-            enabled as "enabled!: bool",
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM data_sources WHERE enabled = 1 ORDER BY name
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
+pub fn list_enabled_data_sources(conn: &rusqlite::Connection) -> DbResult<Vec<DataSource>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, source_type, config, last_sync_at, sync_cursor, enabled, created_at, updated_at
+         FROM data_sources WHERE enabled = 1 ORDER BY name",
+    )?;
+    let rows = stmt.query_map([], DataSource::from_row)?;
+    let mut sources = Vec::new();
+    for row in rows {
+        sources.push(row?);
+    }
     Ok(sources)
 }
 
 /// Update a data source.
-pub async fn update_data_source(pool: &SqlitePool, source: &DataSource) -> DbResult<bool> {
-    let result = sqlx::query!(
-        r#"
-        UPDATE data_sources
-        SET name = ?, source_type = ?, config = ?, enabled = ?, updated_at = ?
-        WHERE id = ?
-        "#,
-        source.name,
-        source.source_type,
-        source.config,
-        source.enabled,
-        source.updated_at,
-        source.id,
-    )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() > 0)
+pub fn update_data_source(conn: &rusqlite::Connection, source: &DataSource) -> DbResult<bool> {
+    let count = conn.execute(
+        "UPDATE data_sources SET name = ?1, source_type = ?2, config = ?3, enabled = ?4, updated_at = ?5 WHERE id = ?6",
+        rusqlite::params![source.name, source.source_type, source.config, source.enabled, source.updated_at, source.id],
+    )?;
+    Ok(count > 0)
 }
 
 /// Update sync state for a data source.
-pub async fn update_sync_state(
-    pool: &SqlitePool,
+pub fn update_sync_state(
+    conn: &rusqlite::Connection,
     id: &str,
     cursor: Option<&str>,
 ) -> DbResult<bool> {
     let now = Utc::now();
-    let result = sqlx::query!(
-        r#"
-        UPDATE data_sources
-        SET last_sync_at = ?, sync_cursor = ?, updated_at = ?
-        WHERE id = ?
-        "#,
-        now,
-        cursor,
-        now,
-        id,
-    )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() > 0)
+    let count = conn.execute(
+        "UPDATE data_sources SET last_sync_at = ?1, sync_cursor = ?2, updated_at = ?3 WHERE id = ?4",
+        rusqlite::params![now, cursor, now, id],
+    )?;
+    Ok(count > 0)
 }
 
 /// Enable or disable a data source.
-pub async fn set_data_source_enabled(pool: &SqlitePool, id: &str, enabled: bool) -> DbResult<bool> {
+pub fn set_data_source_enabled(
+    conn: &rusqlite::Connection,
+    id: &str,
+    enabled: bool,
+) -> DbResult<bool> {
     let now = Utc::now();
-    let result = sqlx::query!(
-        r#"
-        UPDATE data_sources SET enabled = ?, updated_at = ? WHERE id = ?
-        "#,
-        enabled,
-        now,
-        id,
-    )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() > 0)
+    let count = conn.execute(
+        "UPDATE data_sources SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![enabled, now, id],
+    )?;
+    Ok(count > 0)
 }
 
 /// Delete a data source.
-pub async fn delete_data_source(pool: &SqlitePool, id: &str) -> DbResult<bool> {
-    let result = sqlx::query!("DELETE FROM data_sources WHERE id = ?", id)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
+pub fn delete_data_source(conn: &rusqlite::Connection, id: &str) -> DbResult<bool> {
+    let count = conn.execute(
+        "DELETE FROM data_sources WHERE id = ?1",
+        rusqlite::params![id],
+    )?;
+    Ok(count > 0)
 }
 
 // ============================================================================
@@ -201,81 +162,62 @@ pub async fn delete_data_source(pool: &SqlitePool, id: &str) -> DbResult<bool> {
 // ============================================================================
 
 /// Subscribe an agent to a data source.
-pub async fn subscribe_agent_to_source(
-    pool: &SqlitePool,
+pub fn subscribe_agent_to_source(
+    conn: &rusqlite::Connection,
     agent_id: &str,
     source_id: &str,
     notification_template: Option<&str>,
 ) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        INSERT INTO agent_data_sources (agent_id, source_id, notification_template)
-        VALUES (?, ?, ?)
-        ON CONFLICT(agent_id, source_id) DO UPDATE SET notification_template = excluded.notification_template
-        "#,
-        agent_id,
-        source_id,
-        notification_template,
-    )
-    .execute(pool)
-    .await?;
+    conn.execute(
+        "INSERT INTO agent_data_sources (agent_id, source_id, notification_template)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(agent_id, source_id) DO UPDATE SET notification_template = excluded.notification_template",
+        rusqlite::params![agent_id, source_id, notification_template],
+    )?;
     Ok(())
 }
 
 /// Unsubscribe an agent from a data source.
-pub async fn unsubscribe_agent_from_source(
-    pool: &SqlitePool,
+pub fn unsubscribe_agent_from_source(
+    conn: &rusqlite::Connection,
     agent_id: &str,
     source_id: &str,
 ) -> DbResult<bool> {
-    let result = sqlx::query!(
-        "DELETE FROM agent_data_sources WHERE agent_id = ? AND source_id = ?",
-        agent_id,
-        source_id,
-    )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() > 0)
+    let count = conn.execute(
+        "DELETE FROM agent_data_sources WHERE agent_id = ?1 AND source_id = ?2",
+        rusqlite::params![agent_id, source_id],
+    )?;
+    Ok(count > 0)
 }
 
 /// Get all subscriptions for an agent.
-pub async fn get_agent_subscriptions(
-    pool: &SqlitePool,
+pub fn get_agent_subscriptions(
+    conn: &rusqlite::Connection,
     agent_id: &str,
 ) -> DbResult<Vec<AgentDataSource>> {
-    let subs = sqlx::query_as!(
-        AgentDataSource,
-        r#"
-        SELECT
-            agent_id as "agent_id!",
-            source_id as "source_id!",
-            notification_template
-        FROM agent_data_sources WHERE agent_id = ?
-        "#,
-        agent_id
-    )
-    .fetch_all(pool)
-    .await?;
+    let mut stmt = conn.prepare(
+        "SELECT agent_id, source_id, notification_template FROM agent_data_sources WHERE agent_id = ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![agent_id], AgentDataSource::from_row)?;
+    let mut subs = Vec::new();
+    for row in rows {
+        subs.push(row?);
+    }
     Ok(subs)
 }
 
 /// Get all agents subscribed to a source.
-pub async fn get_source_subscribers(
-    pool: &SqlitePool,
+pub fn get_source_subscribers(
+    conn: &rusqlite::Connection,
     source_id: &str,
 ) -> DbResult<Vec<AgentDataSource>> {
-    let subs = sqlx::query_as!(
-        AgentDataSource,
-        r#"
-        SELECT
-            agent_id as "agent_id!",
-            source_id as "source_id!",
-            notification_template
-        FROM agent_data_sources WHERE source_id = ?
-        "#,
-        source_id
-    )
-    .fetch_all(pool)
-    .await?;
+    let mut stmt = conn.prepare(
+        "SELECT agent_id, source_id, notification_template FROM agent_data_sources WHERE source_id = ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![source_id], AgentDataSource::from_row)?;
+    let mut subs = Vec::new();
+    for row in rows {
+        subs.push(row?);
+    }
     Ok(subs)
 }

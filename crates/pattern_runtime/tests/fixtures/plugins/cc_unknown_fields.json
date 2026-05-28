@@ -1,0 +1,8 @@
+{
+  "name": "cc-unknown-test",
+  "description": "CC plugin with unknown fields",
+  "skills": "single-skill.md",
+  "fooBar": "preserved-string",
+  "baz": { "y": 1, "nested": { "deep": true } },
+  "quux": [1, 2, 3]
+}

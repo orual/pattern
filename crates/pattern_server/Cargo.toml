@@ -6,58 +6,55 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme.workspace = true
 
 [[bin]]
 name = "pattern-server"
 path = "src/main.rs"
 
 [dependencies]
-# Core dependencies
-pattern-core = { path = "../pattern_core", features = ["oauth"] }
-pattern-api = { path = "../pattern_api", features = ["server"] }
-pattern-mcp = { path = "../pattern_mcp" }
-pattern-discord = { path = "../pattern_discord" }
-pattern-macros = { path = "../pattern_macros" }
+pattern-core = { path = "../pattern_core", features = ["plugin-transport"] }
+pattern-plugin-sdk = { path = "../pattern_plugin_sdk", features = ["tui-channel"] }
+pattern-runtime = { path = "../pattern_runtime" }
+pattern-db = { path = "../pattern_db" }
+pattern-memory = { path = "../pattern_memory" }
+pattern-provider = { path = "../pattern_provider" }
 
-# Web framework
-axum = { workspace = true, features = ["ws", "macros"] }
-axum-extra = { workspace = true, features = ["typed-header"] }
-tower = { workspace = true }
-tower-http = { workspace = true, features = [
-    "cors",
-    "trace",
-    "compression-br",
-] }
-
-# Authentication
-jsonwebtoken = { workspace = true }
-argon2 = { workspace = true }
-rand = { workspace = true }
-
-# Async runtime
 tokio = { workspace = true, features = ["full"] }
+async-trait = { workspace = true }
+irpc = { workspace = true }
+irpc-iroh = { workspace = true }
+iroh = { workspace = true }
+noq = { workspace = true }
+n0-future = { workspace = true }
 
-# Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
-schemars = { workspace = true }
-
-# Database
-surrealdb = { workspace = true }
-
-# Logging
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-
-# Error handling
 thiserror = { workspace = true }
-miette = { workspace = true, features = ["fancy", "syntect-highlighter"] }
+miette = { workspace = true, features = ["fancy"] }
+dirs = { workspace = true }
+smol_str = { workspace = true }
+dashmap = "6.1"
+clap = { workspace = true }
+jiff = { workspace = true }
+nix = { version = "0.29", features = ["signal", "process"] }
+# Used to construct the http::Client passed into OpenAiAuthChain for the
+# codex OAuth refresh path.
+reqwest = { workspace = true }
 
-# Utils
-uuid = { workspace = true }
-chrono = { workspace = true }
-futures = { workspace = true }
+[dev-dependencies]
+# postcard is the wire format used by irpc (v1.1.3 transitively). Kept as a
+# direct dev-dep so protocol roundtrip tests exercise the real wire encoding
+# rather than only serde_json — postcard rejects a handful of shapes that
+# serde_json accepts (e.g. `serde_json::Value`, untagged enums without a
+# discriminant), and those restrictions are load-bearing for irpc correctness.
+postcard = { version = "1", features = ["alloc"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+# Test fixtures (NopProviderClient, InMemoryMemoryStore, etc.) live behind
+# the `test-support` feature in pattern_runtime.
+pattern-runtime = { path = "../pattern_runtime", features = ["test-support"] }
 
 [lints]
 workspace = true

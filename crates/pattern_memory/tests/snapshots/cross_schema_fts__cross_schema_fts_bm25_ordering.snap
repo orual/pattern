@@ -1,0 +1,7 @@
+---
+source: crates/pattern_memory/tests/cross_schema_fts.rs
+expression: "ordered_labels.join(\"\\n\")"
+---
+skill-block
+text-block
+tasklist-block

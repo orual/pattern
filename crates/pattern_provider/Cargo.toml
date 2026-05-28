@@ -1,0 +1,118 @@
+[package]
+name = "pattern-provider"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+pattern-core = { path = "../pattern_core", features = ["mcp-client"] }
+
+# LLM gateway — rebased rust-genai fork with pattern-v3-foundation patches.
+genai = { workspace = true }
+
+# Async runtime + traits
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros", "fs", "io-util"] }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+
+# Tracing + errors
+tracing = { workspace = true }
+thiserror = { workspace = true }
+miette = { workspace = true }
+
+# Serde
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# HTTP (for raw count_tokens calls and PKCE/OAuth endpoints)
+reqwest = { workspace = true }
+url = { workspace = true }
+serde_urlencoded = { workspace = true }
+
+# Rate limiting
+governor = { workspace = true }
+
+# Secrets — zeroizing wrapper for tokens in logs and long-lived state
+secrecy = { workspace = true }
+
+# Time + IDs
+jiff = { workspace = true, features = ["serde"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+# Diff generation for memory-block update pseudo-messages.
+similar = "2.6"
+
+# SmolStr for BlockHandle / ids used by pseudo_messages types.
+smol_str = { workspace = true }
+
+# Paths
+dirs = { workspace = true }
+
+# PKCE primitives
+rand = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+
+# Subscription-OAuth-only deps (gated by the `subscription-oauth` feature below).
+# `keyring` stores our OAuth tokens; `whoami` provides the platform account
+# identifier keyring requires. Neither is pulled when `--no-default-features`
+# is used, keeping the impersonation-adjacent subscription routing path out of
+# minimal / downstream-distributor builds.
+keyring = { workspace = true, optional = true }
+whoami = { workspace = true, optional = true }
+
+# Codex OAuth-only deps. `tiny_http` runs the loopback callback listener
+# for the PKCE flow; `open` opens the user's browser to the authorize URL.
+# id_token claims are extracted by base64-decoding the JWT payload
+# (matching codex CLI's approach) — TLS to auth.openai.com is the
+# authentication boundary, so JWKS signature verification adds nothing.
+tiny_http = { workspace = true, optional = true }
+open = { workspace = true, optional = true }
+
+# Advisory cross-process file locking. Used unconditionally by
+# `auth::file_lock` (which is consumed by codex storage AND Anthropic's
+# `creds_store::json_fallback` — both need concurrent-safe atomic-rename
+# write sequences). Not gated under `subscription-oauth` because file
+# locking is generic infrastructure, not subscription-flow-specific.
+fs4 = { workspace = true }
+llama-cpp-4 = { version = "0.2.52", features = ["vulkan"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "macros"] }
+wiremock = { workspace = true }
+tempfile = { workspace = true }
+tracing-test = { workspace = true }
+insta = { version = "1", features = ["yaml"] }
+
+[features]
+# Subscription OAuth flow for Anthropic. When enabled: session-pickup tier
+# (reads ~/.claude/.credentials.json), PKCE flow, OAuth token storage in
+# keyring, and the ShaperCompatMode::SubscriptionRoutingShape shape that
+# subscription-tier routing requires.
+#
+# When disabled (build with --no-default-features):
+# - The Anthropic credential-tier chain collapses to API-key only.
+# - ShaperCompatMode::SubscriptionRoutingShape is unavailable at the type level.
+# - ShaperConfig::default() uses ShaperCompatMode::HonestPattern.
+# - keyring + whoami deps are not pulled (optional deps activated by this feature).
+#
+# The purpose is safety: downstream distributors (or future public-facing
+# packagings) can build pattern without the impersonation-adjacent subscription
+# routing code. API-key access is the only auth path in that build.
+#
+# Default = on for dev convenience; pattern's foundation primary target is
+# subscription-tier work.
+subscription-oauth = [
+    "dep:keyring",
+    "dep:whoami",
+    "dep:tiny_http",
+    "dep:open",
+]
+default = ["subscription-oauth"]

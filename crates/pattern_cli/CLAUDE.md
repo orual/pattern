@@ -1,226 +1,184 @@
-# CLAUDE.md - Pattern CLI
+# CLAUDE.md - pattern_cli
 
 > **CRITICAL WARNING**: DO NOT run ANY CLI commands during development!
 > Production agents are running. Any CLI invocation will disrupt active agents.
-> Testing must be done offline after stopping production agents.
+> Testing must be done offline, using `cargo nextest run -p pattern-cli`.
+
+Last verified: 2026-04-23
 
 Command-line interface for the Pattern ADHD support system. Binary output: `pattern`.
 
-## CLI Command Reference
+## Subcommands
 
-### Chat Commands
+- `chat [AGENT]` — interactive TUI chat session with a Pattern agent.
+- `constellation [AGENT...]` — multi-agent constellation (one zellij pane per agent).
+- `mount {init,status}` — manage memory mounts.
+- `backup {create,list,restore,info,rotate}` — manage messages.db snapshots.
+- `daemon {start,stop,status}` — manage the `pattern-server` daemon process.
 
-```bash
-# Single agent chat (default agent: Pattern)
-pattern chat
-pattern chat --agent MyAgent
-
-# Group chat
-pattern chat --group main
-
-# Discord mode (single agent)
-pattern chat --discord
-pattern chat --agent MyAgent --discord
-
-# Discord mode (group)
-pattern chat --group main --discord
-```
-
-### Agent Commands
-
-```bash
-# List all agents
-pattern agent list
-
-# Show agent details
-pattern agent status <name>
-
-# Create new agent (interactive TUI builder)
-pattern agent create
-pattern agent create --from config.toml
-
-# Edit existing agent (interactive TUI builder)
-pattern agent edit <name>
-
-# Export agent to TOML
-pattern agent export <name>
-pattern agent export <name> -o output.toml
-
-# Add configuration
-pattern agent add source <agent> <source-name> -t bluesky
-pattern agent add memory <agent> <label> --content "text" -t core
-pattern agent add tool <agent> <tool-name>
-pattern agent add rule <agent> <tool> <rule-type>
-
-# Remove configuration
-pattern agent remove source <agent> <source-name>
-pattern agent remove memory <agent> <label>
-pattern agent remove tool <agent> <tool-name>
-pattern agent remove rule <agent> <tool>
-```
-
-### Group Commands
-
-```bash
-# List all groups
-pattern group list
-
-# Show group details and members
-pattern group status <name>
-
-# Create new group (interactive TUI builder)
-pattern group create
-pattern group create --from config.toml
-
-# Edit existing group (interactive TUI builder)
-pattern group edit <name>
-
-# Export group to TOML
-pattern group export <name>
-pattern group export <name> -o output.toml
-
-# Add configuration
-pattern group add member <group> <agent> --role regular
-pattern group add memory <group> <label> --content "text"
-pattern group add source <group> <source-name> -t discord
-
-# Remove configuration
-pattern group remove member <group> <agent>
-pattern group remove memory <group> <label>
-pattern group remove source <group> <source-name>
-```
-
-### Export/Import Commands
-
-```bash
-# Export to CAR format
-pattern export agent <name>
-pattern export agent <name> -o agent.car
-pattern export group <name>
-pattern export constellation
-
-# Import from CAR
-pattern import car agent.car
-pattern import car agent.car --rename-to NewName
-
-# Convert Letta/MemGPT format
-pattern import letta agent.af
-```
-
-### Debug Commands
-
-```bash
-# Memory inspection
-pattern debug list-core <agent>
-pattern debug list-archival <agent>
-pattern debug list-all-memory <agent>
-pattern debug edit-memory <agent> <label>
-pattern debug modify-memory <agent> <label> --new-label <name>
-
-# Search operations
-pattern debug search-archival --agent <name> "query"
-pattern debug search-conversations <agent> --query "text"
-
-# Context inspection
-pattern debug show-context <agent>
-pattern debug context-cleanup <agent> --dry-run
-```
-
-### ATProto/Bluesky Commands
-
-```bash
-# Authentication
-pattern atproto login <handle> -p <app-password>
-pattern atproto oauth <handle>
-pattern atproto status
-pattern atproto unlink <handle>
-pattern atproto test
-```
-
-### Configuration Commands
-
-```bash
-pattern config show
-pattern config save pattern.toml
-
-pattern db stats
-```
-
-## Interactive TUI Builders
-
-The CLI includes interactive builders for creating and editing agents and groups:
-
-### Agent Builder (`pattern agent create` / `pattern agent edit`)
-
-Sections:
-- **Basic Info**: Name, system prompt (inline or file path), persona, instructions
-- **Model**: Provider (anthropic/openai/gemini/ollama), model name, temperature
-- **Memory Blocks**: Add/edit/remove memory blocks with permissions and types
-- **Tools & Rules**: Enable tools from registry, add workflow rules
-- **Context Options**: Max messages, compression strategy, thinking mode
-- **Data Sources**: Configure Bluesky, Discord, file, or custom sources
-- **Integrations**: Bluesky handle linking
-
-### Group Builder (`pattern group create` / `pattern group edit`)
-
-Sections:
-- **Basic Info**: Name, description
-- **Coordination Pattern**: round_robin, supervisor, pipeline, dynamic, sleeptime
-- **Members**: Add agents with roles (regular, supervisor, observer, specialist)
-- **Shared Memory**: Memory blocks accessible to all group members
-- **Data Sources**: Event sources for the group
-
-Both builders:
-- Display a live configuration summary
-- Support loading from TOML files (`--from`)
-- Auto-save state to cache for recovery
-- Offer save destinations: database, file, both, or preview
+There is no `agent`, `group`, `debug`, `export`, `import`, `atproto`, `config`, or `db` subcommand in the current implementation.
 
 ## Architecture
 
-### Command Structure
-```rust
-#[derive(Subcommand)]
-enum Commands {
-    Chat { agent, group, discord },
-    Agent { cmd: AgentCommands },
-    Group { cmd: GroupCommands },
-    Debug { cmd: DebugCommands },
-    Export { cmd: ExportCommands },
-    Import { cmd: ImportCommands },
-    Atproto { cmd: AtprotoCommands },
-    Config { cmd: ConfigCommands },
-    Db { cmd: DbCommands },
-}
+### Entry point
+
+Binary entry at `src/main.rs`. Parsed with `clap` derive macros.
+
+### Daemon connection
+
+`pattern chat` connects to a `pattern-server` daemon over IRPC/QUIC (localhost)
+via `pattern_server::client::DaemonClient`. The daemon is auto-started if not
+already running (`commands/daemon.rs::ensure_daemon_running`).
+
+After connecting, the TUI sends `InitSession` to tell the daemon which project
+it is working in, then subscribes to the resolved agent's output stream.
+
+### TUI stack
+
+Built on:
+- `ratatui` + `crossterm` — terminal rendering and input.
+- `ratatui-textarea` — multi-line input area.
+- `tui-popup` — popup overlays.
+- `tui-markdown` — markdown rendering in conversation sections.
+- `arboard` + OSC52 fallback — clipboard support.
+
+Persona config loaded via `knus` from `persona.kdl`.
+
+### TUI module layout (`src/tui/`)
+
+```
+app.rs           # Root state + render + async event loop (App struct)
+autocomplete.rs  # Fuzzy autocomplete popup state and widget
+commands.rs      # Command registry + parsing (CommandRegistry, builtin_commands)
+conversation.rs  # Virtual-scrolling conversation view with markdown + collapsible sections
+input.rs         # TextArea wrapper with history + slash command detection (InputHandler)
+layout.rs        # Horizontal split sizing, PanelVisibility, compute_layout_with_panel
+markdown.rs      # Markdown rendering helpers
+model.rs         # RenderBatch, Section, SectionKind data model
+mod.rs           # Re-exports public items
+panel.rs         # Side panel for display events (PanelState, SidePanel widget)
+scroll.rs        # Scroll action helpers (ConversationAction, apply_action)
+status_bar.rs    # Persona + agent count + token usage + connection indicator
+toast.rs         # Toast popup notifications for panel-hidden mode
+test_utils.rs    # Test helpers (buffer_to_string, etc.) — cfg(test) only
+zellij/
+  detect.rs      # ZellijState detection (in session, not available, etc.)
+  layout.rs      # KDL layout generation for auto-launched sessions
+  mod.rs         # Re-exports
+  pane.rs        # spawn_tiled / spawn_floating helpers
+  session.rs     # Session launch and attach helpers
 ```
 
-### Chat Mode Features
-- Interactive terminal UI with `ratatui`
-- Typing indicators during agent processing
-- Memory block visibility in context
-- Tool call display with results
-- Discord integration via `--discord` flag
+### Zellij integration
 
-### Output System
-- Colored terminal output with `owo_colors`
-- Progress bars via `indicatif`
-- Tables via `comfy-table`
-- Markdown rendering via `termimad`
+- On startup outside a zellij session, `pattern chat` auto-launches a zellij
+  session with a layout that includes a `pattern-daemon` tab tailing the daemon
+  log. The daemon runs detached — exiting zellij does not kill the daemon.
+- Inside a zellij session, `pattern chat` opens as a normal pane.
+- `/pane @agent` spawns a sibling tiled pane for another agent.
+- `/float @agent` spawns a floating pane.
+- If `--no-zellij` is passed, all zellij integration is disabled.
+- If `--no-auto-launch-zj` is passed, auto-launch is skipped but `/pane` and
+  `/float` still work inside an existing session.
 
-### Sender Labels (CLI display)
-Based on message origin:
-- Agent: agent name
-- Bluesky: `@handle`
-- Discord: `Discord`
-- DataSource: `source_id`
-- CLI: `CLI`
-- API: `API`
-- Unknown: `Runtime`
+## Slash commands
 
-## Implementation Notes
+Commands are dispatched through `InputHandler` → `InputAction::SlashCommand` →
+`App::dispatch_slash_command` → `dispatch_local_command` or
+`dispatch_runtime_command`.
 
-- `clap` for command parsing with derive macros
-- `tokio` async runtime
-- `dialoguer` for interactive prompts in builders
-- `rustyline-async` for readline in chat mode
-- Direct database access via `pattern_db` through `RuntimeContext`
+### Local commands (no daemon call)
+
+| Command | Description |
+|---------|-------------|
+| `/quit` | Exit the TUI |
+| `/clear` | Clear conversation view |
+| `/panel` | Cycle panel visibility (Hidden → Visible → Expanded → Hidden) |
+| `/pane @agent` | Open agent in a new tiled pane (zellij only) |
+| `/float @agent` | Open agent in a floating pane (zellij only) |
+
+### Runtime commands (daemon RPC)
+
+| Command | Description | RPC |
+|---------|-------------|-----|
+| `/agents` | List active agents | `list_agents()` |
+| `/status` | Show uptime + agent count | `get_status()` |
+| `/shutdown` | Stop the daemon | `shutdown()` |
+| `/cancel` | Cancel current in-flight response | `cancel_batch()` |
+| `/front [@agent]` | Switch fronting agent (client-side only — see note) | none |
+
+### Deferred / not registered
+
+- `/context` is not registered. Context/memory display is deferred; the status
+  bar already shows token usage and dedicated memory inspection is a larger
+  design question.
+
+### Plugin-namespaced commands
+
+Commands containing `:` (e.g. `/plugin-name:do-thing`) are forwarded to the
+daemon via `run_command`. The plugin system is future work.
+
+### `/front` limitation
+
+`/front` is client-side only — the TUI tracks which agent it's locked to and
+sends every message with `Recipient::Direct(agent_id)`. As of v3-multi-agent
+Phase 5, the daemon DOES persist a `FrontingSet` (per-mount, in pattern_db) and
+exposes `GetFronting` / `SetFronting` / `UpdateRouting` RPCs, but the TUI does
+not yet consume them.
+
+The full TUI fronting integration (default outbound to `Recipient::Auto`,
+dynamic fronting status bar driven by `WireTurnEvent::FrontingChanged`,
+multi-agent attribution rendering, `/agent <id>` one-shot direct override) is
+Phase 6 Task 8 — see
+`docs/implementation-plans/2026-04-19-v3-multi-agent/phase_06.md`.
+
+## Command dispatch flow
+
+```
+Enter key
+  → InputHandler::handle_key
+  → InputAction::SlashCommand { name, args }
+  → App::handle_input_action
+  → App::dispatch_command
+  → lookup name in CommandRegistry
+  → CommandTarget::Local  → dispatch_local_command
+  → CommandTarget::Runtime → dispatch_runtime_command
+  → name contains ':'     → dispatch_namespaced_command (run_command RPC)
+```
+
+## Key bindings
+
+| Key | Focus | Action |
+|-----|-------|--------|
+| Enter | Input | Submit message (or accept autocomplete) |
+| Shift+Enter / Ctrl+Enter | Input | Insert newline |
+| Up / Down | Input (single line) | Cycle history |
+| Tab | Input | Switch focus to conversation |
+| Esc | Conversation | Switch focus back to input |
+| Ctrl+C | Any | Quit |
+| Ctrl+P | Any | Cycle panel visibility |
+| Ctrl+S | Any | Toggle explicit selection mode |
+| Alt+] / Alt+[ | Any | Widen / narrow side panel |
+| q | Conversation | Quit |
+| p | Conversation | Expand focused thinking section into panel |
+| Up / Down / PgUp / PgDn | Conversation | Scroll |
+| Space | Conversation | Toggle focused collapsible section |
+
+## Testing
+
+```bash
+cargo nextest run -p pattern-cli
+cargo insta review   # review snapshot diffs after rendering changes
+```
+
+Tests in `app.rs` include both sync unit tests and `#[tokio::test]` async
+integration tests that use echo-mode `DaemonServer::spawn()` for real dispatch
+verification without LLM credentials.
+
+## Development warnings
+
+- **DO NOT run `pattern` or `pattern-server` during development.**
+  Production agents may be running. Any invocation will disrupt them.
+- Echo mode (`DaemonServer::spawn()`) runs without credentials and is safe
+  for tests.
+- Do not add blocking calls to the `App::run` loop — spawn tasks instead.

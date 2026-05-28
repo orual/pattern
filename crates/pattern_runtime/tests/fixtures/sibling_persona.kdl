@@ -1,0 +1,42 @@
+// sibling_persona.kdl — minimal persona fixture for sibling-spawn tests.
+//
+// Used by tests/sibling_spawn.rs to verify AC5.1 (existing-persona adoption),
+// AC5.4 (capabilities come from own config), and AC5.6 (PersonaNotFound error
+// path). Keep this file minimal: it exercises the persona loader + sibling
+// spawn path without any external file dependencies.
+
+name "orual-sibling-test"
+agent-id "orual-sibling-test"
+
+system-prompt "You are a minimal sibling test persona for the Pattern project."
+
+model provider="anthropic" model-id="claude-sonnet-4-6" {
+    temperature 0.0
+    max-tokens 256
+}
+
+context {
+    compress-check-message-floor 100
+}
+
+budgets {
+    wall-ms 10000
+    cpu-ms 5000
+}
+
+// Capabilities declared here are the sibling's OWN set — not inherited
+// from the spawner. AC5.4 verifies this: a parent with Memory+Shell can
+// spawn a sibling that has only Memory, and the sibling cannot invoke Shell.
+capabilities {
+    effects {
+        memory
+    }
+}
+
+memory {
+    persona content="Sibling test persona for Pattern project spawn tests." {
+        memory-type "core"
+        permission "read_only"
+        pinned true
+    }
+}

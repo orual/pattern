@@ -1,0 +1,9 @@
+---
+source: crates/pattern_provider/src/compose/render.rs
+assertion_line: 650
+expression: rendered
+---
+<system-reminder>
+External edit while you were thinking:
+- 2025-04-18T18:13:20Z /tmp/watched.log (you were watching) changed
+</system-reminder>

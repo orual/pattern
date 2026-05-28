@@ -1,0 +1,29 @@
+// math_specialist.kdl — math specialist fixture for the Phase 5 T7 integration test.
+//
+// Routing target for messages matching Prefix("!math"). Does not need
+// FrontingControl — it is a routing target only.
+
+name "math-specialist"
+agent-id "math-specialist"
+
+system-prompt "You are the math specialist. You handle mathematical queries prefixed with !math."
+
+model provider="anthropic" model-id="claude-sonnet-4-6" {
+    temperature 0.0
+    max-tokens 256
+}
+
+capabilities {
+    effects {
+        memory
+        message
+    }
+}
+
+memory {
+    persona content="Math specialist persona for Pattern project routing tests." {
+        memory-type "core"
+        permission "read_only"
+        pinned true
+    }
+}

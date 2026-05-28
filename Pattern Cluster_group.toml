@@ -1,0 +1,39 @@
+name = "Pattern Cluster"
+description = "Public-facing constellation for exploration and understanding"
+pattern = "dynamic"
+
+[pattern_config]
+type = "dynamic"
+selector_name = "supervisor"
+
+[pattern_config.selector_config]
+
+[[members]]
+agent_id = "2f381ebf6fdf4548ac6ded79f18d496c"
+name = "Momentum"
+role = "regular"
+
+[[members]]
+agent_id = "3f31d92f7a6f41a7af278bd783d3dd39"
+name = "Flux"
+role = "regular"
+
+[[members]]
+agent_id = "62b14f69e29e410b826c46a829dfc378"
+name = "Pattern"
+role = "supervisor"
+
+[[members]]
+agent_id = "82648861bae54729849f02b02369ac54"
+name = "Entropy"
+role = "regular"
+
+[[members]]
+agent_id = "b134d9f4219642be8190a6eb93e9339e"
+name = "Anchor"
+role = 'specialist { domain: "system_integrity" }'
+
+[[members]]
+agent_id = "d59a95fda24247f1849d9190d0971b9b"
+name = "Archive"
+role = 'specialist { domain: "memory_management" }'

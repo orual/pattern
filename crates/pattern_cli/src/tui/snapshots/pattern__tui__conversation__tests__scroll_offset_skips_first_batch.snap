@@ -1,0 +1,11 @@
+---
+source: crates/pattern_cli/src/tui/conversation.rs
+expression: output
+---
+The answer is 42.
+Stop: EndTurn
+
+[you] Second question
+
+Second answer.
+Stop: EndTurn

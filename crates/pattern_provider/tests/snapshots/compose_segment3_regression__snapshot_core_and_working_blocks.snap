@@ -1,0 +1,21 @@
+---
+source: crates/pattern_provider/tests/compose_segment3_regression.rs
+assertion_line: 66
+expression: text
+---
+<system-reminder>
+[memory:current_state]
+
+<block:persona type="core" permission="Read, Append, Write">
+The agent's identity and role.
+
+I am Aria, a Pattern executive-function agent.
+</block:persona>
+
+<block:scratchpad type="working" permission="Read, Append, Write">
+Working notes for the current session.
+
+- reviewed PR #42
+- waiting on CI
+</block:scratchpad>
+</system-reminder>

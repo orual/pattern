@@ -2,10 +2,12 @@
 
 Pattern is a multi-agent ADHD support system providing external executive function through specialized cognitive agents. Each user ("partner") gets their own constellation of agents.
 
-**Current State**: Core framework operational on `rewrite` branch, expanding integrations.
+**Current State**: Core framework operational on `rewrite-v3` branch. V3 foundation + v3-memory-rework (8 phases) + v3-TUI (6 phases) all complete. `pattern_memory` crate extracted with the InRepo/Standalone/Sidecar storage modes. `pattern_server` daemon running over IRPC/QUIC with the `pattern_cli` ratatui TUI and zellij integration. v3-multi-agent (7 phases) complete. `CapabilitySet` + `EffectClass` + spawn primitives + fork/merge + mailbox/wake (with Haskell custom Interval-trigger evaluator) + fronting/routing + constellation registry + Haskell delegation patterns all landed. v3-sandbox-io (5 phases) complete: `LoroSyncedFile` + `DirWatcher` CRDT primitives in `pattern_memory`; `FileHandler` + `FileManager` with pooled DirWatcher, per-file open/watch lifecycle, async-reminder queue, `FilePolicy` default-deny from `.pattern.kdl`; `ShellHandler` + `ProcessManager` with `LocalPtyBackend`, background spawn streaming, `ProcessLogger`; unified `Port` trait replacing retired Sources/Rpc effects, `PortRegistryImpl` with dispatcher actor, `HttpPort`, plugin-style port-library materialization; `pattern_server` threads `FilePolicy` through `ProjectMount` and builds the port registry via `with_runtime_ports`.
+
+Last verified: 2026-04-28
 
 
-> **For AI Agents**: This is the source of truth for the Pattern codebase. Each crate has its own `CLAUDE.md` with specific implementation guidelines.
+> **For AI Agents**: This is the source of truth for the Pattern codebase. Each crate has its own `CLAUDE.md` with specific implementation guidelines. `AGENTS.md` at root and in each crate is a symlink to the corresponding `CLAUDE.md` for cross-tool compatibility (Codex, Cursor, etc.).
 
 ## For Humans
 
@@ -31,21 +33,37 @@ Agents may be running in production. Any CLI invocation will disrupt active agen
 
 ## Workspace Structure
 
+### Active workspace members
+
+These crates are part of the current `[workspace]` and build under
+`cargo check` / `cargo nextest run`:
+
 ```
 pattern/
 ├── crates/
-│   ├── pattern_api/      # Shared API types and contracts
-│   ├── pattern_auth/     # Credential storage (ATProto, Discord, providers)
-│   ├── pattern_cli/      # CLI with TUI builders
-│   ├── pattern_core/     # Agent framework, memory, tools, coordination
-│   ├── pattern_db/       # SQLite with FTS5 and vector search
-│   ├── pattern_discord/  # Discord bot integration
-│   ├── pattern_mcp/      # MCP client and server
-│   ├── pattern_nd/       # ADHD-specific tools and personalities
-│   └── pattern_server/   # Backend API server
-├── docs/                 # Architecture docs and guides
+│   ├── pattern_cli/      # ratatui TUI + IRPC client, mount/backup/daemon subcommands, zellij integration
+│   ├── pattern_core/     # Agent framework, capabilities, permission broker, policy types, Port trait, memory traits, tools, coordination
+│   ├── pattern_db/       # SQLite (rusqlite) with FTS5 and vector search
+│   ├── pattern_memory/   # Memory subsystem: cache, CRDT sync, loro_sync primitives, VCS, backup, mount modes
+│   ├── pattern_provider/ # LLM provider integration, auth, request shaping, attachment rendering
+│   ├── pattern_runtime/  # Agent runtime (Tidepool, turn loop, SDK, FileManager, ProcessManager, PortRegistry)
+│   └── pattern_server/   # Pattern daemon server (IRPC/QUIC)
+├── docs/                 # Architecture docs, implementation plans, design plans
 └── justfile              # Build automation
 ```
+
+### Retired / out-of-workspace crates
+
+These directories still exist on disk but are not in `[workspace].members` and
+do not currently build. They are kept for reference or future re-integration;
+do not assume they compile or reflect current architecture:
+
+- `pattern_discord/` — Discord bot integration (pre-v3 shape)
+- `pattern_mcp/` — MCP client/server (pre-v3 shape)
+- `pattern_nd/` — ADHD-specific tools and personalities (pre-v3 shape)
+
+`pattern_api` was removed entirely on 2026-04-23 — it was scaffolding for a
+design that no longer exists.
 
 Each crate has its own `CLAUDE.md` with specific implementation guidelines.
 
@@ -75,9 +93,9 @@ Each crate has its own `CLAUDE.md` with specific implementation guidelines.
 
 ### Module Organization
 
-- Use `mod.rs` to re-export public items only.
-- No nontrivial logic in `mod.rs`—use `imp.rs` or specific submodules.
-- Keep module boundaries strict with restricted visibility.
+- Module root file is `<name>.rs` adjacent to a `<name>/` directory (Rust 2018+ style). Do NOT use `mod.rs`. Example: `spawn.rs` + `spawn/registry.rs` + `spawn/ephemeral.rs`.
+- The module root file (`<name>.rs`) re-exports public items and declares submodules. No nontrivial logic in the module root — put logic in named submodules (`spawn/registry.rs`, `spawn/fork.rs`, etc.).
+- Keep module boundaries strict with restricted visibility (`pub(crate)`, `pub(super)` by default).
 - Platform-specific code in separate files: `unix.rs`, `windows.rs`.
 
 ### Documentation
@@ -129,10 +147,7 @@ cargo fmt
 # Lint
 cargo clippy --all-features --all-targets
 
-# Database operations (from crate directory!)
-cd crates/pattern_db && cargo sqlx prepare
-cd crates/pattern_auth && cargo sqlx prepare
-# NEVER use --workspace flag with sqlx prepare
+# No sqlx prepare needed — pattern_db uses rusqlite (no compile-time macros)
 ```
 
 ## Commit Message Style
@@ -157,8 +172,11 @@ Examples:
 ## Key Dependencies
 
 - **tokio**: Async runtime.
-- **sqlx**: Compile-time verified SQL queries.
+- **rusqlite**: Synchronous SQLite (replaced sqlx in v3-memory-rework).
+- **r2d2**: Connection pooling for rusqlite.
 - **loro**: CRDT for versioned memory blocks.
+- **jiff**: Timestamp handling (messages.db, backup filenames).
+- **knus**: Typed KDL parsing (persona files, `.pattern.kdl` config).
 - **thiserror/miette**: Error handling and diagnostics.
 - **serde**: Serialization.
 - **clap**: CLI parsing.

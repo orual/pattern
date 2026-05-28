@@ -1,0 +1,7 @@
+---
+source: crates/pattern_runtime/src/sdk/handlers/skills.rs
+expression: "ordered_names.join(\"\\n\")"
+---
+security-audit
+access-control
+credential-rotation

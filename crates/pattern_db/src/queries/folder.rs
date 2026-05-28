@@ -1,108 +1,131 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Folder and file queries.
 
 use chrono::Utc;
-use sqlx::SqlitePool;
+use rusqlite::OptionalExtension;
 
 use crate::error::DbResult;
-use crate::models::{
-    FilePassage, Folder, FolderAccess, FolderAttachment, FolderFile, FolderPathType,
-};
+use crate::models::{FilePassage, Folder, FolderAccess, FolderAttachment, FolderFile};
+
+// ============================================================================
+// from_row implementations
+// ============================================================================
+
+impl Folder {
+    pub(crate) fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            name: row.get("name")?,
+            description: row.get("description")?,
+            path_type: row.get("path_type")?,
+            path_value: row.get("path_value")?,
+            embedding_model: row.get("embedding_model")?,
+            created_at: row.get("created_at")?,
+        })
+    }
+}
+
+impl FolderFile {
+    pub(crate) fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            folder_id: row.get("folder_id")?,
+            name: row.get("name")?,
+            content_type: row.get("content_type")?,
+            size_bytes: row.get("size_bytes")?,
+            content: row.get("content")?,
+            uploaded_at: row.get("uploaded_at")?,
+            indexed_at: row.get("indexed_at")?,
+        })
+    }
+}
+
+impl FilePassage {
+    pub(crate) fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            file_id: row.get("file_id")?,
+            content: row.get("content")?,
+            start_line: row.get("start_line")?,
+            end_line: row.get("end_line")?,
+            chunk_index: row.get("chunk_index")?,
+            created_at: row.get("created_at")?,
+        })
+    }
+}
+
+impl FolderAttachment {
+    pub(crate) fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            folder_id: row.get("folder_id")?,
+            agent_id: row.get("agent_id")?,
+            access: row.get("access")?,
+            attached_at: row.get("attached_at")?,
+        })
+    }
+}
 
 // ============================================================================
 // Folder CRUD
 // ============================================================================
 
 /// Create a new folder.
-pub async fn create_folder(pool: &SqlitePool, folder: &Folder) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        INSERT INTO folders (id, name, description, path_type, path_value, embedding_model, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        "#,
-        folder.id,
-        folder.name,
-        folder.description,
-        folder.path_type,
-        folder.path_value,
-        folder.embedding_model,
-        folder.created_at,
-    )
-    .execute(pool)
-    .await?;
+pub fn create_folder(conn: &rusqlite::Connection, folder: &Folder) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO folders (id, name, description, path_type, path_value, embedding_model, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![folder.id, folder.name, folder.description, folder.path_type, folder.path_value, folder.embedding_model, folder.created_at],
+    )?;
     Ok(())
 }
 
 /// Get a folder by ID.
-pub async fn get_folder(pool: &SqlitePool, id: &str) -> DbResult<Option<Folder>> {
-    let folder = sqlx::query_as!(
-        Folder,
-        r#"
-        SELECT
-            id as "id!",
-            name as "name!",
-            description,
-            path_type as "path_type!: FolderPathType",
-            path_value,
-            embedding_model as "embedding_model!",
-            created_at as "created_at!: _"
-        FROM folders WHERE id = ?
-        "#,
-        id
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(folder)
+pub fn get_folder(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<Folder>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, path_type, path_value, embedding_model, created_at
+         FROM folders WHERE id = ?1",
+    )?;
+    let result = stmt
+        .query_row(rusqlite::params![id], Folder::from_row)
+        .optional()?;
+    Ok(result)
 }
 
 /// Get a folder by name.
-pub async fn get_folder_by_name(pool: &SqlitePool, name: &str) -> DbResult<Option<Folder>> {
-    let folder = sqlx::query_as!(
-        Folder,
-        r#"
-        SELECT
-            id as "id!",
-            name as "name!",
-            description,
-            path_type as "path_type!: FolderPathType",
-            path_value,
-            embedding_model as "embedding_model!",
-            created_at as "created_at!: _"
-        FROM folders WHERE name = ?
-        "#,
-        name
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(folder)
+pub fn get_folder_by_name(conn: &rusqlite::Connection, name: &str) -> DbResult<Option<Folder>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, path_type, path_value, embedding_model, created_at
+         FROM folders WHERE name = ?1",
+    )?;
+    let result = stmt
+        .query_row(rusqlite::params![name], Folder::from_row)
+        .optional()?;
+    Ok(result)
 }
 
 /// List all folders.
-pub async fn list_folders(pool: &SqlitePool) -> DbResult<Vec<Folder>> {
-    let folders = sqlx::query_as!(
-        Folder,
-        r#"
-        SELECT
-            id as "id!",
-            name as "name!",
-            description,
-            path_type as "path_type!: FolderPathType",
-            path_value,
-            embedding_model as "embedding_model!",
-            created_at as "created_at!: _"
-        FROM folders ORDER BY name
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
+pub fn list_folders(conn: &rusqlite::Connection) -> DbResult<Vec<Folder>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, path_type, path_value, embedding_model, created_at
+         FROM folders ORDER BY name",
+    )?;
+    let rows = stmt.query_map([], Folder::from_row)?;
+    let mut folders = Vec::new();
+    for row in rows {
+        folders.push(row?);
+    }
     Ok(folders)
 }
 
 /// Delete a folder (cascades to files and passages).
-pub async fn delete_folder(pool: &SqlitePool, id: &str) -> DbResult<bool> {
-    let result = sqlx::query!("DELETE FROM folders WHERE id = ?", id)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
+pub fn delete_folder(conn: &rusqlite::Connection, id: &str) -> DbResult<bool> {
+    let count = conn.execute("DELETE FROM folders WHERE id = ?1", rusqlite::params![id])?;
+    Ok(count > 0)
 }
 
 // ============================================================================
@@ -110,124 +133,82 @@ pub async fn delete_folder(pool: &SqlitePool, id: &str) -> DbResult<bool> {
 // ============================================================================
 
 /// Create or update a file in a folder.
-pub async fn upsert_file(pool: &SqlitePool, file: &FolderFile) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        INSERT INTO folder_files (id, folder_id, name, content_type, size_bytes, content, uploaded_at, indexed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(folder_id, name) DO UPDATE SET
-            content_type = excluded.content_type,
-            size_bytes = excluded.size_bytes,
-            content = excluded.content,
-            uploaded_at = excluded.uploaded_at
-        "#,
-        file.id,
-        file.folder_id,
-        file.name,
-        file.content_type,
-        file.size_bytes,
-        file.content,
-        file.uploaded_at,
-        file.indexed_at,
-    )
-    .execute(pool)
-    .await?;
+pub fn upsert_file(conn: &rusqlite::Connection, file: &FolderFile) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO folder_files (id, folder_id, name, content_type, size_bytes, content, uploaded_at, indexed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(folder_id, name) DO UPDATE SET
+             content_type = excluded.content_type,
+             size_bytes = excluded.size_bytes,
+             content = excluded.content,
+             uploaded_at = excluded.uploaded_at",
+        rusqlite::params![file.id, file.folder_id, file.name, file.content_type, file.size_bytes, file.content, file.uploaded_at, file.indexed_at],
+    )?;
     Ok(())
 }
 
 /// Get a file by ID.
-pub async fn get_file(pool: &SqlitePool, id: &str) -> DbResult<Option<FolderFile>> {
-    let file = sqlx::query_as!(
-        FolderFile,
-        r#"
-        SELECT
-            id as "id!",
-            folder_id as "folder_id!",
-            name as "name!",
-            content_type,
-            size_bytes,
-            content,
-            uploaded_at as "uploaded_at!: _",
-            indexed_at as "indexed_at: _"
-        FROM folder_files WHERE id = ?
-        "#,
-        id
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(file)
+pub fn get_file(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<FolderFile>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, folder_id, name, content_type, size_bytes, content, uploaded_at, indexed_at
+         FROM folder_files WHERE id = ?1",
+    )?;
+    let result = stmt
+        .query_row(rusqlite::params![id], FolderFile::from_row)
+        .optional()?;
+    Ok(result)
 }
 
 /// Get a file by folder and name.
-pub async fn get_file_by_name(
-    pool: &SqlitePool,
+pub fn get_file_by_name(
+    conn: &rusqlite::Connection,
     folder_id: &str,
     name: &str,
 ) -> DbResult<Option<FolderFile>> {
-    let file = sqlx::query_as!(
-        FolderFile,
-        r#"
-        SELECT
-            id as "id!",
-            folder_id as "folder_id!",
-            name as "name!",
-            content_type,
-            size_bytes,
-            content,
-            uploaded_at as "uploaded_at!: _",
-            indexed_at as "indexed_at: _"
-        FROM folder_files WHERE folder_id = ? AND name = ?
-        "#,
-        folder_id,
-        name
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(file)
+    let mut stmt = conn.prepare(
+        "SELECT id, folder_id, name, content_type, size_bytes, content, uploaded_at, indexed_at
+         FROM folder_files WHERE folder_id = ?1 AND name = ?2",
+    )?;
+    let result = stmt
+        .query_row(rusqlite::params![folder_id, name], FolderFile::from_row)
+        .optional()?;
+    Ok(result)
 }
 
 /// List files in a folder.
-pub async fn list_files_in_folder(pool: &SqlitePool, folder_id: &str) -> DbResult<Vec<FolderFile>> {
-    let files = sqlx::query_as!(
-        FolderFile,
-        r#"
-        SELECT
-            id as "id!",
-            folder_id as "folder_id!",
-            name as "name!",
-            content_type,
-            size_bytes,
-            content,
-            uploaded_at as "uploaded_at!: _",
-            indexed_at as "indexed_at: _"
-        FROM folder_files WHERE folder_id = ? ORDER BY name
-        "#,
-        folder_id
-    )
-    .fetch_all(pool)
-    .await?;
+pub fn list_files_in_folder(
+    conn: &rusqlite::Connection,
+    folder_id: &str,
+) -> DbResult<Vec<FolderFile>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, folder_id, name, content_type, size_bytes, content, uploaded_at, indexed_at
+         FROM folder_files WHERE folder_id = ?1 ORDER BY name",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![folder_id], FolderFile::from_row)?;
+    let mut files = Vec::new();
+    for row in rows {
+        files.push(row?);
+    }
     Ok(files)
 }
 
 /// Mark a file as indexed.
-pub async fn mark_file_indexed(pool: &SqlitePool, file_id: &str) -> DbResult<bool> {
+pub fn mark_file_indexed(conn: &rusqlite::Connection, file_id: &str) -> DbResult<bool> {
     let now = Utc::now();
-    let result = sqlx::query!(
-        "UPDATE folder_files SET indexed_at = ? WHERE id = ?",
-        now,
-        file_id,
-    )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() > 0)
+    let count = conn.execute(
+        "UPDATE folder_files SET indexed_at = ?1 WHERE id = ?2",
+        rusqlite::params![now, file_id],
+    )?;
+    Ok(count > 0)
 }
 
 /// Delete a file (cascades to passages).
-pub async fn delete_file(pool: &SqlitePool, id: &str) -> DbResult<bool> {
-    let result = sqlx::query!("DELETE FROM folder_files WHERE id = ?", id)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
+pub fn delete_file(conn: &rusqlite::Connection, id: &str) -> DbResult<bool> {
+    let count = conn.execute(
+        "DELETE FROM folder_files WHERE id = ?1",
+        rusqlite::params![id],
+    )?;
+    Ok(count > 0)
 }
 
 // ============================================================================
@@ -235,52 +216,43 @@ pub async fn delete_file(pool: &SqlitePool, id: &str) -> DbResult<bool> {
 // ============================================================================
 
 /// Create a file passage.
-pub async fn create_passage(pool: &SqlitePool, passage: &FilePassage) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        INSERT INTO file_passages (id, file_id, content, start_line, end_line, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        "#,
-        passage.id,
-        passage.file_id,
-        passage.content,
-        passage.start_line,
-        passage.end_line,
-        passage.created_at,
-    )
-    .execute(pool)
-    .await?;
+pub fn create_passage(conn: &rusqlite::Connection, passage: &FilePassage) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO file_passages (id, file_id, content, start_line, end_line, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            passage.id,
+            passage.file_id,
+            passage.content,
+            passage.start_line,
+            passage.end_line,
+            passage.created_at
+        ],
+    )?;
     Ok(())
 }
 
 /// Get passages for a file.
-pub async fn get_file_passages(pool: &SqlitePool, file_id: &str) -> DbResult<Vec<FilePassage>> {
-    let passages = sqlx::query_as!(
-        FilePassage,
-        r#"
-        SELECT
-            id as "id!",
-            file_id as "file_id!",
-            content as "content!",
-            start_line,
-            end_line,
-            chunk_index as "chunk_index!",
-            created_at as "created_at!: _"
-        FROM file_passages WHERE file_id = ? ORDER BY chunk_index
-        "#,
-        file_id
-    )
-    .fetch_all(pool)
-    .await?;
+pub fn get_file_passages(conn: &rusqlite::Connection, file_id: &str) -> DbResult<Vec<FilePassage>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, file_id, content, start_line, end_line, chunk_index, created_at
+         FROM file_passages WHERE file_id = ?1 ORDER BY chunk_index",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![file_id], FilePassage::from_row)?;
+    let mut passages = Vec::new();
+    for row in rows {
+        passages.push(row?);
+    }
     Ok(passages)
 }
 
 /// Delete passages for a file (used before re-indexing).
-pub async fn delete_file_passages(pool: &SqlitePool, file_id: &str) -> DbResult<u64> {
-    let result = sqlx::query!("DELETE FROM file_passages WHERE file_id = ?", file_id)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected())
+pub fn delete_file_passages(conn: &rusqlite::Connection, file_id: &str) -> DbResult<u64> {
+    let count = conn.execute(
+        "DELETE FROM file_passages WHERE file_id = ?1",
+        rusqlite::params![file_id],
+    )?;
+    Ok(count as u64)
 }
 
 // ============================================================================
@@ -288,85 +260,63 @@ pub async fn delete_file_passages(pool: &SqlitePool, file_id: &str) -> DbResult<
 // ============================================================================
 
 /// Attach a folder to an agent.
-pub async fn attach_folder_to_agent(
-    pool: &SqlitePool,
+pub fn attach_folder_to_agent(
+    conn: &rusqlite::Connection,
     folder_id: &str,
     agent_id: &str,
     access: FolderAccess,
 ) -> DbResult<()> {
     let now = Utc::now();
-    sqlx::query!(
-        r#"
-        INSERT INTO folder_attachments (folder_id, agent_id, access, attached_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(folder_id, agent_id) DO UPDATE SET access = excluded.access
-        "#,
-        folder_id,
-        agent_id,
-        access,
-        now,
-    )
-    .execute(pool)
-    .await?;
+    conn.execute(
+        "INSERT INTO folder_attachments (folder_id, agent_id, access, attached_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(folder_id, agent_id) DO UPDATE SET access = excluded.access",
+        rusqlite::params![folder_id, agent_id, access, now],
+    )?;
     Ok(())
 }
 
 /// Detach a folder from an agent.
-pub async fn detach_folder_from_agent(
-    pool: &SqlitePool,
+pub fn detach_folder_from_agent(
+    conn: &rusqlite::Connection,
     folder_id: &str,
     agent_id: &str,
 ) -> DbResult<bool> {
-    let result = sqlx::query!(
-        "DELETE FROM folder_attachments WHERE folder_id = ? AND agent_id = ?",
-        folder_id,
-        agent_id,
-    )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() > 0)
+    let count = conn.execute(
+        "DELETE FROM folder_attachments WHERE folder_id = ?1 AND agent_id = ?2",
+        rusqlite::params![folder_id, agent_id],
+    )?;
+    Ok(count > 0)
 }
 
 /// Get folders attached to an agent.
-pub async fn get_agent_folders(
-    pool: &SqlitePool,
+pub fn get_agent_folders(
+    conn: &rusqlite::Connection,
     agent_id: &str,
 ) -> DbResult<Vec<FolderAttachment>> {
-    let attachments = sqlx::query_as!(
-        FolderAttachment,
-        r#"
-        SELECT
-            folder_id as "folder_id!",
-            agent_id as "agent_id!",
-            access as "access!: FolderAccess",
-            attached_at as "attached_at!: _"
-        FROM folder_attachments WHERE agent_id = ?
-        "#,
-        agent_id
-    )
-    .fetch_all(pool)
-    .await?;
+    let mut stmt = conn.prepare(
+        "SELECT folder_id, agent_id, access, attached_at FROM folder_attachments WHERE agent_id = ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![agent_id], FolderAttachment::from_row)?;
+    let mut attachments = Vec::new();
+    for row in rows {
+        attachments.push(row?);
+    }
     Ok(attachments)
 }
 
 /// Get agents with access to a folder.
-pub async fn get_folder_agents(
-    pool: &SqlitePool,
+pub fn get_folder_agents(
+    conn: &rusqlite::Connection,
     folder_id: &str,
 ) -> DbResult<Vec<FolderAttachment>> {
-    let attachments = sqlx::query_as!(
-        FolderAttachment,
-        r#"
-        SELECT
-            folder_id as "folder_id!",
-            agent_id as "agent_id!",
-            access as "access!: FolderAccess",
-            attached_at as "attached_at!: _"
-        FROM folder_attachments WHERE folder_id = ?
-        "#,
-        folder_id
-    )
-    .fetch_all(pool)
-    .await?;
+    let mut stmt = conn.prepare(
+        "SELECT folder_id, agent_id, access, attached_at FROM folder_attachments WHERE folder_id = ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![folder_id], FolderAttachment::from_row)?;
+    let mut attachments = Vec::new();
+    for row in rows {
+        attachments.push(row?);
+    }
     Ok(attachments)
 }

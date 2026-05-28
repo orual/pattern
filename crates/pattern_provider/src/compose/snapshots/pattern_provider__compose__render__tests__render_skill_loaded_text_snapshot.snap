@@ -1,0 +1,12 @@
+---
+source: crates/pattern_provider/src/compose/render.rs
+assertion_line: 679
+expression: text
+---
+[skill:loaded] name="fix-authentication" trust_tier="project-local"
+
+## Overview
+
+Handles OAuth2 token refresh for expired sessions.
+
+[skill:loaded:end]

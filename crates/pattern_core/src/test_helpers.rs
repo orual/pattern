@@ -1,34 +1,27 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 #![cfg(test)]
 
-pub mod messages {
-    use crate::SnowflakePosition;
-    use crate::messages::{BatchType, Message};
-    use crate::utils::get_next_message_position_sync;
-
-    /// Create a simple two-message batch: user then assistant.
-    /// Returns (user_msg, assistant_msg, batch_id).
-    pub fn simple_user_assistant_batch(
-        user_text: impl Into<String>,
-        assistant_text: impl Into<String>,
-    ) -> (Message, Message, SnowflakePosition) {
-        let batch_id = get_next_message_position_sync();
-        let user = Message::user_in_batch(batch_id, 0, user_text.into());
-        let mut assistant = Message::assistant_in_batch(batch_id, 1, assistant_text.into());
-        if assistant.batch_type.is_none() {
-            assistant.batch_type = Some(BatchType::UserRequest);
-        }
-        (user, assistant, batch_id)
-    }
-}
+// The pre-v3 `messages` helper module depended on the now-staged legacy
+// `messages/` module and on `SnowflakePosition` (superseded by jiff
+// `Timestamp`). The helpers are retired; if message-batch helpers are needed
+// again, rebuild them on top of `types::batch::MessageBatch`.
 
 pub mod memory {
-    use async_trait::async_trait;
-    use chrono::Utc;
+    use jiff::Timestamp;
     use serde_json::Value as JsonValue;
 
-    use crate::memory::{
-        ArchivalEntry, BlockMetadata, BlockSchema, BlockType, MemoryResult, MemorySearchResult,
-        MemoryStore, SearchOptions, SharedBlockInfo, StructuredDocument,
+    use crate::memory::StructuredDocument;
+    use crate::traits::MemoryStore;
+    use crate::types::block::BlockCreate;
+    use crate::types::memory_types::{
+        ArchivalEntry, BlockFilter, BlockMetadata, BlockMetadataPatch, BlockSchema,
+        MemoryBlockType, MemoryResult, MemorySearchResult, MemorySearchScope, Scope,
+        SearchOptions, SharedBlockInfo, UndoRedoDepth, UndoRedoOp,
     };
 
     /// Configurable mock MemoryStore for testing different block configurations.
@@ -58,247 +51,191 @@ pub mod memory {
         }
     }
 
-    #[async_trait]
     impl MemoryStore for MockMemoryStore {
-        async fn create_block(
+        fn commit_write(&self, _scope: &Scope, _label: &str) -> MemoryResult<()> { Ok(()) }
+        fn create_or_replace_block(&self, scope: &Scope, create: BlockCreate) -> MemoryResult<StructuredDocument> { self.create_block(scope, create) }
+        fn create_block(
             &self,
-            _agent_id: &str,
-            _label: &str,
-            _description: &str,
-            _block_type: BlockType,
-            schema: BlockSchema,
-            _char_limit: usize,
+            _scope: &Scope,
+            create: BlockCreate,
         ) -> MemoryResult<StructuredDocument> {
-            Ok(StructuredDocument::new(schema))
+            Ok(StructuredDocument::new(create.schema))
         }
 
-        async fn get_block(
+        fn get_block(
             &self,
-            _agent_id: &str,
+            _scope: &Scope,
             _label: &str,
         ) -> MemoryResult<Option<StructuredDocument>> {
             Ok(None)
         }
 
-        async fn get_block_metadata(
+        fn get_block_metadata(
             &self,
-            _agent_id: &str,
+            _scope: &Scope,
             _label: &str,
         ) -> MemoryResult<Option<BlockMetadata>> {
             Ok(None)
         }
 
-        async fn list_blocks(&self, _agent_id: &str) -> MemoryResult<Vec<BlockMetadata>> {
-            Ok(Vec::new())
-        }
-
-        async fn list_blocks_by_type(
-            &self,
-            _agent_id: &str,
-            block_type: BlockType,
-        ) -> MemoryResult<Vec<BlockMetadata>> {
-            // Return mock blocks based on type.
-            match block_type {
-                BlockType::Core => Ok(vec![BlockMetadata {
+        fn list_blocks(&self, filter: BlockFilter) -> MemoryResult<Vec<BlockMetadata>> {
+            // Return mock blocks based on type filter if present.
+            match filter.block_type {
+                Some(MemoryBlockType::Core) => Ok(vec![BlockMetadata {
                     id: "core-1".to_string(),
                     agent_id: "test-agent".to_string(),
                     label: "core_memory".to_string(),
                     description: "Core agent memory".to_string(),
-                    block_type: BlockType::Core,
+                    block_type: MemoryBlockType::Core,
                     schema: BlockSchema::text(),
                     char_limit: 1000,
-                    permission: pattern_db::models::MemoryPermission::ReadWrite,
+                    permission: crate::types::memory_types::MemoryPermission::ReadWrite,
                     pinned: true,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                 }]),
-                BlockType::Working => {
+                Some(MemoryBlockType::Working) => {
                     if self.working_blocks_pinned {
-                        // Default: single pinned Working block.
                         Ok(vec![BlockMetadata {
                             id: "working-1".to_string(),
                             agent_id: "test-agent".to_string(),
                             label: "working_memory".to_string(),
                             description: "Working context".to_string(),
-                            block_type: BlockType::Working,
+                            block_type: MemoryBlockType::Working,
                             schema: BlockSchema::text(),
                             char_limit: 2000,
-                            permission: pattern_db::models::MemoryPermission::ReadWrite,
+                            permission: crate::types::memory_types::MemoryPermission::ReadWrite,
                             pinned: true,
-                            created_at: Utc::now(),
-                            updated_at: Utc::now(),
+                            created_at: Timestamp::now(),
+                            updated_at: Timestamp::now(),
                         }])
                     } else {
-                        // Unpinned mode: mix of pinned and unpinned blocks for testing filtering.
                         Ok(vec![
-                            // Unpinned block - should be excluded by default.
                             BlockMetadata {
                                 id: "ephemeral-1".to_string(),
                                 agent_id: "test-agent".to_string(),
                                 label: "ephemeral_context".to_string(),
                                 description: "Ephemeral context block".to_string(),
-                                block_type: BlockType::Working,
+                                block_type: MemoryBlockType::Working,
                                 schema: BlockSchema::text(),
                                 char_limit: 2000,
-                                permission: pattern_db::models::MemoryPermission::ReadWrite,
+                                permission: crate::types::memory_types::MemoryPermission::ReadWrite,
                                 pinned: false,
-                                created_at: Utc::now(),
-                                updated_at: Utc::now(),
+                                created_at: Timestamp::now(),
+                                updated_at: Timestamp::now(),
                             },
-                            // Another unpinned block.
                             BlockMetadata {
                                 id: "ephemeral-2".to_string(),
                                 agent_id: "test-agent".to_string(),
                                 label: "user_profile".to_string(),
                                 description: "User profile block".to_string(),
-                                block_type: BlockType::Working,
+                                block_type: MemoryBlockType::Working,
                                 schema: BlockSchema::text(),
                                 char_limit: 2000,
-                                permission: pattern_db::models::MemoryPermission::ReadWrite,
+                                permission: crate::types::memory_types::MemoryPermission::ReadWrite,
                                 pinned: false,
-                                created_at: Utc::now(),
-                                updated_at: Utc::now(),
+                                created_at: Timestamp::now(),
+                                updated_at: Timestamp::now(),
                             },
-                            // Pinned block - should always be included.
                             BlockMetadata {
                                 id: "pinned-1".to_string(),
                                 agent_id: "test-agent".to_string(),
                                 label: "pinned_config".to_string(),
                                 description: "Pinned configuration".to_string(),
-                                block_type: BlockType::Working,
+                                block_type: MemoryBlockType::Working,
                                 schema: BlockSchema::text(),
                                 char_limit: 2000,
-                                permission: pattern_db::models::MemoryPermission::ReadWrite,
+                                permission: crate::types::memory_types::MemoryPermission::ReadWrite,
                                 pinned: true,
-                                created_at: Utc::now(),
-                                updated_at: Utc::now(),
+                                created_at: Timestamp::now(),
+                                updated_at: Timestamp::now(),
                             },
                         ])
                     }
                 }
-                _ => Ok(Vec::new()),
+                None => Ok(Vec::new()),
             }
         }
 
-        async fn list_all_blocks_by_label_prefix(
-            &self,
-            _prefix: &str,
-        ) -> MemoryResult<Vec<BlockMetadata>> {
-            Ok(Vec::new())
-        }
-
-        async fn delete_block(&self, _agent_id: &str, _label: &str) -> MemoryResult<()> {
+        fn delete_block(&self, _scope: &Scope, _label: &str) -> MemoryResult<()> {
             Ok(())
         }
 
-        async fn get_rendered_content(
+        fn get_rendered_content(
             &self,
-            _agent_id: &str,
+            _scope: &Scope,
             label: &str,
         ) -> MemoryResult<Option<String>> {
-            // Return mock content based on label.
             Ok(Some(format!("Content for {}", label)))
         }
 
-        async fn persist_block(&self, _agent_id: &str, _label: &str) -> MemoryResult<()> {
+        fn persist_block(&self, _scope: &Scope, _label: &str) -> MemoryResult<()> {
             Ok(())
         }
 
-        fn mark_dirty(&self, _agent_id: &str, _label: &str) {}
+        fn mark_dirty(&self, _scope: &Scope, _label: &str) -> MemoryResult<()> {
+            Ok(())
+        }
 
-        async fn insert_archival(
+        fn insert_archival(
             &self,
-            _agent_id: &str,
+            _scope: &Scope,
             _content: &str,
             _metadata: Option<JsonValue>,
         ) -> MemoryResult<String> {
             Ok("test-archival-id".to_string())
         }
 
-        async fn search_archival(
+        fn search_archival(
             &self,
-            _agent_id: &str,
+            _scope: &Scope,
             _query: &str,
             _limit: usize,
         ) -> MemoryResult<Vec<ArchivalEntry>> {
             Ok(Vec::new())
         }
 
-        async fn delete_archival(&self, _id: &str) -> MemoryResult<()> {
+        fn delete_archival(&self, _id: &str) -> MemoryResult<()> {
             Ok(())
         }
 
-        async fn search(
+        fn search(
             &self,
-            _agent_id: &str,
             _query: &str,
             _options: SearchOptions,
+            _scope: MemorySearchScope,
         ) -> MemoryResult<Vec<MemorySearchResult>> {
             Ok(Vec::new())
         }
 
-        async fn search_all(
-            &self,
-            _query: &str,
-            _options: SearchOptions,
-        ) -> MemoryResult<Vec<MemorySearchResult>> {
+        fn list_shared_blocks(&self, _scope: &Scope) -> MemoryResult<Vec<SharedBlockInfo>> {
             Ok(Vec::new())
         }
 
-        async fn list_shared_blocks(&self, _agent_id: &str) -> MemoryResult<Vec<SharedBlockInfo>> {
-            Ok(Vec::new())
-        }
-
-        async fn get_shared_block(
+        fn get_shared_block(
             &self,
-            _requester_agent_id: &str,
-            _owner_agent_id: &str,
+            _requester: &Scope,
+            _owner: &Scope,
             _label: &str,
         ) -> MemoryResult<Option<StructuredDocument>> {
             Ok(None)
         }
 
-        async fn set_block_pinned(
+        fn update_block_metadata(
             &self,
-            _agent_id: &str,
+            _scope: &Scope,
             _label: &str,
-            _pinned: bool,
+            _patch: BlockMetadataPatch,
         ) -> MemoryResult<()> {
             Ok(())
         }
 
-        async fn set_block_type(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _block_type: BlockType,
-        ) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn update_block_schema(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _schema: BlockSchema,
-        ) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn undo_block(&self, _agent_id: &str, _label: &str) -> MemoryResult<bool> {
+        fn undo_redo(&self, _scope: &Scope, _label: &str, _op: UndoRedoOp) -> MemoryResult<bool> {
             Ok(false)
         }
 
-        async fn redo_block(&self, _agent_id: &str, _label: &str) -> MemoryResult<bool> {
-            Ok(false)
-        }
-
-        async fn undo_depth(&self, _agent_id: &str, _label: &str) -> MemoryResult<usize> {
-            Ok(0)
-        }
-
-        async fn redo_depth(&self, _agent_id: &str, _label: &str) -> MemoryResult<usize> {
-            Ok(0)
+        fn history_depth(&self, _scope: &Scope, _label: &str) -> MemoryResult<UndoRedoDepth> {
+            Ok(UndoRedoDepth { undo: 0, redo: 0 })
         }
     }
 }

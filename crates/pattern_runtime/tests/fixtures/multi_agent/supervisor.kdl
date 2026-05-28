@@ -1,0 +1,35 @@
+// supervisor.kdl — multi-agent smoke test supervisor persona.
+//
+// Full capability set for coordination: fronting control, spawn, constellation,
+// memory, and message routing. Used by tests/multi_agent_smoke.rs (Phase 7 T5).
+
+name "supervisor"
+agent-id "smoke-supervisor"
+
+system-prompt "You are the supervisor. Delegate tasks and collect results."
+
+model provider="anthropic" model-id="claude-sonnet-4-6" {
+    temperature 0.0
+    max-tokens 256
+}
+
+capabilities {
+    effects {
+        memory
+        message
+        spawn
+        constellation
+    }
+    flags {
+        fronting-control
+        spawn-new-identities
+    }
+}
+
+memory {
+    persona content="Supervisor for multi-agent smoke test." {
+        memory-type "core"
+        permission "read_only"
+        pinned true
+    }
+}

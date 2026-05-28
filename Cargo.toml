@@ -1,6 +1,23 @@
 [workspace]
-resolver = "2"
-members = ["crates/*"]
+resolver = "3"
+members = [
+    "crates/pattern_core",
+    "crates/pattern_memory",
+    "crates/pattern_runtime",
+    "crates/pattern_provider",
+    "crates/pattern_db",
+    "crates/pattern_cli",
+    "crates/pattern_server",
+    "crates/pattern_plugin_sdk",
+]
+exclude = [
+    # Smoke fixture for AC6.8 dep-tree assertion. Must NOT share workspace lockfile —
+    # the whole point is to verify the SDK builds lean as a standalone consumer.
+    "crates/pattern_plugin_sdk/tests/fixtures/minimal_plugin",
+    # First-party plugins: standalone crates with their own target/ + lockfile.
+    # Dogfoods the install path (`pattern plugin install ./` reads marketplace.kdl).
+    "plugins/discord",
+]
 
 
 [workspace.package]
@@ -26,7 +43,6 @@ toml = "0.8"
 # Error handling
 miette = { version = "7.2", features = ["derive"] }
 thiserror = "1.0"
-anyhow = "1.0"
 
 # Logging
 tracing = "0.1"
@@ -37,31 +53,34 @@ tracing-subscriber = { version = "0.3", features = [
     "local-time",
 ] }
 
-# Database
-surrealdb = { version = "2.3", default-features = false, features = [
-    "kv-surrealkv",
-    "kv-mem",
-    "protocol-ws",
-    "rustls",
-    "jwks",
-] }
+# Observability (counter/gauge/histogram facade; recorder wired at binary level).
+metrics = "0.24"
 
 # AI/LLM
-# Using fork with OAuth support (system prompt array format)
+# Using fork with pattern-v3-foundation patches: per-block cache_control on
+# system prompts (`SystemBlock` / `ChatRequest::system_blocks`) and
+# `claude-opus-4-7` in the reasoning-support arrays. Path dep during v3
+# foundation for ease of dual-iteration; tracked for conversion to git-rev
+# dep in the post-foundation dep-hardening plan.
+# genai = { path = "../rust-genai" }
 genai = { git = "https://github.com/orual/rust-genai" }
-#genai = { path = "../rust-genai" }
 # genai = { git = "https://github.com/jeremychone/rust-genai" }
 
 # Utilities
 uuid = { version = "1.10", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+jiff = { version = "0.2", features = ["serde"] }
+smol_str = { version = "0.3", features = ["serde"] }
 async-trait = "0.1"
 futures = "0.3"
 once_cell = "1.20"
 parking_lot = "0.12"
+dashmap = "6"
 dirs = "5.0"
 
 # HTTP/Web
+html2md = { package = "fast_html2md", version = "0.0.62" }
+scraper = "0.22"
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
@@ -72,6 +91,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
     "gzip",
+    "brotli",
     "zstd",
     "deflate",
 ] }
@@ -94,9 +114,15 @@ serenity = { version = "0.12", default-features = false, features = [
 
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk.git" } # MCP
 
+saphyr = "0.0.6"
+
 # Testing
 mockall = "0.13"
 pretty_assertions = "1.4"
+insta = "1.40"
+
+# TUI markdown rendering
+tui-markdown = "0.3"
 
 # Additional workspace-level dependencies for binary features
 clap = { version = "4.5", features = ["derive"] }
@@ -116,6 +142,43 @@ argon2 = "0.5"
 axum-extra = { version = "0.9", default-features = false }
 rand = "0.8"
 
+# pattern_provider — Phase 4 additions
+keyring = { version = "3", default-features = false, features = [
+    "linux-native-sync-persistent",
+    "apple-native",
+    "windows-native",
+] }
+whoami = "1"
+governor = "0.8"
+secrecy = { version = "0.10", features = ["serde"] }
+sha2 = "0.10"
+# pattern_runtime — stable content hashing for snapshot delta detection.
+# Purpose-built non-crypto hash: faster than sha2, stable across
+# platforms + compiler versions. Required for correct session-resume
+# behaviour if/when active TurnHistory turns gain persistence (not
+# today, but future-proofing — see RenderedBlock.content_hash).
+blake3 = "1"
+arboard = { version = "3", features = ["wayland-data-control"] }
+base64 = "0.22"
+unicode-width = "0.2"
+url = "2"
+serde_urlencoded = "0.7"
+
+# Regex for GHC error location parsing (pattern_runtime lib_modules).
+regex = "1"
+
+# IRPC daemon transport
+irpc = "0.15"
+irpc-iroh = "0.15"
+iroh = "=1.0.0-rc.0"
+postcard = { version = "1", features = ["alloc"] }
+noq = "0.18"
+n0-future = "0.3"
+
+# dev-only
+wiremock = "0.6"
+tempfile = "3"
+
 cid = { version = "0.11", features = ["serde-codec"] }
 multihash = { version = "0.19" }
 multihash-codetable = { version = "0.1", features = ["blake3"] }
@@ -123,7 +186,7 @@ ipld-core = "0.4.2"
 serde_cbor = "0.11.2"
 serde_ipld_dagcbor = { version = "0.6.1", features = ["codec"] }
 
-jacquard = { version  = "0.9", git = "https://tangled.org/@nonbinary.computer/jacquard", features = ["websocket", "zstd", "tracing"] }
+jacquard = { version  = "0.12.0-beta.2", features = ["websocket", "zstd", "tracing"] }
 
 atrium-xrpc = "0.12.3"
 atrium-api = "0.25.3"
@@ -132,11 +195,66 @@ atrium-identity = "0.1.3"
 atrium-oauth = "0.1.1"
 bsky-sdk = { version = "0.1.20", features = ["default-client"] }
 
+# Tidepool: Haskell-in-Rust JIT runtime. Path deps during the v3 rewrite
+# for ease of dual-iteration; tracked for conversion to git-rev deps
+# (or upstream crates.io releases) in the post-foundation dep-hardening plan.
+tidepool-runtime = { git = "https://github.com/orual/tidepool.git" }
+tidepool-codegen = { git = "https://github.com/orual/tidepool.git" }
+tidepool-effect  = { git = "https://github.com/orual/tidepool.git" }
+tidepool-bridge  = { git = "https://github.com/orual/tidepool.git" }
+tidepool-bridge-derive = { git = "https://github.com/orual/tidepool.git" }
+tidepool-repr    = { git = "https://github.com/orual/tidepool.git" }
+tidepool-eval    = { git = "https://github.com/orual/tidepool.git" }
+tidepool-testing = { git = "https://github.com/orual/tidepool.git" }
+frunk = "0.4"
+
+# Test utilities
+tracing-test = "0.2"
+
+# Binary/process utilities
+which = "8.0"
+
+# Fuzzy matching
+nucleo = "0.5"
+
+# Unicode-aware case-insensitive comparison (already a transitive dep via
+# mime_guess + pulldown-cmark; adding directly for explicit use in
+# constellation handle resolution and sibling slug comparison).
+unicase = "2"
+
+# Glob pattern matching for FilePolicy (v3-sandbox-io Phase 2).
+globset = "0.4"
+
+# Template rendering (zellij layout generation)
+askama = "0.15"
+
+# KDL parsing — core to persona discovery, .pattern.kdl config, block file
+# storage, and zellij layout validation. `v1-fallback` is load-bearing:
+# knus (used by the persona loader) accepts KDL v1 syntax permissively, so
+# user-authored configs commonly use v1 idioms like bare `true`/`false`.
+# Without v1-fallback, the v6 parser strict-rejects those, and the daemon
+# silently fails persona discovery while CLI/tests pass via feature
+# unification. Every crate that depends on kdl MUST use `workspace = true`
+# so this feature attaches to its direct edge — do not declare a bare
+# `kdl = "6"` per-crate dep.
+kdl = { version = "6", features = ["v1-fallback"] }
+
+# Codex OAuth: loopback HTTP listener (sync, single-purpose) + browser open
+# helper + advisory cross-process file lock for credential storage.
+tiny_http = "0.12"
+open = "5"
+fs4 = { version = "0.13", features = ["sync"] }
+
 
 [workspace.lints.clippy]
 mod_module_files = "warn"
 manual_range_contains = "allow"
 
+[profile.dev.package.tidepool-runtime]
+opt-level = 2
 
-[profile.dev.package."surrealdb"]
+[profile.dev.package.tidepool-codegen]
+opt-level = 2
+
+[profile.dev.package.tidepool-eval]
 opt-level = 2

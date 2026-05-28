@@ -1,0 +1,80 @@
+# smoke_persona.toml — minimal viable persona for Phase 6 smoke-test runs.
+#
+# Loadable end-to-end via `pattern-test-cli spawn` and drives a real
+# TidepoolSession against Claude. Keep this file minimal: it exercises the
+# full loader code path without requiring any external sidecar files.
+#
+# Usage:
+#   cargo run --bin pattern-test-cli -- spawn crates/pattern_runtime/tests/fixtures/smoke_persona.toml
+
+name     = "orual-smoke-test"
+agent_id = "orual-smoke-test"
+
+# Slot-[1] system prompt override. Replaces DEFAULT_BASE_INSTRUCTIONS in the
+# three-segment cache layout when present.
+system_prompt = "You are a minimal smoke-test assistant for the Pattern project. Be concise."
+
+# --------------------------------------------------------------------------
+# Model selection and sampling parameters
+# --------------------------------------------------------------------------
+
+[model]
+provider    = "anthropic"
+model_id    = "claude-sonnet-4-6"
+temperature = 0.7
+max_tokens  = 4096
+
+# --------------------------------------------------------------------------
+# Context policy
+# --------------------------------------------------------------------------
+
+[context]
+# Cheap short-circuit: don't even call should_compress until history has
+# 50+ active turns. Avoids count_tokens round-trips on early turns.
+compress_check_message_floor = 50
+
+# Real gate: when active-context tokens exceed this, the strategy fires.
+# 150k leaves plenty of headroom below claude-sonnet-4-6's 200k context
+# window for output tokens + buffer.
+compress_token_threshold = 150_000
+
+# Mid-batch delta snapshot behaviour.
+# "include_self_edits" (default) — emit delta for all mid-batch changes,
+#   including this turn's own tool writes. Strongest agent trust signal.
+# "filter_self_edits" — skip self-edit deltas; agent relies on tool_result
+#   confirmation. Cache-efficient but less explicit.
+mid_batch = "filter_self_edits"
+
+# RecursiveSummarization is the default agent-session compression path:
+# summarize old turns into a dense prose summary rather than truncating.
+# summarization_model can differ from the primary model — haiku is
+# sensible for cost.
+[context.compression]
+type                 = "recursive_summarization"
+chunk_size           = 20
+summarization_model  = "claude-haiku-4-5"
+
+# --------------------------------------------------------------------------
+# Runtime budgets (Tidepool JIT)
+# --------------------------------------------------------------------------
+
+[budgets]
+wall_ms = 30_000
+cpu_ms  = 10_000
+
+# --------------------------------------------------------------------------
+# Initial memory blocks
+# --------------------------------------------------------------------------
+
+# Core persona identity block (always in context, never evicted).
+[memory.persona]
+content     = "I am a minimal smoke-test persona for the Pattern project. My purpose is to verify that the persona loader, session open, and provider call chain all work end-to-end."
+memory_type = "core"
+permission  = "read_only"
+pinned      = true
+
+# Working scratchpad (active working memory, may be swapped out).
+[memory.scratchpad]
+content     = "Scratch space for the current session."
+memory_type = "working"
+permission  = "read_write"

@@ -1,0 +1,8 @@
+---
+source: crates/pattern_cli/src/tui/conversation.rs
+expression: output
+---
+line two
+line three
+line four
+line five

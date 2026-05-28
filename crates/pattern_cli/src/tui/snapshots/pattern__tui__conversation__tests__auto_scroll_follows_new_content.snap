@@ -1,0 +1,10 @@
+---
+source: crates/pattern_cli/src/tui/conversation.rs
+expression: output
+---
+Stop: EndTurn
+
+[you] Question 9
+
+Answer 9.
+Stop: EndTurn

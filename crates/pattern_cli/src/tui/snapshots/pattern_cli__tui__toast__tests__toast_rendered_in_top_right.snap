@@ -1,0 +1,5 @@
+---
+source: crates/pattern_cli/src/tui/toast.rs
+expression: output
+---
+                                  hello

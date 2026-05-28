@@ -1,0 +1,66 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
+//! The `PluginExtension` trait — runtime-facing plugin contract.
+
+use async_trait::async_trait;
+
+use std::sync::Arc;
+
+use crate::hooks::event::{HookEvent, HookResponse};
+use crate::traits::port::Port;
+use super::types::{PluginContext, PluginError};
+
+/// Plugin trait. Every plugin — native IRPC, CC adapter, MCP adapter —
+/// implements this.
+///
+/// Lifecycle methods (`on_install`, `on_enable`, `on_disable`) are async
+/// because plugin code may await network/IO. Event dispatch (`on_event`)
+/// is sync — it operates against an already-extracted `HookEvent` payload.
+#[async_trait]
+pub trait PluginExtension: Send + Sync + std::fmt::Debug {
+    /// Port impls this plugin provides. For in-process plugins (CC adapter,
+    /// native in-tree), the daemon registers these `Arc<dyn Port>` directly
+    /// into the `PortRegistry`. For out-of-process plugins, the same impls live
+    /// inside the plugin process — the SDK's guest handler routes incoming
+    /// `PortCall` / `PortSubscribe` wire messages to them via `Port.id()`
+    /// lookup; the daemon side builds wire-backed proxies from
+    /// `WirePortDeclaration`s derived from each port's metadata.
+    fn ports(&self) -> Vec<Arc<dyn Port>> {
+        Vec::new()
+    }
+
+    /// Optional Haskell library text spliced into agent prelude when enabled.
+    fn library(&self) -> Option<&str> {
+        None
+    }
+
+    /// Lifecycle: install. Called once when added to the registry.
+    async fn on_install(&self, ctx: &PluginContext) -> Result<(), PluginError> {
+        let _ = ctx;
+        Ok(())
+    }
+
+    /// Lifecycle: enable. Called when bound to a session/runtime context.
+    async fn on_enable(&self, ctx: &PluginContext) -> Result<(), PluginError> {
+        let _ = ctx;
+        Ok(())
+    }
+
+    /// Lifecycle: disable. Called when detached or session ends.
+    async fn on_disable(&self, ctx: &PluginContext) -> Result<(), PluginError> {
+        let _ = ctx;
+        Ok(())
+    }
+
+    /// Hook event handler. Called when a HookEvent matches this plugin's
+    /// registered tag globs. Returns `Some(HookResponse)` for blocking events;
+    /// `None` for notifications.
+    fn on_event(&self, event: &HookEvent) -> Option<HookResponse> {
+        let _ = event;
+        None
+    }
+}

@@ -1,17 +1,22 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Migration audit models.
 //!
 //! Tracks v1 → v2 migration decisions and issues for debugging and rollback.
 
+use crate::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-use sqlx::types::Json;
 
 /// Record of a v1 to v2 migration operation.
 ///
 /// Each CAR file import creates an audit record tracking what was imported,
 /// any issues found, and how they were resolved.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigrationAudit {
     /// Unique identifier
     pub id: String,
@@ -105,8 +110,10 @@ pub struct MigrationIssue {
 /// Migration issue severity levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum IssueSeverity {
     /// Informational, no action needed
+    #[default]
     Info,
     /// Warning, migration continued but may need review
     Warning,
@@ -114,10 +121,4 @@ pub enum IssueSeverity {
     Error,
     /// Critical, migration may be incomplete
     Critical,
-}
-
-impl Default for IssueSeverity {
-    fn default() -> Self {
-        Self::Info
-    }
 }

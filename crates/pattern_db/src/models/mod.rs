@@ -1,9 +1,16 @@
+// Copyright 2026 Pattern contributors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
 //! Database models.
 //!
-//! These structs map directly to database tables via sqlx.
+//! These structs map directly to database tables. Row structs gain
+//! inherent `fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self>`
+//! methods as queries are ported (Tasks 6-9).
 
 mod agent;
-mod coordination;
 mod event;
 mod folder;
 mod memory;
@@ -13,12 +20,8 @@ mod source;
 mod task;
 
 pub use agent::{
-    Agent, AgentAtprotoEndpoint, AgentGroup, AgentStatus, ENDPOINT_TYPE_BLUESKY, GroupMember,
-    GroupMemberRole, ModelRoutingConfig, ModelRoutingRule, PatternType, RoutingCondition,
-};
-pub use coordination::{
-    ActivityEvent, ActivityEventType, AgentSummary, ConstellationSummary, CoordinationState,
-    CoordinationTask, EventImportance, HandoffNote, NotableEvent, TaskPriority, TaskStatus,
+    Agent, AgentAtprotoEndpoint, AgentStatus, ENDPOINT_TYPE_BLUESKY, ModelRoutingConfig,
+    ModelRoutingRule, RoutingCondition,
 };
 pub use event::{Event, EventOccurrence, OccurrenceStatus};
 pub use folder::{FilePassage, Folder, FolderAccess, FolderAttachment, FolderFile, FolderPathType};
@@ -31,4 +34,4 @@ pub use migration::{
     EntityImport, IssueSeverity, MigrationAudit, MigrationIssue, MigrationLog, MigrationStats,
 };
 pub use source::{AgentDataSource, DataSource, SourceType};
-pub use task::{Task, TaskSummary, UserTaskPriority, UserTaskStatus};
+pub use task::{Task, UserTaskStatus};

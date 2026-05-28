@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f3815e0f256a3f153aa634ef86bfff54991f676bdfaba3dd6b23052df3426336 # shrinks to meta = SkillMetadata { name: "a", trust_tier: FirstParty, description: None, keywords: ["0o0"], hooks: Null }, extras = Map(LoroMapValue({})), body = ""

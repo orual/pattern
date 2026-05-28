@@ -1,0 +1,10 @@
+---
+source: crates/pattern_cli/src/tui/panel.rs
+assertion_line: 327
+expression: output
+---
+ thinking ────────────────────
+Let me consider the options
+carefully...
+Option A is good.
+Option B is better.
